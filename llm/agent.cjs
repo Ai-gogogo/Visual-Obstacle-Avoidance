@@ -87,6 +87,16 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     }
   }
 
+  async function itemFeatures(scene, objects) {
+    const features = objects.map(object => object.item_feature);
+    const missing = features.flatMap((feature,index) => feature ? [] : [index]);
+    if (missing.length) {
+      const extracted = await extract('item', scene.frame, missing.map(index => objects[index].bbox));
+      missing.forEach((index, i) => { features[index] = extracted.features[i]; });
+    }
+    return features;
+  }
+
   function stage(session, data, isChinese) {
     const pending = {...data, id:randomUUID(), until:Date.now()+60_000};
     session.pending = pending;
@@ -157,9 +167,9 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     const centered = objects.filter(object => object.position === 'center');
     const target = objects.length === 1 ? objects[0] : centered.length === 1 ? centered[0] : null;
     if (!target) return output(isChinese ? '请把要登记的物品单独放在画面中央。' : 'Center one item to register it.', 'unavailable');
-    const {features} = await extract('item', scene.frame, [target.bbox]);
-    if (!features[0]) return output(isChinese ? '物品太小，请靠近一些。' : 'The item is too small. Move the camera closer.', 'unavailable');
-    return stage(session, {kind,name,label:target.label,feature:features[0]}, isChinese);
+    const [feature] = await itemFeatures(scene, [target]);
+    if (!feature) return output(isChinese ? '物品太小，请靠近一些。' : 'The item is too small. Move the camera closer.', 'unavailable');
+    return stage(session, {kind,name,label:target.label,feature}, isChinese);
   }
 
   async function identify(session, side, isChinese) {
@@ -187,7 +197,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     const scene = detections(session.slots[side]);
     const objects = scene?.objects.filter(object => object.label === item.label && object.confidence >= 0.5) || [];
     if (objects.length) {
-      const {features} = await extract('item', scene.frame, objects.map(object => object.bbox));
+      const features = await itemFeatures(scene, objects);
       const options = records('item').filter(row => row.label === item.label);
       const matches = features.flatMap((feature,index) => {
         if (!feature) return [];

@@ -4,6 +4,13 @@ const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 
+function validItemFeature(feature) {
+  return feature?.version === 'spatial-hsv-v1' &&
+    Array.isArray(feature.vector) && feature.vector.length === 540 &&
+    feature.vector.every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
+    Math.abs(feature.vector.reduce((sum,value) => sum + value * value,0) - 1) <= 0.001;
+}
+
 function parseObjects(objects) {
   if (!Array.isArray(objects) || objects.length > 40) return null;
   const results = [];
@@ -13,10 +20,14 @@ function parseObjects(objects) {
         !Array.isArray(entry.bbox) || entry.bbox.length !== 4 ||
         !entry.bbox.every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
         entry.bbox[0] >= entry.bbox[2] || entry.bbox[1] >= entry.bbox[3]) return null;
-    results.push({label:entry.label.toLowerCase(),position:entry.position,bbox:entry.bbox,confidence:entry.confidence,
+    const label = entry.label.toLowerCase();
+    const itemFeature = label !== 'person' && entry.confidence >= 0.5 && validItemFeature(entry.item_feature)
+      ? {version:entry.item_feature.version,vector:entry.item_feature.vector} : null;
+    results.push({label,position:entry.position,bbox:entry.bbox,confidence:entry.confidence,
       relative_depth:['near','far'].includes(entry.relative_depth) ? entry.relative_depth : 'unknown',
       track_id:typeof entry.track_id === 'string' || Number.isSafeInteger(entry.track_id) ? String(entry.track_id).slice(0,80) : null,
       ...(typeof entry.obstacle_candidate === 'boolean' ? {obstacle_candidate:entry.obstacle_candidate} : {}),
+      ...(itemFeature ? {item_feature:itemFeature} : {}),
       risk:['caution','urgent'].includes(entry.risk) ? entry.risk : 'normal'});
   }
   return results;
@@ -58,7 +69,7 @@ function createAgentRoutes(options, sessions, read, respond) {
     return error(res,404,'Unknown CV route.');
 
     async function publish() {
-      const payload = await asJSON(req,24_000);
+      const payload = await asJSON(req,600_000);
       const objects = parseObjects(payload?.objects);
       if (!objects || typeof payload.frame_id !== 'string') return error(res,400,'Invalid detections.');
       const captured = slot.cvFrames?.get(payload.frame_id);

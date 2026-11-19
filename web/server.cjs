@@ -136,7 +136,8 @@ function createServer(options = {}) {
         const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
-        return respond(res,200,{frame_id, jpeg:frame.toString('base64'), objects:detection?.objects ?? null});
+        const objects = detection?.objects.map(({item_feature, ...object}) => object) ?? null;
+        return respond(res,200,{frame_id, jpeg:frame.toString('base64'), objects});
       }
       if (method === 'POST' && action === 'pair') {
         for (const [code, entry] of codes) if (entry.session === token && entry.slot === side) codes.delete(code);

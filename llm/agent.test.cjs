@@ -29,6 +29,10 @@ test('a habit is private until confirmation, persists after restart and can be d
 
 test('paired camera, exact-frame YOLO, alerts, assisted vision and local model adapters', async t => {
   const generated = [];
+  const itemFeature = index => ({
+    version:'spatial-hsv-v1', vector:Array.from({length:540},(_,i) => Number(i === index))
+  });
+  let itemExtractions = 0;
   const worker = async (mode,data) => {
     if (mode === 'stt') {
       assert.equal(data.language,'en');
@@ -43,6 +47,10 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
       return {audio:Buffer.from('RIFF mocked WAV').toString('base64')};
     }
     const unknown = Buffer.from(data.image,'base64')[2] === 9;
+    if (mode === 'item') {
+      itemExtractions++;
+      return {features:data.boxes.map(() => itemFeature(unknown ? 1 : 0))};
+    }
     return {features:[{version:'test',vector:unknown ? [0,1] : [1,0]}]};
   };
   const generate = async (messages,image) => {
@@ -110,9 +118,21 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   const item = await chat('这个水杯是我的');
   assert.ok(item.confirmation);
   assert.match((await chat('确认')).reply_text,/保存/);
+  assert.equal(itemExtractions,1);
+  await push(phone,3);
+  const featureFrame = (await call('/api/cv/frame'+query)).headers.get('etag').slice(1,-1);
+  const featured = {...objects[0],item_feature:itemFeature(0)};
+  assert.equal((await publish(featureFrame,[featured])).status,204);
+  const featuredPreview = await json(await call('/api/preview/A',{token:desk}),200);
+  assert.equal(featuredPreview.objects[0].item_feature,undefined);
   const live = await chat('我的水杯在哪里？');
   assert.equal(live.source,'camera');
   assert.equal(live.observation.position,'center');
+  assert.equal(itemExtractions,1);
+  const cvEnrollment = await chat('这个蓝杯是我的');
+  assert.ok(cvEnrollment.confirmation);
+  assert.equal(itemExtractions,1);
+  await chat('取消');
   assert.equal((await chat('Who is this?')).reply_text,'No people are enrolled.');
   await push(phone,3);
   const person = await chat('登记亲友 小林，哥哥');

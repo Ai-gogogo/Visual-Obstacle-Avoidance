@@ -12,7 +12,11 @@ from threading import Event, Lock
 import requests
 from PIL import Image, ImageOps
 
+import cv2
+import numpy as np
+
 from detect_image import DEFAULT_WEIGHTS, detect
+from item_features import item_features
 from obstacles import is_obstacle_candidate
 from risk import RiskAssessment
 from tracking import FrameTracker
@@ -79,6 +83,12 @@ class CameraWorker:
             else:
                 for obj in objects:
                     obj["risk"] = "normal"
+            items = [obj for obj in objects if obj["label"] != "person" and obj["confidence"] >= 0.5]
+            if items:
+                bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+                for obj, feature in zip(items, item_features(bgr, [obj["bbox"] for obj in items])):
+                    if feature:
+                        obj["item_feature"] = feature
             self.pending[source] = (etag, objects)
         result = self.http.post(self.api + "/detections", params=params, timeout=3,
                                 json={"frame_id": etag.strip('"'), "objects": objects})

@@ -120,3 +120,19 @@ for each paired camera stream and reuses the result when retrying the same frame
 These image-space thresholds are intended for controlled demos with a forward-facing camera.
 Relative depth represents ordering within one image. A `normal` result means this rule did
 not confirm a hazard.
+
+## Personal-item features
+
+The live worker extracts a versioned `spatial-hsv-v1` descriptor from each eligible
+object's box in the exact frame sent to YOLO. An eligible detection has confidence
+at least 0.50, a crop at least 24 pixels on each side, and a label other than
+`person`. The optional same-frame payload field is
+`item_feature: { "version": "spatial-hsv-v1", "vector": [...] }`, with 540
+normalized values. The Agent uses it for enrollment and matching with existing
+saved samples and computes missing descriptors from the same JPEG when needed.
+Dashboard preview responses omit the descriptor.
+
+To try it, center one detectable object, say “这个水杯是我的”, confirm, then ask
+“我的水杯在哪里？”. Try a differently colored object of the same YOLO class as
+well. This descriptor distinguishes color layouts and can confuse objects with
+similar appearances or react to lighting changes.
