@@ -3,3 +3,4 @@ torch==2.9.0
 torchvision==0.24.0
 opencv-python<5
 Pillow>=10.1
+requests>=2.32,<3
