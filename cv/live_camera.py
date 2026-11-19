@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import csv
 import io
 import sys
+from functools import partial
 from itertools import count
 from pathlib import Path
 from threading import Event, Lock
@@ -23,11 +24,12 @@ from tracking import FrameTracker
 
 
 class CameraWorker:
-    def __init__(self, server, model, session, side="A", record=None):
+    def __init__(self, server, model, session, side="A", record=None, *, infer=None):
         self.side = side
         self.record = record
         self.api = server.rstrip("/") + "/api/cv"
         self.model = model
+        self.infer = infer
         self.http = session
         self.etags = {}
         self.trackers = {}
@@ -38,12 +40,14 @@ class CameraWorker:
     def poll(self):
         sources = self.http.get(self.api + "/sources", timeout=3)
         sources.raise_for_status()
-        active = {s["source_id"] for s in sources.json()["sources"] if s["camera_id"] == self.side}
+        active = {s["source_id"]: s.get("frame_id") for s in sources.json()["sources"]
+                  if s["camera_id"] == self.side}
         for cache in (self.etags, self.trackers, self.risk_assessments, self.pending):
-            for source in cache.keys() - active:
+            for source in cache.keys() - active.keys():
                 del cache[source]
-        for source in active:
-            self.process_frame(source)
+        for source, frame_id in active.items():
+            if frame_id is None or self.etags.get(source) != f'"{frame_id}"':
+                self.process_frame(source)
 
     def process_frame(self, source):
         params = {"source_id": source, "camera_id": self.side}
@@ -67,7 +71,7 @@ class CameraWorker:
                 print(f"Skipping unreadable Camera {self.side} frame: {error}", file=sys.stderr)
                 return
 
-            objects = detect(self.model, image)
+            objects = self.infer(image) if self.infer else detect(self.model, image)
             stream = frame.headers.get("X-CV-Stream-Id")
             frame_stamp = frame.headers.get("X-CV-Frame-Ms")
             stamp = int(frame_stamp) if frame_stamp is not None else None
@@ -110,13 +114,13 @@ class CameraWorker:
 CameraAWorker = CameraWorker
 
 
-def watch(worker, stop):
+def watch(worker, stop, interval):
     last_error = None
     while not stop.is_set():
         try:
             worker.poll()
             last_error = None
-            stop.wait(0.15)
+            stop.wait(interval)
         except requests.RequestException as error:
             message = str(error)
             if message != last_error:
@@ -125,17 +129,70 @@ def watch(worker, stop):
             stop.wait(1)
 
 
+def resolve_device(requested):
+    import torch
+
+    if requested == "auto":
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    if requested == "cpu":
+        return requested
+    if requested == "cuda":
+        requested = "cuda:0"
+    kind, _, index = requested.partition(":")
+    if kind == "cuda" and index.isascii() and index.isdecimal() and int(index) < torch.cuda.device_count():
+        return f"cuda:{int(index)}"
+    raise ValueError(f"Unavailable inference device {requested!r}. Use cpu or an available CUDA device.")
+
+
+def inference_options(parser):
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
+    parser.add_argument("--imgsz", type=int, default=640, help="YOLO input size, a multiple of 32")
+    parser.add_argument("--half", action="store_true", help="Opt in to FP16 on CUDA")
+    parser.add_argument("--cpu-threads", type=int, default=1, help="PyTorch intra-op threads per CPU inference")
+    parser.add_argument("--poll-ms", type=int, default=50, help="Milliseconds between discovery polls")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", default="http://127.0.0.1:8765",
                         help="VisionAssist server URL on this computer")
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--metrics", type=Path, help="New CSV file for accepted frames from both cameras")
+    inference_options(parser)
     args = parser.parse_args()
     if not args.weights.is_file():
         parser.error(f"Missing local weights: {args.weights}. See cv/README.md for setup.")
 
+    if args.imgsz < 32 or args.imgsz % 32 or args.cpu_threads < 1 or args.poll_ms < 1:
+        parser.error("Use a positive multiple of 32 for --imgsz and positive thread/poll values.")
+    try:
+        device = resolve_device(args.device)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.half and device == "cpu":
+        parser.error("--half requires CUDA.")
+
+    import torch
     from ultralytics import YOLO
+
+    if device == "cpu":
+        torch.set_num_threads(args.cpu_threads)
+    cv2.setNumThreads(1)
+    options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half)
+    if device == "cpu":
+        # Independent predictors let both camera threads use the CPU concurrently.
+        predictors = [partial(detect, YOLO(str(args.weights), task="detect"), **options) for _ in "AB"]
+    else:
+        # Ultralytics predictors hold mutable state. Serialize only inference on
+        # one resident GPU model; frame fetch and publication stay independent.
+        predictor = partial(detect, YOLO(str(args.weights), task="detect"), **options)
+        inference_lock = Lock()
+
+        def infer(image):
+            with inference_lock:
+                return predictor(image)
+
+        predictors = [infer, infer]
 
     stop = Event()
     with ExitStack() as stack:
@@ -152,13 +209,12 @@ def main():
                     writer.writerow(row)
                     output.flush()
 
-        # Each inference loop owns its own predictor, HTTP session and ETag cache.
-        workers = [CameraWorker(args.server, YOLO(str(args.weights), task="detect"),
-                                stack.enter_context(requests.Session()), side, record) for side in "AB"]
+        workers = [CameraWorker(args.server, None, stack.enter_context(requests.Session()),
+                                side, record, infer=infer) for side, infer in zip("AB", predictors)]
         with ThreadPoolExecutor(max_workers=2) as pool:
-            print(f"YOLO loaded. Watching cameras A and B at {args.server}. Ctrl+C to stop.", flush=True)
+            print(f"YOLO loaded. Watching cameras A and B on {device} at {args.server}. Ctrl+C to stop.", flush=True)
             try:
-                futures = [pool.submit(watch, worker, stop) for worker in workers]
+                futures = [pool.submit(watch, worker, stop, args.poll_ms / 1000) for worker in workers]
                 for future in as_completed(futures):
                     future.result()
             except KeyboardInterrupt:

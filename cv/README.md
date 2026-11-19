@@ -54,7 +54,7 @@ python cv/live_camera.py
 
 Open the dashboard at `http://localhost:8765/`, generate independent pairing codes for **Camera A** and **Camera B**, then open `/camera` on each device and enter its code. Either camera can run alone. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
 
-In Voice assistant, select **Camera A** or **Camera B** and ask “What is in front of me?” Each camera has a separate polling thread, resident YOLO model and HTTP session. Its frame cache is scoped to the dashboard source. Each result is submitted with the camera ID and the ETag of the JPEG actually processed. An unchanged frame skips inference. An empty prediction clears the object list. The Agent answers from the most recent accepted detection within the server’s five-second freshness window. Newer preview frames can arrive while inference runs. Re-pairing replaces the old camera slot. Leave the worker running to pick up the new stream, or stop it with Ctrl+C.
+In Voice assistant, select **Camera A** or **Camera B** and ask “What is in front of me?” Each camera has a separate polling thread and HTTP session. CPU mode uses independent YOLO models. CUDA mode shares one resident model between the two cameras. Its frame cache is scoped to the dashboard source. Each result is submitted with the camera ID and the ETag of the JPEG actually processed. An unchanged frame skips inference. An empty prediction clears the object list. The Agent answers from the most recent accepted detection within the server’s five-second freshness window. Newer preview frames can arrive while inference runs. Re-pairing replaces the old camera slot. Leave the worker running to pick up the new stream, or stop it with Ctrl+C.
 
 The live integration tests in `test_live_camera.py` replay JPEGs through the actual Node server and Agent with real YOLO weights. They exercise the running CLI, a camera change during inference, unchanged and expired frames, simultaneous feeds, B disconnecting while A continues, and re-pairing. Run them with the CV environment active and Node available:
 
@@ -95,17 +95,43 @@ Steps, raised surfaces, camera roll and occlusion can invalidate the contact cue
 
 ## Dual-camera performance
 
-To log accepted detections during a real run, use `python cv/live_camera.py --metrics /path/to/new.csv`. Each row identifies the source, camera and frame. Both timestamps used for latency come from the server: from receipt of the complete JPEG to acceptance of the matching detection. This includes waiting for the worker to poll, decoding, CPU inference and result submission. Phone capture, upload to the server and browser rendering occur outside this interval. Duplicate submissions do not add samples.
+To log accepted detections during a real run, use `python cv/live_camera.py --metrics /path/to/new.csv`. Each row identifies the source, camera and frame. Both timestamps used for latency come from the server: from receipt of the complete JPEG to acceptance of the matching detection. This includes waiting for the worker to poll, decoding, inference and result submission. Phone capture, upload to the server and browser rendering occur outside this interval. Duplicate submissions do not add samples.
+
+The live worker defaults to `--device auto`, which selects CUDA when the
+installed PyTorch can use it and otherwise selects CPU. The default input size
+is 640. CPU mode uses one PyTorch intra-op thread per inference by default. Resize
+with `--imgsz 512` or compare CPU thread counts with `--cpu-threads 2`. Use
+`--device cuda:0 --half` to compare FP16 with CUDA FP32. Check small-object
+detections before choosing a smaller resolution or FP16. Both cameras poll at
+50 ms by default and fetch JPEGs only when discovery reports a new frame;
+`--poll-ms` lets you trade polling traffic for latency.
 
 Run the isolated benchmark from the repository root:
 
 ```sh
-python cv/benchmark_dual_camera.py --output /tmp/visionassist-dual-run
+python cv/benchmark_dual_camera.py --device cpu --output /tmp/visionassist-cpu
+python cv/benchmark_dual_camera.py --device cuda:0 --half --output /tmp/visionassist-cuda
 ```
 
-It starts the normal worker and a private loopback server, pairs two simulated phones, and replays the bundled bus (A) and soccer (B) photos as JPEGs with a 640-pixel maximum edge and quality 70. Both streams submit a new frame every 220 ms. Measurement starts after both cameras return actual detections. Effective FPS is the number of distinct frames received and accepted within the same 30-second window divided by 30. Latency is summarized by median and nearest-rank P95.
+It starts the normal worker and a private loopback server, pairs two simulated phones, and replays the bundled bus (A) and soccer (B) photos as JPEGs with a 640-pixel maximum edge and quality 70. Both streams submit a new frame every 220 ms. Measurement starts after both cameras return actual detections. Effective FPS is the number of distinct frames received and accepted within the same 30-second window divided by 30. Latency is summarized by median and nearest-rank P95. On CUDA hosts with
+`nvidia-smi`, the summary includes sampled median GPU utilization and peak
+VRAM usage for each reported GPU. These are device-wide readings and include
+other processes on the GPU. CPU runs and runs without samples report `gpu: null`.
 
-The [saved baseline](results/dual-camera-baseline/summary.json) and [per-frame timings](results/dual-camera-baseline/frames.csv) are from one CPU run on this Mac. The input cadence limits the observed FPS. Physical phones and Wi-Fi may give different results.
+An earlier [Mac baseline](results/dual-camera-baseline/summary.json) is available with
+[per-frame timings](results/dual-camera-baseline/frames.csv). For this optimization,
+both versions were rerun on the same 2-vCPU Linux workspace with YOLO11n at 640
+and PyTorch 2.9.0 CPU. These are 30-second replay results with 137 uploads per
+camera and a theoretical input limit of about 4.55 FPS per camera.
+
+| Camera | Previous FPS | Current FPS | Previous median / P95 | Current median / P95 |
+| --- | ---: | ---: | ---: | ---: |
+| A | 3.73 | 4.53 | 231 / 366 ms | 121.5 / 162 ms |
+| B | 3.87 | 4.53 | 183 / 330 ms | 107.5 / 142 ms |
+
+The workspace had no CUDA GPU. CUDA and physical-phone results require a run
+on the deployment machine.
+
 
 ## Obstacle risk
 

@@ -113,7 +113,7 @@ class LiveCameraTests(unittest.TestCase):
             empty = self.scene()
             self.assertEqual(empty["source"], "yolo")
             self.assertIn("No confident objects", empty["reply_text"])
-            self.worker.poll()  # Unchanged frame, HTTP 304.
+            self.worker.poll()  # Discovery still reports the same frame.
             self.assertEqual(predict.call_count, 1)
 
     def test_relative_depth_in_each_camera_preview_and_agent(self):
