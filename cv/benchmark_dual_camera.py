@@ -5,6 +5,7 @@ import io
 import json
 import math
 import platform
+import shutil
 import statistics
 import subprocess
 import sys
@@ -18,6 +19,8 @@ import requests
 from PIL import Image
 from ultralytics.utils import ASSETS
 
+from live_camera import inference_options, resolve_device
+
 ROOT = Path(__file__).resolve().parents[1]
 WINDOW_SECONDS = 30
 PERIOD = 0.22
@@ -30,7 +33,7 @@ def start(stack, command, **kwargs):
     return proc
 
 
-def measure(temp):
+def measure(temp, args, device):
     with ExitStack() as stack:
         http = stack.enter_context(requests.Session())
         server = start(stack, ["node", "-e", """
@@ -57,7 +60,12 @@ def measure(temp):
             streams.append(({"Authorization": "Bearer " + phone, "Content-Type": "image/jpeg"}, jpeg.getvalue()))
 
         log = temp / "worker.csv"
-        worker = start(stack, [sys.executable, "cv/live_camera.py", "--server", base, "--metrics", str(log)])
+        command = [sys.executable, "cv/live_camera.py", "--server", base, "--metrics", str(log),
+                   "--device", device, "--imgsz", str(args.imgsz), "--cpu-threads", str(args.cpu_threads),
+                   "--poll-ms", str(args.poll_ms)]
+        if args.half:
+            command.append("--half")
+        worker = start(stack, command)
 
         def upload_pair():
             if worker.poll() is not None:
@@ -74,6 +82,14 @@ def measure(temp):
         else:
             raise RuntimeError("Both cameras must produce detections before measurement")
 
+        gpu_sampler = None
+        gpu_log = temp / "gpu.csv"
+        if device.startswith("cuda") and shutil.which("nvidia-smi"):
+            out = stack.enter_context(gpu_log.open("w"))
+            gpu_sampler = start(stack, ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used",
+                                        "--format=csv,noheader,nounits", "--loop-ms=500"],
+                                stdout=out, stderr=subprocess.DEVNULL)
+
         begin_ms = time.time_ns() // 1_000_000
         begin = time.monotonic()
         uploads = 0
@@ -82,6 +98,15 @@ def measure(temp):
             uploads += 1
             next_tick = min(begin + uploads * PERIOD, begin + WINDOW_SECONDS)
             time.sleep(max(0, next_tick - time.monotonic()))
+        gpu = {}
+        if gpu_sampler:
+            gpu_sampler.terminate()
+            gpu_sampler.wait(5)
+            with gpu_log.open() as src:
+                for row in csv.reader(src, skipinitialspace=True):
+                    if len(row) == 3 and all(value.isdecimal() for value in row):
+                        index, utilization, memory = row
+                        gpu.setdefault(index, []).append((int(utilization), int(memory)))
         time.sleep(0.5)  # Let acknowledgments reach the CSV before reading it.
         with log.open() as src:
             samples = []
@@ -90,21 +115,34 @@ def measure(temp):
                 latency = int(row["latency_ms"])
                 if 0 <= accepted - latency <= accepted < WINDOW_SECONDS * 1000:
                     samples.append((row["camera"], accepted, latency))
-        return uploads, sorted(samples, key=lambda row: row[1])
+        return uploads, sorted(samples, key=lambda row: row[1]), gpu
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New directory for summary and frame timings")
+    inference_options(parser)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Choose a new output directory")
+    try:
+        device = resolve_device(args.device)
+    except ValueError as error:
+        parser.error(str(error))
     with tempfile.TemporaryDirectory() as tmp:
-        uploads, samples = measure(Path(tmp))
+        uploads, samples, gpu = measure(Path(tmp), args, device)
     summary = {"window_seconds": WINDOW_SECONDS, "upload_period_ms": round(PERIOD * 1000),
-               "uploads_per_camera": uploads, "platform": platform.platform(), "device": "CPU",
+               "uploads_per_camera": uploads, "platform": platform.platform(), "device": device,
+               "imgsz": args.imgsz, "fp16": args.half, "poll_ms": args.poll_ms,
+               "cpu_threads_per_inference": args.cpu_threads if device == "cpu" else None,
                "model": "YOLO11n", "python": platform.python_version(),
                "ultralytics": version("ultralytics"), "torch": version("torch"), "cameras": {}}
+    summary["gpu"] = {
+        index: {"samples": len(rows),
+                "utilization_median_percent": statistics.median(util for util, _ in rows),
+                "memory_peak_mib": max(memory for _, memory in rows)}
+        for index, rows in gpu.items()
+    } or None
     for side in "AB":
         times = sorted(ms for camera, _, ms in samples if camera == side)
         if not times:
