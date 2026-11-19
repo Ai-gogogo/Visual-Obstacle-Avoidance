@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VisionAssist</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="desktop.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="shell masthead">
+    <a class="wordmark" href="#monitor"><span class="mark" aria-hidden="true">◉</span>VisionAssist</a>
+    <nav aria-label="Desktop pages">
+      <a href="#monitor" data-route="monitor" aria-current="page">Judge view</a>
+      <a href="#assist" data-route="assist">Voice assistant</a>
+    </nav>
+    <button type="button" class="quiet contrast" id="contrast" aria-pressed="false">High contrast</button>
+  </header>
+  <main id="main" class="shell" tabindex="-1">
+    <p class="obstacle-alert" id="obstacle-alert" role="alert"></p>
+    <section id="monitor" data-page>
+      <div class="page-head">
+        <div><h1 tabindex="-1">Live perception</h1><p>Compare two camera views and inspect object detections.</p></div>
+        <div class="toolbar"><button class="quiet" id="mode">Show live cameras</button><button class="primary" id="pair">Pair a phone</button></div>
+      </div>
+      <div class="feed-grid">
+        <article class="feed" data-camera="A">
+          <header><div><span class="camera-icon" aria-hidden="true">A</span><h2>Camera A</h2></div><span class="status feed-status">Sample feed</span></header>
+          <div class="frame"><div class="sample-image sample-a" role="img" aria-label="Sample lab view with a chair and a desk"></div><img class="live-frame" alt="Live camera A preview" hidden><p class="no-feed" hidden>Waiting for Camera A</p><div class="overlays" aria-hidden="true"></div></div>
+          <footer><span>Primary view</span><span class="feed-summary">2 sample detections</span></footer>
+        </article>
+        <article class="feed" data-camera="B">
+          <header><div><span class="camera-icon" aria-hidden="true">B</span><h2>Camera B</h2></div><span class="status feed-status">Sample feed</span></header>
+          <div class="frame"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><img class="live-frame" alt="Live camera B preview" hidden><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
+          <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
+        </article>
+      </div>
+      <section class="detections" aria-labelledby="detections-title">
+        <div class="section-head"><div><h2 id="detections-title">Detected objects</h2><p id="detection-note">Sample annotations · distances are illustrative.</p></div><span class="status" id="detection-count">4 objects</span></div>
+        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th scope="col">Distance</th><th scope="col">Position in frame</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
+        <p class="empty" id="empty-detections" hidden>Live video preview is available once paired. This prototype has no live detection or distance source.</p>
+      </section>
+    </section>
+    <section id="assist" data-page hidden>
+      <div class="page-head"><div><h1 tabindex="-1">Voice assistant</h1><p>Talk to VisionAssist and follow along in the conversation.</p></div><span class="status" id="assist-mode">Local assistant</span></div>
+      <div class="assist-grid">
+        <section class="voice-card" aria-labelledby="voice-title">
+          <div class="voice-head"><h2 id="voice-title">Ask a question</h2><span class="status" id="voice-state">Ready</span></div>
+          <div class="voice-core">
+            <div class="rings"><button id="mic" class="mic" aria-label="Start conversation" aria-describedby="voice-help mic-error"><svg class="mic-start-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-3 0h6"/></svg><svg class="mic-stop-icon" aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg></button></div>
+            <p class="voice-prompt" id="voice-prompt" role="status">Tap to start a conversation</p>
+            <p id="mic-error" role="alert"></p>
+            <p class="voice-help" id="voice-help">Pause after each question. The assistant replies and listens again. Tap to end the conversation.</p>
+          </div>
+          <p class="active-options" id="active-options">Both cameras · System language</p>
+          <details class="assist-details">
+            <summary>Voice controls and settings</summary>
+            <p>Say “Only look left”, “Use both cameras”, “Switch to Mandarin”, or “Export the conversation”.</p>
+            <div class="voice-options">
+              <label>Camera for visual questions
+                <select id="agent-camera"><option value="both" selected>Both cameras</option><option value="A">Left camera (A)</option><option value="B">Right camera (B)</option></select></label>
+              <label>Speech language
+                <select id="voice-language"><option value="system" selected>Follow system</option><option value="zh">Mandarin Chinese</option><option value="en">English</option><option value="auto">Auto detect</option></select></label>
+              <label class="review-option"><input id="review-voice" type="checkbox"> Review transcription before sending</label>
+            </div>
+          </details>
+          <details class="assist-details" id="keyboard-input">
+            <summary>Keyboard input</summary>
+            <form id="question-form"><label for="question">Type a question or command</label><div class="input-row"><input id="question" type="text" placeholder="What can you see?" maxlength="200" required><button class="primary">Ask</button></div></form>
+            <button type="button" class="quiet" id="discard-voice" hidden>Discard transcription</button>
+          </details>
+          <details id="memory-panel">
+            <summary>Saved memory</summary>
+            <p>Try “Remember, check my keys before going out” or “Register item water bottle.” To register a consenting person in view, say “Enroll person” followed by their name.</p>
+            <label for="memory-kind">Memory type</label>
+            <select id="memory-kind"><option value="habits">Habits</option><option value="items">Items</option><option value="people">People</option></select>
+            <ul id="memory-list"></ul><p id="memory-status" role="status"></p>
+          </details>
+        </section>
+        <section class="response-card" aria-labelledby="response-title">
+          <div class="section-head"><h2 id="response-title">Conversation</h2><button id="export-conversation" type="button" class="quiet" disabled>Export Word</button></div>
+          <p id="conversation-empty">Start talking to see your conversation here.</p>
+          <ol id="conversation-log" tabindex="0" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions"></ol>
+          <div id="voice-message" role="status"></div>
+          <p id="export-status" role="status"></p>
+          <div id="confirm-memory" hidden>
+            <p id="confirmation-summary"></p>
+            <div class="toolbar"><button type="button" class="primary" id="confirm-save">Confirm and save</button>
+            <button type="button" class="quiet" id="confirm-cancel">Cancel</button></div>
+          </div>
+          <div class="response-actions"><button class="quiet" id="describe">Compare cameras</button><button class="quiet" id="replay">Read aloud</button><button class="quiet stop" id="stop" type="button" hidden>Stop playback</button></div>
+        </section>
+      </div>
+    </section>
+  </main>
+  <dialog id="pair-dialog" aria-labelledby="pair-title">
+    <form method="dialog"><button class="quiet dialog-close" aria-label="Close pairing dialog">Close</button></form>
+    <h2 id="pair-title">Pair a phone</h2>
+    <p>Open the camera site on the phone and enter the code for the camera slot you want.</p>
+    <p id="phone-address" class="address"></p>
+    <div class="pair-options">
+      <button type="button" class="primary" data-pair="A">Code for Camera A</button>
+      <button type="button" class="primary" data-pair="B">Code for Camera B</button>
+    </div>
+    <div id="pair-result" role="status"></div>
+  </dialog>
+</body>
+</html>
