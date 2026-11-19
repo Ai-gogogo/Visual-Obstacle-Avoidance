@@ -13,6 +13,7 @@ import requests
 from PIL import Image, ImageOps
 
 from detect_image import DEFAULT_WEIGHTS, detect
+from obstacles import is_obstacle_candidate
 from tracking import FrameTracker
 
 
@@ -67,6 +68,8 @@ class CameraWorker:
                 if tracker is None or tracker.stream_id != stream:
                     tracker = self.trackers[source] = FrameTracker(stream, self.side, self.ids)
                 tracker.update(objects, int(frame.headers["X-CV-Frame-Ms"]))
+            for obj in objects:
+                obj["obstacle_candidate"] = is_obstacle_candidate(obj["bbox"])
             self.pending[source] = (etag, objects)
         result = self.http.post(self.api + "/detections", params=params, timeout=3,
                                 json={"frame_id": etag.strip('"'), "objects": objects})

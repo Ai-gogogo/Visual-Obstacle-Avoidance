@@ -86,13 +86,22 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   const pinned = await call('/api/cv/frame'+query);
   const frame_id = pinned.headers.get('etag').slice(1,-1);
   assert.deepEqual(Buffer.from(await pinned.arrayBuffer()),frame(3));
-  await push(phone,9);
+  await push(phone,3);
   const objects = [{label:'bottle',position:'center',confidence:.95,bbox:[.3,.2,.7,.8],risk:'caution',track_id:1}];
   const publish = (id,value=objects) => call('/api/cv/detections'+query,{method:'POST',body:{frame_id:id,objects:value}});
   assert.equal((await publish('unknown')).status,409);
   assert.equal((await publish(frame_id,[{...objects[0],bbox:[.7,.2,.3,.8]}])).status,400);
-  assert.equal((await publish(frame_id)).status,204);
-  assert.equal((await publish(frame_id)).status,204);
+  const latestFrame = (await call('/api/cv/frame'+query)).headers.get('etag').slice(1,-1);
+  assert.notEqual(latestFrame,frame_id);
+  assert.equal((await publish(frame_id, [{...objects[0],risk:undefined,obstacle_candidate:true}])).status,204);
+  const candidatePreview = await json(await call('/api/preview/A',{token:desk}),200);
+  assert.equal(candidatePreview.frame_id,frame_id);
+  assert.equal(candidatePreview.objects[0].obstacle_candidate,true);
+  assert.equal(candidatePreview.objects[0].risk,'normal');
+  assert.deepEqual((await json(await call('/api/agent/alerts?after=0',{token:desk}),200)).alerts,[]);
+
+  assert.equal((await publish(latestFrame)).status,204);
+  assert.equal((await publish(latestFrame)).status,204);
   assert.match((await chat('我前面有什么')).reply_text,/bottle/);
   const alert = await json(await call('/api/agent/alerts?after=0',{token:desk}),200);
   assert.equal(alert.alerts.length,1);

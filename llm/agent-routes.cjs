@@ -15,6 +15,7 @@ function parseObjects(objects) {
         entry.bbox[0] >= entry.bbox[2] || entry.bbox[1] >= entry.bbox[3]) return null;
     results.push({label:entry.label.toLowerCase(),position:entry.position,bbox:entry.bbox,confidence:entry.confidence,
       track_id:typeof entry.track_id === 'string' || Number.isSafeInteger(entry.track_id) ? String(entry.track_id).slice(0,80) : null,
+      ...(typeof entry.obstacle_candidate === 'boolean' ? {obstacle_candidate:entry.obstacle_candidate} : {}),
       risk:['caution','urgent'].includes(entry.risk) ? entry.risk : 'normal'});
   }
   return results;
