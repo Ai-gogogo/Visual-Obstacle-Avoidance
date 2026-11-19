@@ -73,7 +73,7 @@ function createAgentRoutes(options, sessions, read, respond) {
         const id = [camera,obstacle.track_id || obstacle.label,obstacle.risk].join(':');
         if (session.alertCooldown.has(id)) continue;
         session.alertCooldown.set(id,now);
-        session.alerts.push({id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,
+        session.alerts.push({id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,phone:slot.phone,
           text:'Caution. ' + obstacle.label + ', Camera ' + camera + ', ' + obstacle.position + '.', stamp:captured.stamp});
       }
       session.alerts = session.alerts.slice(-20);
@@ -98,7 +98,14 @@ function createAgentRoutes(options, sessions, read, respond) {
     const method = req.method;
     if (route === '/api/agent/alerts' && method === 'GET') {
       const after = Number(requestURL.searchParams.get('after') || 0);
-      return respond(res,200,{sequence:session.alertSeq, alerts:session.alerts.filter(alert => alert.id > after && recent(alert))});
+      const reminder = agent.cameraReminder(session);
+      return respond(res,200,{sequence:session.alertSeq, reminder,
+        alerts:session.alerts.filter(alert => alert.id > after && recent(alert) && session.slots[alert.camera_id].phone === alert.phone)
+          .map(({phone, ...alert}) => alert)});
+    }
+    if (route === '/api/agent/preferences') {
+      if (method === 'GET') return respond(res,200,agent.preferences());
+      if (method === 'PUT') return respond(res,200,agent.savePreferences(await asJSON(req,1024) || {}));
     }
     if (route === '/api/agent/transcribe' && method === 'POST') {
       if (!/^(audio\/(webm|mp4|ogg|wav))(\s*;|$)/i.test(req.headers['content-type'] || '')) {
@@ -124,10 +131,21 @@ function createAgentRoutes(options, sessions, read, respond) {
       const audio = await agent.synthesize(input?.text,input?.priority === true);
       return res.writeHead(200,{'Content-Type':'audio/wav','Content-Length':audio.length}).end(audio);
     }
+    const history = /^\/api\/memory\/items\/(\d+)\/history$/.exec(route);
+    if (history && method === 'GET') {
+      const observations = agent.observationHistory(Number(history[1]));
+      if (!observations) return error(res,404,'Memory not found.');
+      return respond(res,200,{observations});
+    }
     const memory = /^\/api\/memory\/(items|people|habits)(?:\/(\d+))?$/.exec(route);
     if (memory) {
       const kind = kinds[memory[1]];
       if (method === 'GET' && !memory[2]) return respond(res,200,{records:agent.records(kind)});
+      if (method === 'PATCH' && memory[2]) {
+        const input = await asJSON(req,1024);
+        if (!agent.rename(kind,Number(memory[2]),input?.name)) return error(res,404,'Memory not found.');
+        return res.writeHead(204).end();
+      }
       if (method === 'DELETE' && memory[2]) {
         if (!agent.remove(kind,Number(memory[2]))) return error(res,404,'Memory not found.');
         return res.writeHead(204).end();

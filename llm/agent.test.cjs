@@ -18,11 +18,22 @@ test('a habit is private until confirmation, persists after restart and can be d
     assert.deepEqual(agent.records('habit'),[]);
     assert.throws(() => agent.confirm({slots:{}},confirmation.id,true,true),{status:409});
     assert.match((await agent.chat(session,{text:'確認。'})).reply_text,/已保存/);
+    const [habit] = agent.records('habit');
+    assert.deepEqual(agent.savePreferences({concise:false,reminder:habit.id}),{concise:false,reminder:habit.id});
     agent.close();
     agent = createAgent({filename});
     assert.match((await agent.chat({slots:{}},{text:'出门前要记得做什么？'})).reply_text,/检查钥匙/);
     const [row] = agent.records('habit');
+    assert.deepEqual(agent.preferences(),{concise:false,reminder:row.id});
+    const live = {slots:{A:{stamp:Date.now(),frame:Buffer.from('live')}}};
+    assert.match(agent.cameraReminder(live),/检查钥匙/);
+    assert.equal(agent.cameraReminder(live),null);
+    live.slots.A = {};
+    assert.equal(agent.cameraReminder(live),null);
+    live.slots.A = {stamp:Date.now(),frame:Buffer.from('new frame')};
+    assert.match(agent.cameraReminder(live),/检查钥匙/);
     assert.equal(agent.remove('habit',row.id),true);
+    assert.deepEqual(agent.preferences(),{concise:false,reminder:null});
     assert.deepEqual(agent.records('habit'),[]);
   } finally { agent.close(); rmSync(directory,{recursive:true,force:true}); }
 });
@@ -102,6 +113,14 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   const live = await chat('我的水杯在哪里？');
   assert.equal(live.source,'camera');
   assert.equal(live.observation.position,'center');
+  const {records:[saved]} = await json(await call('/api/memory/items',{token:desk}),200);
+  await chat('我的水杯在哪里？');
+  const {observations} = await json(await call('/api/memory/items/'+saved.id+'/history',{token:desk}),200);
+  assert.deepEqual(observations,[live.observation]);
+  assert.equal((await chat('上次在哪里看到我的水杯？',{camera_id:'both'})).source,'history');
+  assert.equal((await chat('Is it safe to walk forward?')).source,'unavailable');
+  assert.equal((await call('/api/memory/items/'+saved.id,{method:'PATCH',token:desk,body:{name:'蓝水杯'}})).status,204);
+  assert.equal((await chat('我的蓝水杯在哪里？')).source,'camera');
   assert.equal((await chat('Who is this?')).reply_text,'No people are enrolled.');
   await push(phone,3);
   const person = await chat('登记亲友 小林，哥哥');
@@ -121,10 +140,14 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.equal((await chat('Compare cameras',{camera_id:'both'})).source,'image');
   assert.deepEqual(generated.at(-1).image,[frame(9),frame(3)]);
   assert.match(generated.at(-1).messages.at(-1).content,/first image is Camera A/);
+  assert.match(generated.at(-1).messages[0].content,/Never identify people or provide walking directions/);
+  assert.deepEqual(await json(await call('/api/agent/preferences',{
+    method:'PUT',token:desk,body:{concise:false,reminder:null}
+  }),200),{concise:false,reminder:null});
   assert.equal((await chat('Hello')).source,'llm');
   assert.equal((await chat('Can you repeat that?')).source,'llm');
   assert.ok(generated.at(-1).messages.some(message => message.role === 'assistant'));
-  assert.match(generated.at(-1).messages[0].content,/Your product identity is VisionAssist/);
+  assert.match(generated.at(-1).messages[0].content,/up to four short sentences/);
   const modelCalls = generated.length;
   assert.match((await chat('你是誰？')).reply_text,/^我是 VisionAssist/);
   assert.match((await chat('Who are you?')).reply_text,/VisionAssist/);
@@ -142,5 +165,7 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.match(await spoken.text(),/^RIFF/);
   await pair();
   assert.equal((await publish(frame_id)).status,409);
-  assert.equal((await chat('我的水杯在哪里？')).source,'history');
+  const afterPair = await json(await call('/api/agent/alerts?after=0',{token:desk}),200);
+  assert.deepEqual(afterPair.alerts,[]);
+  assert.equal((await chat('我的蓝水杯在哪里？')).source,'history');
 });
