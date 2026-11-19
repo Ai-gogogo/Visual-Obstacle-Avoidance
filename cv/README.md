@@ -22,11 +22,11 @@ The official YOLO11n detection checkpoint used here has SHA-256 `0ebbc80d4a7680d
 python cv/detect_image.py path/to/photo.jpg --output cv/results/my-photo
 ```
 
-Each object has a label, confidence, position and bounding box. The box format is `[x1, y1, x2, y2]`, normalized to the original display width and height. Split the image into three equal vertical strips. The strip containing the horizontal midpoint of the box determines its position. The first boundary belongs to `center` and the second to `right`. A wide object can span all three strips and still be labeled `center`. An empty result is `{"objects": []}`. These fields can be paired with the server-provided frame ID when integrating the live adapter.
+Each object has a label, confidence, position, bounding box and relative depth. The box format is `[x1, y1, x2, y2]`, normalized to the original display width and height. Split the image into three equal vertical strips. The strip containing the horizontal midpoint of the box determines its position. The first boundary belongs to `center` and the second to `right`. A wide object can span all three strips and still be labeled `center`. An empty result is `{"objects": []}`. These fields can be paired with the server-provided frame ID when integrating the live adapter.
 
 ## Reproduce the example and tests
 
-The input is the [bus photo bundled with Ultralytics 8.4.0](https://github.com/ultralytics/ultralytics/blob/v8.4.0/ultralytics/assets/bus.jpg). To reproduce the [annotated image](examples/bus/annotated.jpg) and [JSON](examples/bus/detections.json) in a fresh directory:
+The input is the [bus photo bundled with Ultralytics 8.4.0](https://github.com/ultralytics/ultralytics/blob/v8.4.0/ultralytics/assets/bus.jpg). The original single-image baseline includes an [annotated image](examples/bus/annotated.jpg) and [JSON](examples/bus/detections.json). To run the current detector on the same input, including relative depth, use a fresh directory:
 
 ```sh
 BUS_IMAGE=$(python -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("ultralytics").origin).parent / "assets/bus.jpg")')
@@ -69,6 +69,29 @@ When the same person moves across a camera view, the dashboard box and detection
 The tracker matches boxes of the same class using overlap and predicted movement. A missed detection clears the box from that frame. If YOLO detects the object again within 1.2 seconds, a matching box can recover the ID. Longer gaps start new tracks. Fully overlapping objects and abrupt motion can break continuity. Tracking runs on live streams only.
 
 The CV tests include a 21-frame replay of two people moving in opposite directions using real YOLO, as well as a box-level crossing test that changes detection order. To try it on a phone, point the camera at two objects of the same class. In the desktop dashboard, watch their individual numbers while moving the camera slowly.
+
+## Relative depth within one camera frame
+
+The single-image JSON and the live preview expose `relative_depth` on every detection. The dashboard shows it beside the position. In Voice assistant select one camera and ask “哪个物体更近？” or “Which object is farther?” The answer uses the same accepted YOLO frame as the preview.
+
+- `near` and `far` identify the nearer and farther groups among comparable objects in that image. The labels can change when a reference object leaves the view.
+- `unknown` covers single objects, ambiguous ordering and unsupported objects. A missing field from an older producer is treated as `unknown`.
+
+This baseline assumes an upright camera viewing objects standing on the same level ground. It uses the vertical positions of their visible ground contacts, approximated by the bottom centers of YOLO boxes. Eligible classes include people, chairs and vehicles. Boxes within 1% of an image edge, detections below 0.5 confidence and contacts inside another box are excluded. The highest and lowest contacts must span at least 12% of the image height. Objects within 4% of either extreme receive its label. Intermediate objects stay unknown. If a same-class object in the apparent far group is over 25% taller in the image than one clearly in front, the frame is ambiguous. All thresholds use image coordinates. The method produces no metric distance.
+
+### Controlled checks
+
+Run `python -m unittest discover -s cv -v` with the environment above. The geometry tests use a pinhole camera and known placements. The live test composites a bundled person crop at projected sizes and positions and sends JPEGs through real YOLO, pairing, preview and Agent routes.
+
+| Scene | Observed result |
+| --- | --- |
+| Chair at 2 m, visibly larger bus at 6 m on level ground (projected boxes) | Chair near, bus far |
+| Two people at simulated 2 m and 4 m, left/right placements reversed between A and B | Correct order in both camera previews and selected-camera answers |
+| Single person, similar ground contacts, or hidden contact without a second reference | Unknown |
+| Chair at 2 m raised onto a 1.4 m platform, floor chair at 4 m (projected boxes) | Unknown because apparent height contradicts the contact ordering |
+| Same raised chair with a standing person at 4 m (projected boxes) | Incorrectly orders the raised chair as far and the person as near |
+
+Steps, raised surfaces, camera roll and occlusion can invalidate the contact cue. These checks cover controlled inputs. Field accuracy on handheld phone footage has yet to be measured.
 
 ## Dual-camera performance
 

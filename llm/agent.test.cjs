@@ -94,6 +94,8 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.equal((await publish(frame_id)).status,204);
   assert.equal((await publish(frame_id)).status,204);
   assert.match((await chat('我前面有什么')).reply_text,/bottle/);
+  assert.match((await chat('哪个物体更近？')).reply_text,/无法判断/);
+  assert.match((await chat('哪个物体更远？', {camera_id:'B'})).reply_text,/没有可用/);
   const alert = await json(await call('/api/agent/alerts?after=0',{token:desk}),200);
   assert.equal(alert.alerts.length,1);
   const item = await chat('这个水杯是我的');

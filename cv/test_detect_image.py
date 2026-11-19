@@ -53,6 +53,7 @@ class RealModelTests(unittest.TestCase):
             for obj in objects:
                 x1, y1, x2, y2 = obj["bbox"]
                 self.assertTrue(0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1)
+                self.assertIn(obj["relative_depth"], {"near", "far", "unknown"})
                 self.assertTrue(0 <= obj["confidence"] <= 1)
 
     def test_blank_image_returns_empty_objects(self):

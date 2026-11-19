@@ -14,6 +14,7 @@ function parseObjects(objects) {
         !entry.bbox.every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
         entry.bbox[0] >= entry.bbox[2] || entry.bbox[1] >= entry.bbox[3]) return null;
     results.push({label:entry.label.toLowerCase(),position:entry.position,bbox:entry.bbox,confidence:entry.confidence,
+      relative_depth:['near','far'].includes(entry.relative_depth) ? entry.relative_depth : 'unknown',
       track_id:typeof entry.track_id === 'string' || Number.isSafeInteger(entry.track_id) ? String(entry.track_id).slice(0,80) : null,
       risk:['caution','urgent'].includes(entry.risk) ? entry.risk : 'normal'});
   }

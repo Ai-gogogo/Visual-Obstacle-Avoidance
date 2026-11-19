@@ -3,6 +3,7 @@
 import argparse
 import json
 import tempfile
+from itertools import combinations
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -28,14 +29,62 @@ def make_object(label, confidence, xyxy, image_size):
     }
 
 
+# The bottom of an unobstructed box approximates contact with a common level floor.
+GROUND_CLASSES = {"person", "chair", "bench", "couch", "bed", "dining table",
+                  "bicycle", "motorcycle", "car", "bus", "truck", "train", "toilet"}
+MIN_FOOT_SEPARATION = 0.12
+END_GROUP_MARGIN = 0.04
+
+
+def covers_point(box, x, y):
+    left, top, right, bottom = box
+    return left <= x <= right and top <= y <= bottom
+
+
+def assign_relative_depth(objects):
+    candidates = []
+    for obj in objects:
+        obj["relative_depth"] = "unknown"
+        x1, y1, x2, foot = obj["bbox"]
+        if (obj["label"] not in GROUND_CLASSES or obj["confidence"] < .5 or
+                min(x1, y1, 1 - x2, 1 - foot) <= .01):
+            continue
+        center = (x1 + x2) / 2
+        if any(other is not obj and covers_point(other["bbox"], center, foot) for other in objects):
+            continue
+        candidates.append((foot, obj))
+
+    if len(candidates) < 2:
+        return
+    feet = [foot for foot, _ in candidates]
+    highest, lowest = min(feet), max(feet)
+    if lowest - highest < MIN_FOOT_SEPARATION:
+        return
+    # Contradictory evidence from a same-class pair questions the shared-floor assumption.
+    for (back_y, back), (front_y, front) in combinations(sorted(candidates, key=lambda c: c[0]), 2):
+        if front_y - back_y < MIN_FOOT_SEPARATION or back["label"] != front["label"]:
+            continue
+        back_height = back_y - back["bbox"][1]
+        front_height = front_y - front["bbox"][1]
+        if back_height > 1.25 * front_height:
+            return
+    for foot, obj in candidates:
+        if lowest - foot <= END_GROUP_MARGIN:
+            obj["relative_depth"] = "near"
+        elif foot - highest <= END_GROUP_MARGIN:
+            obj["relative_depth"] = "far"
+
+
 def detect(model, image):
     result = model.predict(image, device="cpu", imgsz=640, conf=0.4, iou=0.7,
                            max_det=40, verbose=False)[0]
     boxes = result.boxes
-    return [
+    objects = [
         make_object(result.names[int(cls)], score, box, image.size)
         for cls, score, box in zip(boxes.cls.tolist(), boxes.conf.tolist(), boxes.xyxy.tolist())
     ]
+    assign_relative_depth(objects)
+    return objects
 
 
 def annotate(image, objects):
@@ -49,7 +98,7 @@ def annotate(image, objects):
         box = (x1 * width, y1 * height, x2 * width, y2 * height)
         color = colors[obj["position"]]
         draw.rectangle(box, outline=color, width=max(2, min(width, height) // 220))
-        caption = f'{obj["label"]} | {obj["position"]} | {obj["confidence"]:.2f}'
+        caption = f'{obj["label"]} | {obj["position"]} | {obj["confidence"]:.2f} | {obj.get("relative_depth", "unknown")}'
         _, _, tw, th = draw.textbbox((0, 0), caption, font=font, anchor="lt")
         tx = max(0, min(box[0], width - tw - 8))
         ty = max(0, box[1] - th - 8)
