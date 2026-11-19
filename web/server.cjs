@@ -120,12 +120,24 @@ function createServer(options = {}) {
         slot.etag = '"' + key() + '"';
         return res.writeHead(204).end();
       }
-      const match = /^\/api\/(pair|frame)\/([AB])$/.exec(route);
+      const match = /^\/api\/(pair|frame|preview)\/([AB])$/.exec(route);
       if (!match) return respond(res, 404, {error:'Request not found.'});
       const [, action, side] = match;
       const session = sessions.get(token);
       if (!session) return respond(res, 401, {error:'Desktop session ended. Generate a new pairing code.'});
       const slot = session.slots[side];
+      if (method === 'GET' && action === 'preview' && side === 'A') {
+        if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
+        // CV pins the actual JPEG at inference time. The phone may already be ahead.
+        const detection = slot.detection && now - slot.detection.stamp <= FRESH ? slot.detection : null;
+        const frame = detection?.frame ?? slot.frame;
+        const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
+        // A raw preview can acquire boxes without the camera uploading a new JPEG.
+        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + '"';
+        res.setHeader('ETag', etag);
+        if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
+        return respond(res,200,{frame_id, jpeg:frame.toString('base64'), objects:detection?.objects ?? null});
+      }
       if (method === 'POST' && action === 'pair') {
         for (const [code, entry] of codes) if (entry.session === token && entry.slot === side) codes.delete(code);
         let code;

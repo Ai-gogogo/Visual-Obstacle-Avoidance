@@ -37,7 +37,7 @@ function showPage() {
 }
 
 function makeAnnotations() {
-  const rows = sample.map(object => {
+  for (const object of sample) {
     const overlay = document.createElement('div');
     overlay.className = 'box';
     overlay.dataset.kind = object.camera === 'A' ? 'obstacle' : 'object';
@@ -47,15 +47,54 @@ function makeAnnotations() {
     label.textContent = object.label + ' · ' + object.distance + ' m';
     overlay.append(label);
     feeds.find(feed => feed.side === object.camera).node.querySelector('.overlays').append(overlay);
+  }
+}
+
+function renderDetections(objects) {
+  const list = sampleMode ? sample : (objects ?? []);
+  const rows = list.map(object => {
     const row = document.createElement('tr');
-    [object.label, 'Camera ' + object.camera, object.distance + ' m', object.position].forEach(value => {
+    const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
+    for (const text of [object.label, 'Camera ' + (object.camera ?? 'A'), value, object.position]) {
       const cell = document.createElement('td');
-      cell.textContent = value;
+      cell.textContent = text;
       row.append(cell);
-    });
+    }
     return row;
   });
   $('#detection-rows').replaceChildren(...rows);
+  $('#detection-measure').textContent = sampleMode ? 'Distance' : 'Confidence';
+  $('#detection-count').textContent = !sampleMode && objects == null ? 'Waiting' :
+    list.length + (list.length === 1 ? ' object' : ' objects');
+  $('.table-wrap').hidden = !list.length;
+  $('#empty-detections').hidden = Boolean(list.length);
+  $('#empty-detections').textContent = objects == null ? 'Waiting for Camera A detections.' :
+    'No objects detected in this frame.';
+}
+
+function paintCameraA(canvas, image, snapshot) {
+  const width = canvas.width = image.naturalWidth;
+  const height = canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(image,0,0);
+  const fontSize = Math.max(12, Math.round(Math.max(width,height) / 42));
+  ctx.font = '600 ' + fontSize + 'px system-ui';
+  ctx.lineWidth = Math.max(2, width / 240);
+  ctx.textBaseline = 'top';
+  for (const {bbox:[x1,y1,x2,y2], label, confidence, position} of snapshot.objects ?? []) {
+    const x = x1 * width, y = y1 * height;
+    ctx.strokeStyle = '#8ce9ff';
+    ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
+    const caption = label + ' · ' + Math.round(confidence*100) + '% · ' + position;
+    const labelWidth = Math.min(width, Math.ceil(ctx.measureText(caption).width) + 8);
+    const left = Math.min(x, width-labelWidth);
+    const top = Math.max(0, y-fontSize-6);
+    ctx.fillStyle = '#8ce9ff';
+    ctx.fillRect(left, top, labelWidth, fontSize+6);
+    ctx.fillStyle = '#102031';
+    ctx.fillText(caption, left+4, top+2, Math.max(1,labelWidth-8));
+  }
+  canvas.dataset.frameId = snapshot.frame_id;
 }
 
 async function api(path, method, auth) {
@@ -83,11 +122,18 @@ function setFeed(feed, connected, message) {
   status.classList.toggle('live', !sampleMode && connected);
   const image = node.querySelector('.live-frame');
   image.hidden = sampleMode || !connected;
+  if (!connected) {
+    feed.etag = undefined;
+    if (feed.side === 'A') {
+      image.getContext('2d').clearRect(0,0,image.width,image.height);
+      delete image.dataset.frameId;
+      renderDetections(null);
+    }
+  }
   if (!connected && feed.url) {
     URL.revokeObjectURL(feed.url);
     image.removeAttribute('src');
     feed.url = undefined;
-    feed.etag = undefined;
   }
   const empty = node.querySelector('.no-feed');
   empty.hidden = sampleMode || connected;
@@ -100,11 +146,24 @@ async function readFrame(feed, version) {
   try {
     const headers = {Authorization:'Bearer '+token};
     if (feed.etag) headers['If-None-Match'] = feed.etag;
-    const response = await fetch('/api/frame/'+feed.side, {headers, signal:AbortSignal.timeout(3000)});
+    const path = feed.side === 'A' ? '/api/preview/A' : '/api/frame/B';
+    const response = await fetch(path, {headers, signal:AbortSignal.timeout(3000)});
     if (version !== pollVersion || response.status === 304) return;
     if (response.status !== 200) {
       if (response.status === 401) token = undefined;
       setFeed(feed,false,response.status === 401 ? 'Session expired. Pair the phone again.' : undefined);
+      return;
+    }
+    if (feed.side === 'A') {
+      const snapshot = await response.json();
+      const image = new Image();
+      image.src = 'data:image/jpeg;base64,' + snapshot.jpeg;
+      await image.decode();
+      if (version !== pollVersion) return;
+      paintCameraA(feed.node.querySelector('canvas'), image, snapshot);
+      feed.etag = response.headers.get('etag');
+      setFeed(feed,true);
+      renderDetections(snapshot.objects);
       return;
     }
     const frame = await response.blob();
@@ -122,7 +181,9 @@ async function readFrame(feed, version) {
 
 function refreshPolling() {
   const version = ++pollVersion;
-  if (sampleMode || currentPage !== 'monitor' || !token) return;
+  if (sampleMode || currentPage !== 'monitor') return;
+  feeds.forEach(feed => setFeed(feed,false));
+  if (!token) return;
   async function poll() {
     if (version !== pollVersion) return;
     if (!token) { feeds.forEach(feed => setFeed(feed,false,'Pair the phone again.')); return; }
@@ -137,11 +198,7 @@ function renderMode(demo) {
   sampleMode = demo;
   $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
   $('#assist-mode').textContent = demo ? 'Sample scene' : 'Live preview mode';
-  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'Live camera mode';
-  $('#detection-count').textContent = demo ? '4 objects' : 'Unavailable';
-  const table = $('.table-wrap');
-  table.hidden = !demo;
-  $('#empty-detections').hidden = demo;
+  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'YOLO detections from the displayed Camera A frame.';
   $('#voice-message').textContent = '';
   feeds.forEach(feed => setFeed(feed,false));
   refreshPolling();
@@ -818,6 +875,7 @@ window.addEventListener('pagehide', () => { stopAudio(); pollVersion += 1; });
 window.addEventListener('pageshow', event => { if (event.persisted) refreshPolling(); });
 window.addEventListener('hashchange',showPage);
 makeAnnotations();
+renderDetections(null);
 showPage();
 
 $('#confirm-save').addEventListener('click',() => finishConfirmation(true));

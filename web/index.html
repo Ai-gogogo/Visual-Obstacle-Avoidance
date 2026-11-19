@@ -27,7 +27,7 @@
       <div class="feed-grid">
         <article class="feed" data-camera="A">
           <header><div><span class="camera-icon" aria-hidden="true">A</span><h2>Camera A</h2></div><span class="status feed-status">Sample feed</span></header>
-          <div class="frame"><div class="sample-image sample-a" role="img" aria-label="Sample lab view with a chair and a desk"></div><img class="live-frame" alt="Live camera A preview" hidden><p class="no-feed" hidden>Waiting for Camera A</p><div class="overlays" aria-hidden="true"></div></div>
+          <div class="frame"><div class="sample-image sample-a" role="img" aria-label="Sample lab view with a chair and a desk"></div><canvas class="live-frame" role="img" aria-label="Live camera A preview with YOLO detections" hidden></canvas><p class="no-feed" hidden>Waiting for Camera A</p><div class="overlays" aria-hidden="true"></div></div>
           <footer><span>Primary view</span><span class="feed-summary">2 sample detections</span></footer>
         </article>
         <article class="feed" data-camera="B">
@@ -38,8 +38,8 @@
       </div>
       <section class="detections" aria-labelledby="detections-title">
         <div class="section-head"><div><h2 id="detections-title">Detected objects</h2><p id="detection-note">Sample annotations · distances are illustrative.</p></div><span class="status" id="detection-count">4 objects</span></div>
-        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th scope="col">Distance</th><th scope="col">Position in frame</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
-        <p class="empty" id="empty-detections" hidden>Live video preview is available once paired. This prototype has no live detection or distance source.</p>
+        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th id="detection-measure" scope="col">Distance</th><th scope="col">Position in frame</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
+        <p class="empty" id="empty-detections" hidden>Waiting for Camera A detections.</p>
       </section>
     </section>
     <section id="assist" data-page hidden>

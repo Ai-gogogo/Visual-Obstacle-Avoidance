@@ -1,4 +1,5 @@
 """Replay phone JPEGs against the real pairing, CV and Agent routes."""
+import base64
 import io
 import subprocess
 import sys
@@ -109,6 +110,36 @@ class LiveCameraTests(unittest.TestCase):
             self.assertIn("No confident objects", empty["reply_text"])
             self.worker.poll()  # Unchanged frame, HTTP 304.
             self.assertEqual(predict.call_count, 1)
+
+    def test_dashboard_returns_pixels_and_boxes_from_one_processed_frame(self):
+        phone = self.pair("A")
+        path = "/api/preview/A"
+        self.upload(phone, self.bus)
+        raw = self.request("GET", path, self.desk)
+        self.assertIsNone(raw.json()["objects"])
+        self.worker.poll()
+        annotated = self.request("GET", path, self.desk, headers={"If-None-Match": raw.headers["ETag"]})
+        scene = annotated.json()
+        self.assertEqual(scene["frame_id"], raw.json()["frame_id"])
+        self.assertTrue(any(o["label"] == "bus" for o in scene["objects"]))
+        self.upload(phone, self.blank)  # Camera outpaces inference.
+        pending = self.request("GET", path, self.desk).json()
+        self.assertEqual(pending, scene)
+        self.assertEqual(base64.b64decode(pending["jpeg"]), self.bus)
+        self.assertEqual(self.request("GET", path, self.desk, headers={
+            "If-None-Match": annotated.headers["ETag"]}).status_code, 304)
+        self.worker.poll()
+        empty = self.request("GET", path, self.desk).json()
+        self.assertNotEqual(empty["frame_id"], scene["frame_id"])
+        self.assertEqual(base64.b64decode(empty["jpeg"]), self.blank)
+        self.assertEqual(empty["objects"], [])
+        self.assertIn("No confident objects", self.scene()["reply_text"])
+        other = self.request("POST", "/api/session").json()["token"]
+        self.assertEqual(self.request("GET", path, other).status_code, 204)
+        self.assertEqual(self.http.get(self.base + path, headers={
+            "Authorization": "Bearer " + phone}, timeout=5).status_code, 401)
+        self.request("DELETE", "/api/frame", phone)
+        self.assertEqual(self.request("GET", path, self.desk).status_code, 204)
 
     def test_expired_result_is_discarded_and_camera_can_reconnect(self):
         a = self.pair("A")
