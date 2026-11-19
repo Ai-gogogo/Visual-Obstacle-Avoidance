@@ -57,7 +57,9 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     db = new DatabaseSync(target);
     db.exec('PRAGMA foreign_keys=ON');
     db.exec("CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY, kind TEXT, name TEXT, normalized TEXT, label TEXT, last_seen TEXT, UNIQUE(kind, normalized));" +
-      "CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY, owner INTEGER REFERENCES memory(id) ON DELETE CASCADE, feature TEXT);");
+      "CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY, owner INTEGER REFERENCES memory(id) ON DELETE CASCADE, feature TEXT);" +
+      "CREATE TABLE IF NOT EXISTS observation (owner INTEGER REFERENCES memory(id) ON DELETE CASCADE, time TEXT, camera TEXT, position TEXT, PRIMARY KEY(owner,time,camera));" +
+      "CREATE TABLE IF NOT EXISTS preference (id INTEGER PRIMARY KEY CHECK(id=1), concise INTEGER NOT NULL, reminder INTEGER REFERENCES memory(id) ON DELETE SET NULL);");
     return db;
   }
 
@@ -68,6 +70,48 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
   const output = (text, source = 'memory', extra = {}) => ({reply_text:text, source, confirmation:null, ...extra});
   const copyFrame = slot => fresh(slot?.stamp) && slot.frame;
   const detections = slot => fresh(slot?.detection?.timestamp_ms) ? slot.detection : null;
+
+  function preferences() {
+    const row = database().prepare('SELECT concise, reminder FROM preference WHERE id=1').get();
+    return {concise:Boolean(row?.concise ?? true), reminder:row?.reminder ?? null};
+  }
+
+  function savePreferences({concise, reminder}) {
+    if (typeof concise !== 'boolean' || (reminder !== null &&
+        (!Number.isSafeInteger(reminder) ||
+          !database().prepare("SELECT id FROM memory WHERE id=? AND kind='habit'").get(reminder)))) {
+      throw failure(400, 'Choose a response length and a saved reminder.');
+    }
+    database().prepare('INSERT INTO preference VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET concise=excluded.concise, reminder=excluded.reminder')
+      .run(Number(concise), reminder);
+    return preferences();
+  }
+
+  function cameraReminder(session) {
+    const live = Object.values(session.slots).some(slot => copyFrame(slot));
+    const becameLive = live && !session.cameraWasLive;
+    session.cameraWasLive = live;
+    if (!becameLive) return null;
+    const id = preferences().reminder;
+    if (id === null) return null;
+    return database().prepare("SELECT name FROM memory WHERE kind='habit' AND id=?").get(id)?.name ?? null;
+  }
+
+  function rename(kind, id, name) {
+    name = clean(name);
+    if (!name) throw failure(400, 'Enter a name.');
+    const existing = find(kind, name);
+    if (existing && existing.id !== id) throw failure(409, 'A memory already uses that name.');
+    return database().prepare('UPDATE memory SET name=?, normalized=? WHERE kind=? AND id=?')
+      .run(name, normal(name), kind, id).changes > 0;
+  }
+
+  function observationHistory(id) {
+    const item = database().prepare("SELECT last_seen FROM memory WHERE kind='item' AND id=?").get(id);
+    if (!item) return null;
+    const entries = database().prepare('SELECT time,camera,position FROM observation WHERE owner=? ORDER BY time DESC LIMIT 20').all(id);
+    return entries.length ? entries : item.last_seen ? [JSON.parse(item.last_seen)] : [];
+  }
 
   async function runResource(kind, operation) {
     if (busy.has(kind)) {
@@ -100,7 +144,9 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
   function stage(session, data, isChinese) {
     const pending = {...data, id:randomUUID(), until:Date.now()+60_000};
     session.pending = pending;
-    const summary = data.kind === 'person'
+    const summary = data.observation
+      ? (isChinese ? '请确认这是你的物品：' : 'Confirm this is your item: ') + data.target
+      : data.kind === 'person'
       ? (isChinese ? '确认已获本人同意，并登记' : 'Confirm the person consented and enroll ') + data.name
       : (isChinese ? '保存：' : 'Save: ') + data.name;
     return output(summary, 'confirmation', {confirmation:{id:pending.id, summary}});
@@ -114,6 +160,13 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     if (!accepted) {
       delete session.pending;
       return output(isChinese ? '已取消。' : 'Cancelled.');
+    }
+    if (pending.observation) {
+      const item = find('item',pending.name);
+      if (item?.id !== pending.itemId) throw failure(409, 'This item was changed or removed.');
+      saveObservation(item.id,pending.observation);
+      delete session.pending;
+      return output(isChinese ? '已记录这次出现。' : 'Observation saved.', 'history', {observation:pending.observation});
     }
     const store = database();
     store.exec('BEGIN IMMEDIATE');
@@ -193,34 +246,54 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     return output(isChinese ? '我无法确认这个人的身份。' : 'I could not confirm who this is.', 'camera');
   }
 
+  function saveObservation(id, observed) {
+    const store = database();
+    store.prepare('INSERT OR IGNORE INTO observation VALUES(?,?,?,?)').run(id, observed.time, observed.camera, observed.position);
+    store.prepare("UPDATE memory SET last_seen=? WHERE id=? AND (last_seen IS NULL OR json_extract(last_seen,'$.time') <= ?)")
+      .run(JSON.stringify(observed), id, observed.time);
+  }
+
   async function locate(session, side, item, isChinese) {
-    const scene = detections(session.slots[side]);
+    const slot = session.slots[side];
+    const scene = detections(slot);
     const objects = scene?.objects.filter(object => object.label === item.label && object.confidence >= 0.5) || [];
     if (objects.length) {
       const features = await itemFeatures(scene, objects);
       const options = records('item').filter(row => row.label === item.label);
-      const matches = features.flatMap((feature,index) => {
+      const candidates = features.flatMap((feature,index) => {
         if (!feature) return [];
         const [best,second] = rank(feature, options);
-        return best?.row.id === item.id && best.score >= 0.92 && (!second || best.score-second.score >= 0.06)
-          ? [{score:best.score,object:objects[index]}] : [];
+        if (best?.row.id !== item.id || best.score < 0.86) return [];
+        return [{confident:best.score >= 0.92 && (!second || best.score-second.score >= 0.06),
+          position:objects[index].position}];
       });
-      if (matches.length === 1 && fresh(scene.timestamp_ms)) {
-        const {position} = matches[0].object;
+      if (candidates.length === 1 && session.slots[side] === slot && fresh(scene.timestamp_ms) && find('item', item.name)?.id === item.id) {
+        const {position,confident} = candidates[0];
         const observed = {time:new Date(scene.timestamp_ms).toISOString(),camera:scene.camera_id,position};
-        database().prepare('UPDATE memory SET last_seen=? WHERE id=?').run(JSON.stringify(observed),item.id);
         const positionText = {left:'左侧',center:'中央',right:'右侧'}[position];
+        if (!confident) {
+          const target = isChinese ? item.name + '（相机 ' + side + '，' + positionText + '）' :
+            item.name + ' (Camera ' + side + ', ' + position + ')';
+          return stage(session,{name:item.name,target,itemId:item.id,observation:observed},isChinese);
+        }
+        saveObservation(item.id,observed);
         return output(isChinese ? '相机 ' + side + ' 画面' + positionText + '可能是你的' + item.name + '。' :
           'Your ' + item.name + ' may be in Camera ' + side + ', on the ' + position + ' of the frame.', 'camera', {observation:observed});
       }
     }
+    return lastSeen(item, isChinese);
+  }
+
+  function lastSeen(item, isChinese, historyOnly = false) {
     const last = item.last_seen && JSON.parse(item.last_seen);
-    const prefix = isChinese ? '当前无法确认' + item.name + '。' : 'I cannot confirm where your ' + item.name + ' is now.';
-    if (!last) return output(prefix,'unavailable');
+    const prefix = historyOnly ? '' : isChinese ? '当前无法确认' + item.name + '。' :
+      'I cannot confirm where your ' + item.name + ' is now.';
+    if (!last) return output(prefix || (isChinese ? '还没有这件物品的观察记录。' : 'There are no saved observations for this item.'), 'unavailable');
     const time = new Date(last.time).toLocaleString(isChinese ? 'zh-CN' : 'en-US');
-    return output(prefix + (isChinese ? ' 上次可能在相机 ' + last.camera + ' 画面' +
-      {left:'左侧',center:'中央',right:'右侧'}[last.position] + '看到，时间是' + time + '。' :
-      ' Last possible match was in Camera ' + last.camera + ', ' + last.position + ', at ' + time + '.'), 'history', {observation:last});
+    const description = isChinese
+      ? '上次可能在相机 ' + last.camera + ' 画面' + {left:'左侧',center:'中央',right:'右侧'}[last.position] + '看到' + item.name + '，时间是' + time + '。'
+      : 'Last possible match for ' + item.name + ' was in Camera ' + last.camera + ', ' + last.position + ', at ' + time + '.';
+    return output([prefix,description].filter(Boolean).join(' '), 'history', {observation:last});
   }
 
   async function chat(session, input) {
@@ -261,20 +334,28 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       const people = records('person').map(row => row.label ? row.name+' · '+row.label : row.name);
       return output(people.length ? people.join(isChinese ? '；' : '. ') : isChinese ? '还没有登记亲友。' : 'No people are enrolled.');
     }
-    if (/where|哪儿|哪里|在哪|找(?:一下|找)?/iu.test(text)) {
+    const historyOnly = /上次|最后一次|last seen|last (?:see|saw)/iu.test(text);
+    if (historyOnly || /where|哪儿|哪里|在哪|找(?:一下|找)?/iu.test(text)) {
       const name = normal(text);
       const matches = records('item').filter(row => {
         const itemName = normal(row.name);
         return cn(itemName) ? name.includes(itemName) : name.split(/[^\p{L}\p{N}]+/u).join(' ').includes(' ' + itemName + ' ') ||
           (' ' + name.replace(/[?？.!]+$/u,'') + ' ').includes(' ' + itemName + ' ');
       });
-      if (matches.length === 1) return twoCameras ? oneCamera() : locate(session,side,matches[0],isChinese);
+      if (matches.length === 1) {
+        if (historyOnly) return lastSeen(matches[0],isChinese,true);
+        return twoCameras ? oneCamera() : locate(session,side,matches[0],isChinese);
+      }
       if (matches.length > 1) return output(isChinese ? '你是在找哪一件物品？' : 'Which registered item are you looking for?');
       if (/\bmy\b|我的/iu.test(text)) return output(isChinese ? '没有找到这个名称的登记物品。' : 'No registered item matches that name.');
     }
     if (/习惯|習慣|出[门門]前|what should i remember|habits|before (?:going out|i leave)/iu.test(text)) {
       const habits = records('habit').map(row => row.name);
       return output(habits.length ? habits.join(isChinese ? '；' : '. ') : isChinese ? '还没有保存习惯。' : 'No habits are saved yet.');
+    }
+    if (/\b(?:is it safe to (?:walk|cross)|which way should i (?:walk|go)|can i (?:walk|cross))\b|可以(?:往|走|过马路)|(?:往哪|怎么走|能通行|能过马路)/iu.test(text)) {
+      return output(isChinese ? '我无法判断是否可以通行。你可以问我画面里检测到了什么。' :
+        'I cannot determine whether it is safe to proceed. You can ask what was detected in the frame.', 'unavailable');
     }
     const slot = session.slots[side];
     const depthQuestion = /(?:哪个|哪些|哪一个|谁|什么东西)(?:物体|东西|人)?(?:看起来|离我|距离我)?(?:比较|更|最|较)?(?:近|远)|\b(?:which|what)(?: object| objects| one| person)? (?:is|are|looks?|seems?) (?:the )?(?:closer|closest|nearer|nearest|farther|furthest|farthest|further)\b/iu;
@@ -313,15 +394,16 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     }
     if (wantsImage && !frame) return output(isChinese ? '相机当前没有画面。' : 'The camera has no recent frame.', 'unavailable');
     const persona = 'Your product identity is VisionAssist, an on-device visual and memory assistant for people with low vision. ' +
-      'Speak calmly and naturally in one or two short sentences. Reply in the user’s language; use simplified Chinese for Chinese replies. ' +
+      'Speak calmly and naturally. Reply in the user’s language; use simplified Chinese for Chinese replies. ' +
       'Introduce yourself as VisionAssist. Only discuss the underlying model if explicitly asked about the technology. Avoid emoji and boilerplate.';
-    const system = {role:'system',content:persona + (frame
+    const length = preferences().concise ? 'Use one or two short sentences. ' : 'Give up to four short sentences when helpful. ';
+    const system = {role:'system',content:persona + length + (frame
       ? ' Use only the attached image for visual facts. State what is unclear. Never identify people or provide walking directions.'
       : ' Use recent messages to follow the conversation. You have no camera or saved memory access in this turn. Never invent observations, identities, distances, saved data or walking directions.')};
     const history = frame ? [] : session.dialog || [];
     const cameraPrompt = isChinese
       ? '第一张是相机 A，第二张是相机 B。只比较可见内容，分开注明相机，不推测身份或行走方向。请用简体中文简短回答：'
-      : 'The first image is Camera A and the second image is Camera B. Label each and compare only visible details. Do not infer identity or walking directions. Answer briefly: ';
+      : 'The first image is Camera A and the second image is Camera B. Label each and compare only visible details. Never identify people or provide walking directions. Answer briefly: ';
     const message = {role:'user',content:Array.isArray(frame) ? cameraPrompt + text : text};
     const messages = Array.isArray(frame) ? [message] : [system,...history,message];
     let reply;
@@ -334,7 +416,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     return output(reply,frame ? 'image' : 'llm');
   }
 
-  return { chat, enroll, confirm, records, close:() => db?.close(),
+  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory, close:() => db?.close(),
     remove(kind,id) { return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0; },
     async synthesize(text, priority) {
       if (typeof text !== 'string' || !text.trim() || text.length > 650) throw failure(400, 'Give a short reply to speak.');

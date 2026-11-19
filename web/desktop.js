@@ -209,7 +209,8 @@ const conversation = readConversation();
 let confirmation;
 let alertSequence = 0;
 let warningUntil = 0;
-let activeWarningRisk;
+let lastWarningRisk;
+let pendingReminder;
 let warningActive = false;
 
 function setVoiceState(title, prompt, label) {
@@ -562,7 +563,10 @@ async function sendQuestion(turn, question, speak, mode) {
   if (pendingTurn !== turn || currentPage !== 'assist') return;
   renderReply(response);
   if (speak) speakLocal(response.reply_text);
-  if ($('#memory-panel').open) refreshMemory();
+  if ($('#memory-panel').open) {
+    refreshMemory();
+    loadPreferences().catch(error => { $('#memory-status').textContent = error.message; });
+  }
 }
 
 async function answer(question, speak = false, mode) {
@@ -733,7 +737,10 @@ async function finishConfirmation(accepted) {
     addMessage('user',accepted ? 'Confirmed' : 'Cancelled');
     renderReply(result);
     $('#replay').focus();
-    if ($('#memory-panel').open) refreshMemory();
+    if ($('#memory-panel').open) {
+    refreshMemory();
+    loadPreferences().catch(error => { $('#memory-status').textContent = error.message; });
+  }
   } catch (error) {
     $('#voice-message').textContent = error.message;
   } finally { buttons.forEach(button => { button.disabled = false; }); }
@@ -759,10 +766,44 @@ async function refreshMemory() {
           await agentRequest('/api/memory/'+kind+'/'+record.id,'DELETE');
           $('#memory-status').textContent = 'Deleted '+record.name+'.';
           $('#memory-kind').focus();
-          refreshMemory();
+          await refreshMemory();
+          await loadPreferences();
         } catch (error) { $('#memory-status').textContent = error.message; button.disabled = false; }
       };
-      row.append(record.name+(kind === 'people' && record.label ? ' · '+record.label : '')+' ',button);
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'quiet';
+      edit.textContent = 'Edit';
+      edit.setAttribute('aria-label','Edit '+record.name);
+      edit.onclick = async () => {
+        const name = window.prompt('Edit saved record',record.name)?.trim();
+        if (!name || name === record.name) return;
+        try {
+          await agentRequest('/api/memory/'+kind+'/'+record.id,'PATCH',JSON.stringify({name}));
+          $('#memory-kind').focus();
+          await refreshMemory();
+          await loadPreferences();
+          $('#memory-status').textContent = 'Saved '+name+'.';
+        } catch (error) { $('#memory-status').textContent = error.message; }
+      };
+      row.append(record.name+(kind === 'people' && record.label ? ' · '+record.label : '')+' ',edit,button);
+      if (kind === 'items') {
+        const history = document.createElement('button');
+        history.type = 'button';
+        history.className = 'quiet';
+        history.textContent = 'History';
+        history.setAttribute('aria-label','History for '+record.name);
+        history.onclick = async () => {
+          try {
+            const {observations} = await agentRequest('/api/memory/items/'+record.id+'/history','GET');
+            const entries = observations.map(({time,camera,position}) =>
+              new Date(time).toLocaleString()+' · Camera '+camera+' · '+position);
+            $('#memory-status').textContent = entries.length
+              ? 'Possible matches for '+record.name+'. '+entries.join(' / ') : 'No observations saved.';
+          } catch (error) { $('#memory-status').textContent = error.message; }
+        };
+        row.append(history);
+      }
       return row;
     });
     list.replaceChildren(...rows);
@@ -776,25 +817,48 @@ async function refreshMemory() {
   }
 }
 
+async function loadPreferences() {
+  const [preferences,{records}] = await Promise.all([
+    agentRequest('/api/agent/preferences','GET'),agentRequest('/api/memory/habits','GET')
+  ]);
+  $('#concise-replies').checked = preferences.concise;
+  const select = $('#camera-reminder');
+  select.replaceChildren(new Option('Off',''), ...records.map(record => new Option(record.name,record.id)));
+  select.value = preferences.reminder ?? '';
+}
+
 async function pollAlerts() {
   try {
-    const {sequence,alerts} = await agentRequest('/api/agent/alerts?after='+alertSequence,'GET');
-    alertSequence = sequence;
-    const warning = alerts.findLast(alert => alert.risk === 'urgent') || alerts.at(-1);
-    if (warning && (Date.now() >= warningUntil ||
-        (warning.risk === 'urgent' && activeWarningRisk !== 'urgent'))) {
-      activeWarningRisk = warning.risk;
+    const {sequence,alerts,reminder} = await agentRequest('/api/agent/alerts?after='+alertSequence,'GET');
+    if (reminder) pendingReminder = reminder;
+    const urgent = alerts.findLast(alert => alert.risk === 'urgent');
+    const warning = urgent || alerts.at(-1);
+    const now = Date.now();
+    if (warning && (now >= warningUntil || (urgent && lastWarningRisk !== 'urgent'))) {
+      alertSequence = sequence;
       interruptTurn();
-      warningUntil = Date.now()+3000;
-      $('#obstacle-alert').textContent = warning.text;
+      lastWarningRisk = warning.risk;
+      warningUntil = now+3000;
+      const banner = $('#obstacle-alert');
+      banner.textContent = warning.text;
       speakLocal(warning.text,true);
       setTimeout(() => {
-        if ($('#obstacle-alert').textContent === warning.text && Date.now() >= warningUntil) $('#obstacle-alert').textContent = '';
+        if (Date.now() >= warningUntil) banner.textContent = '';
       },3400);
+    } else if (!warning) {
+      alertSequence = sequence;
+      if (pendingReminder && !pendingTurn && !speech && !reviewing && now >= warningUntil) {
+        $('#voice-message').textContent = pendingReminder;
+        speakLocal(pendingReminder);
+        pendingReminder = null;
+      }
     }
   } catch (error) {
     if (error.status === 403 || location.protocol === 'file:') return;
-    if (error.status === 401) alertSequence = 0;
+    if (error.status === 401) {
+      alertSequence = 0;
+      pendingReminder = null;
+    }
   }
   setTimeout(pollAlerts,450);
 }
@@ -882,5 +946,19 @@ showPage();
 $('#confirm-save').addEventListener('click',() => finishConfirmation(true));
 $('#confirm-cancel').addEventListener('click',() => finishConfirmation(false));
 $('#memory-kind').addEventListener('change',refreshMemory);
-$('#memory-panel').addEventListener('toggle',event => { if (event.target.open) refreshMemory(); });
+$('#memory-panel').addEventListener('toggle',event => {
+  if (!event.target.open) return;
+  refreshMemory();
+  loadPreferences().catch(error => { $('#memory-status').textContent = error.message; });
+});
+$('#agent-preferences').addEventListener('submit',async event => {
+  event.preventDefault();
+  const value = $('#camera-reminder').value;
+  try {
+    await agentRequest('/api/agent/preferences','PUT',JSON.stringify({
+      concise:$('#concise-replies').checked, reminder:value ? Number(value) : null
+    }));
+    $('#memory-status').textContent = 'Preferences saved.';
+  } catch (error) { $('#memory-status').textContent = error.message; }
+});
 pollAlerts();
