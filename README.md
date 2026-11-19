@@ -1,6 +1,6 @@
 # Visual Obstacle Avoidance
 
-> **Status:** Early-stage hackathon prototype. The repository currently contains research documents and scaffolding; the end-to-end system is not implemented yet.
+> **Status:** This branch runs the desktop Dashboard, paired JPEG camera preview and local LLM Agent. Live YOLO results come from a separate CV process using the adapter documented below.
 
 ## Overview
 
@@ -79,7 +79,7 @@ Each detection event should contain a camera ID, timestamp, object label, confid
 
 ## Running the Project
 
-No runnable application or verified setup commands are present in this repository yet. Each team should add its installation steps, dependencies, environment variables (without secrets), and start commands when implementation begins.
+See [Web setup](web/README.md) for the Dashboard and phone pairing, and [Agent setup and CV adapter](llm/README.md) for local models, the memory demo and the same-frame CV contract. The Dashboard uses the current JPEG transport. The WebRTC routes above are the team's planned transport.
 
 ## Safety and Privacy
 

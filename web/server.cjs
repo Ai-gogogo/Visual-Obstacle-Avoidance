@@ -3,6 +3,7 @@ const https = require('node:https');
 const { randomBytes, randomInt } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
+const { createAgentRoutes } = require('../llm/agent-routes.cjs');
 
 const files = {
   '/': ['index.html','text/html; charset=utf-8'],
@@ -11,6 +12,7 @@ const files = {
   '/camera.html': ['camera.html','text/html; charset=utf-8'],
   '/ui.css': ['ui.css','text/css; charset=utf-8'],
   '/desktop.js': ['desktop.js','text/javascript; charset=utf-8'],
+  '/voice-capture.js': ['voice-capture.js','text/javascript; charset=utf-8'],
   '/camera.js': ['camera.js','text/javascript; charset=utf-8'],
   '/demo-lab.webp': ['demo-lab.webp','image/webp']
 };
@@ -39,6 +41,7 @@ function createServer(options = {}) {
   const codes = new Map();
   const phones = new Map();
   const attempts = new Map();
+  const assistant = createAgentRoutes(options.agent, sessions, read, respond);
   const handler = async (req, res) => {
     res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Content-Type-Options','nosniff');
@@ -68,10 +71,14 @@ function createServer(options = {}) {
       for (const [code, entry] of codes) if (entry.until <= now) codes.delete(code);
       for (const [ip, entry] of attempts) if (entry.until <= now) attempts.delete(ip);
       const token = (req.headers.authorization || '').replace(/^Bearer /,'');
+      if (/^\/api\/(agent|memory|cv)\//.test(route)) {
+        return await assistant.handle(req,res,route,token);
+      }
       if (method === 'POST' && route === '/api/session') {
         if (sessions.size >= 32) return respond(res, 503, {error:'Session limit reached. Restart the local demo server.'});
         const id = key();
-        sessions.set(id, {until:now+TTL, slots:{A:{}, B:{}}});
+        sessions.set(id, {until:now+TTL, slots:{A:{}, B:{}}, sourceID:key(),
+          alerts:[], alertSeq:0, alertCooldown:new Map()});
         return respond(res, 201, {token:id});
       }
       if (method === 'POST' && route === '/api/join') {
@@ -136,10 +143,13 @@ function createServer(options = {}) {
       }
       return respond(res, 405, {error:'Method unavailable.'});
     } catch (error) {
-      if (!res.destroyed) respond(res, error.status || 400, {error:error.status === 413 ? 'Frame is too large.' : 'Could not process the request.'});
+      if (!res.destroyed && !res.headersSent) respond(res, error.status || (error instanceof SyntaxError ? 400 : 500),
+        {error:error.publicMessage || (error.status === 413 ? 'Request is too large.' : 'Could not process the request.')});
     }
   };
-  return options.tls ? https.createServer(options.tls, handler) : http.createServer(handler);
+  const server = options.tls ? https.createServer(options.tls, handler) : http.createServer(handler);
+  server.once('close', assistant.close);
+  return server;
 }
 
 if (require.main === module) {

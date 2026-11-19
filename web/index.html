@@ -18,6 +18,7 @@
     <button type="button" class="quiet contrast" id="contrast" aria-pressed="false">High contrast</button>
   </header>
   <main id="main" class="shell" tabindex="-1">
+    <p class="obstacle-alert" id="obstacle-alert" role="alert"></p>
     <section id="monitor" data-page>
       <div class="page-head">
         <div><h1 tabindex="-1">Live perception</h1><p>Compare two camera views and inspect object detections.</p></div>
@@ -42,22 +43,53 @@
       </section>
     </section>
     <section id="assist" data-page hidden>
-      <div class="page-head"><div><h1 tabindex="-1">Voice assistant</h1><p>Ask about your surroundings or type a question.</p></div><span class="status" id="assist-mode">Sample scene</span></div>
+      <div class="page-head"><div><h1 tabindex="-1">Voice assistant</h1><p>Talk to VisionAssist and follow along in the conversation.</p></div><span class="status" id="assist-mode">Local assistant</span></div>
       <div class="assist-grid">
         <section class="voice-card" aria-labelledby="voice-title">
           <div class="voice-head"><h2 id="voice-title">Ask a question</h2><span class="status" id="voice-state">Ready</span></div>
           <div class="voice-core">
-            <div class="rings"><button id="mic" class="mic" aria-label="Start voice input"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-3 0h6"/></svg></button></div>
-            <p class="voice-prompt" id="voice-prompt">Tap to speak</p>
-            <p class="voice-help">Voice input may use your browser’s speech service.</p>
+            <div class="rings"><button id="mic" class="mic" aria-label="Start conversation" aria-describedby="voice-help mic-error"><svg class="mic-start-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-3 0h6"/></svg><svg class="mic-stop-icon" aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg></button></div>
+            <p class="voice-prompt" id="voice-prompt" role="status">Tap to start a conversation</p>
+            <p id="mic-error" role="alert"></p>
+            <p class="voice-help" id="voice-help">Pause after each question. The assistant replies and listens again. Tap to end the conversation.</p>
           </div>
-          <form id="question-form"><label for="question">Type a question</label><div class="input-row"><input id="question" type="text" placeholder="What’s in front of the sample camera?" maxlength="200" required><button class="primary">Ask</button></div></form>
+          <p class="active-options" id="active-options">Both cameras · System language</p>
+          <details class="assist-details">
+            <summary>Voice controls and settings</summary>
+            <p>Say “Only look left”, “Use both cameras”, “Switch to Mandarin”, or “Export the conversation”.</p>
+            <div class="voice-options">
+              <label>Camera for visual questions
+                <select id="agent-camera"><option value="both" selected>Both cameras</option><option value="A">Left camera (A)</option><option value="B">Right camera (B)</option></select></label>
+              <label>Speech language
+                <select id="voice-language"><option value="system" selected>Follow system</option><option value="zh">Mandarin Chinese</option><option value="en">English</option><option value="auto">Auto detect</option></select></label>
+              <label class="review-option"><input id="review-voice" type="checkbox"> Review transcription before sending</label>
+            </div>
+          </details>
+          <details class="assist-details" id="keyboard-input">
+            <summary>Keyboard input</summary>
+            <form id="question-form"><label for="question">Type a question or command</label><div class="input-row"><input id="question" type="text" placeholder="What can you see?" maxlength="200" required><button class="primary">Ask</button></div></form>
+            <button type="button" class="quiet" id="discard-voice" hidden>Discard transcription</button>
+          </details>
+          <details id="memory-panel">
+            <summary>Saved memory</summary>
+            <p>Try “Remember, check my keys before going out” or “Register item water bottle.” To register a consenting person in view, say “Enroll person” followed by their name.</p>
+            <label for="memory-kind">Memory type</label>
+            <select id="memory-kind"><option value="habits">Habits</option><option value="items">Items</option><option value="people">People</option></select>
+            <ul id="memory-list"></ul><p id="memory-status" role="status"></p>
+          </details>
         </section>
         <section class="response-card" aria-labelledby="response-title">
-          <div class="section-head"><h2 id="response-title">Latest response</h2><span class="status" id="response-tag">Sample</span></div>
-          <p id="response">A chair is centered in Camera A. The sample distance is 1.4 meters.</p>
+          <div class="section-head"><h2 id="response-title">Conversation</h2><button id="export-conversation" type="button" class="quiet" disabled>Export Word</button></div>
+          <p id="conversation-empty">Start talking to see your conversation here.</p>
+          <ol id="conversation-log" tabindex="0" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions"></ol>
           <div id="voice-message" role="status"></div>
-          <div class="response-actions"><button class="quiet" id="describe">Describe surroundings</button><button class="quiet" id="replay">Read aloud</button><button class="quiet stop" id="stop">Stop audio</button></div>
+          <p id="export-status" role="status"></p>
+          <div id="confirm-memory" hidden>
+            <p id="confirmation-summary"></p>
+            <div class="toolbar"><button type="button" class="primary" id="confirm-save">Confirm and save</button>
+            <button type="button" class="quiet" id="confirm-cancel">Cancel</button></div>
+          </div>
+          <div class="response-actions"><button class="quiet" id="describe">Compare cameras</button><button class="quiet" id="replay">Read aloud</button><button class="quiet stop" id="stop" type="button" hidden>Stop playback</button></div>
         </section>
       </div>
     </section>
