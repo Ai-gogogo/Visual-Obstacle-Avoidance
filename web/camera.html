@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VisionAssist Camera</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="camera.js" defer></script>
+</head>
+<body class="phone">
+  <main class="phone-pair" id="phone-pair">
+    <div class="phone-card">
+      <div class="wordmark"><span class="mark" aria-hidden="true">◉</span>VisionAssist Camera</div>
+      <h1>Enter pairing code</h1>
+      <p>Use the six-digit code shown on the computer.</p>
+      <form id="phone-form">
+        <label for="code">Pairing code</label>
+        <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="000 000" maxlength="8" required aria-describedby="phone-status">
+        <button class="primary" id="connect">Connect camera</button>
+      </form>
+      <p id="phone-status" role="status"></p>
+    </div>
+  </main>
+  <video class="phone-preview" id="local-camera" autoplay muted playsinline aria-label="Your camera preview" hidden></video>
+</body>
+</html>
