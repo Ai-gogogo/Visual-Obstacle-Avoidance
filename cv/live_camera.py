@@ -14,6 +14,7 @@ from PIL import Image, ImageOps
 
 from detect_image import DEFAULT_WEIGHTS, detect
 from obstacles import is_obstacle_candidate
+from risk import RiskAssessment
 from tracking import FrameTracker
 
 
@@ -26,6 +27,7 @@ class CameraWorker:
         self.http = session
         self.etags = {}
         self.trackers = {}
+        self.risk_assessments = {}
         self.pending = {}  # Preserve the exact payload when a POST acknowledgment is lost.
         self.ids = count(1)
 
@@ -33,7 +35,7 @@ class CameraWorker:
         sources = self.http.get(self.api + "/sources", timeout=3)
         sources.raise_for_status()
         active = {s["source_id"] for s in sources.json()["sources"] if s["camera_id"] == self.side}
-        for cache in (self.etags, self.trackers, self.pending):
+        for cache in (self.etags, self.trackers, self.risk_assessments, self.pending):
             for source in cache.keys() - active:
                 del cache[source]
         for source in active:
@@ -67,9 +69,16 @@ class CameraWorker:
                 tracker = self.trackers.get(source)
                 if tracker is None or tracker.stream_id != stream:
                     tracker = self.trackers[source] = FrameTracker(stream, self.side, self.ids)
-                tracker.update(objects, int(frame.headers["X-CV-Frame-Ms"]))
+                    self.risk_assessments[source] = RiskAssessment()
+                stamp = int(frame.headers["X-CV-Frame-Ms"])
+                tracker.update(objects, stamp)
             for obj in objects:
                 obj["obstacle_candidate"] = is_obstacle_candidate(obj["bbox"])
+            if stream:
+                self.risk_assessments[source].update(objects, stamp)
+            else:
+                for obj in objects:
+                    obj["risk"] = "normal"
             self.pending[source] = (etag, objects)
         result = self.http.post(self.api + "/detections", params=params, timeout=3,
                                 json={"frame_id": etag.strip('"'), "objects": objects})

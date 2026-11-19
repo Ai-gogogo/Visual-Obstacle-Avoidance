@@ -77,7 +77,7 @@ function createAgentRoutes(options, sessions, read, respond) {
         if (session.alertCooldown.has(id)) continue;
         session.alertCooldown.set(id,now);
         session.alerts.push({id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,
-          text:'Caution. ' + obstacle.label + ', Camera ' + camera + ', ' + obstacle.position + '.', stamp:captured.stamp});
+          text:(obstacle.risk === 'urgent' ? 'Urgent. ' : 'Caution. ') + obstacle.label + ', Camera ' + camera + ', ' + obstacle.position + '.', stamp:captured.stamp});
       }
       session.alerts = session.alerts.slice(-20);
       // Measured on one clock, from server receipt of the JPEG to acceptance of CV results.

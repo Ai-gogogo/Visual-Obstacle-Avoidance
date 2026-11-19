@@ -106,3 +106,17 @@ python cv/benchmark_dual_camera.py --output /tmp/visionassist-dual-run
 It starts the normal worker and a private loopback server, pairs two simulated phones, and replays the bundled bus (A) and soccer (B) photos as JPEGs with a 640-pixel maximum edge and quality 70. Both streams submit a new frame every 220 ms. Measurement starts after both cameras return actual detections. Effective FPS is the number of distinct frames received and accepted within the same 30-second window divided by 30. Latency is summarized by median and nearest-rank P95.
 
 The [saved baseline](results/dual-camera-baseline/summary.json) and [per-frame timings](results/dual-camera-baseline/frames.csv) are from one CPU run on this Mac. The input cadence limits the observed FPS. Physical phones and Wi-Fi may give different results.
+
+## Obstacle risk
+
+Live objects include `risk: "normal" | "caution" | "urgent"` in the existing same-frame POST.
+A path candidate with confidence of at least 0.50 must appear with the same tracking ID in two
+consecutive processed frames within the tracking gap to reach `caution`. Both frames must also
+meet the urgency rule to reach `urgent`. The box must occupy at least 25% of image height, with
+its bottom at or below 80% of image height for relative depth `near`, or 90% for unknown depth.
+A relatively `far` candidate can still reach `caution`. The live worker tracks evidence separately
+for each paired camera stream and reuses the result when retrying the same frame.
+
+These image-space thresholds are intended for controlled demos with a forward-facing camera.
+Relative depth represents ordering within one image. A `normal` result means this rule did
+not confirm a hazard.

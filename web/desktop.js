@@ -206,6 +206,7 @@ const conversation = readConversation();
 let confirmation;
 let alertSequence = 0;
 let warningUntil = 0;
+let activeWarningRisk;
 let warningActive = false;
 
 function setVoiceState(title, prompt, label) {
@@ -776,8 +777,10 @@ async function pollAlerts() {
   try {
     const {sequence,alerts} = await agentRequest('/api/agent/alerts?after='+alertSequence,'GET');
     alertSequence = sequence;
-    if (alerts.length && Date.now() >= warningUntil) {
-      const warning = alerts.findLast(alert => alert.risk === 'urgent') || alerts.at(-1);
+    const warning = alerts.findLast(alert => alert.risk === 'urgent') || alerts.at(-1);
+    if (warning && (Date.now() >= warningUntil ||
+        (warning.risk === 'urgent' && activeWarningRisk !== 'urgent'))) {
+      activeWarningRisk = warning.risk;
       interruptTurn();
       warningUntil = Date.now()+3000;
       $('#obstacle-alert').textContent = warning.text;
