@@ -136,3 +136,39 @@ To try it, center one detectable object, say “这个水杯是我的”, confir
 “我的水杯在哪里？”. Try a differently colored object of the same YOLO class as
 well. This descriptor distinguishes color layouts and can confuse objects with
 similar appearances or react to lighting changes.
+
+## Live detection JSON v1
+
+The worker sends one result per processed JPEG to
+`POST /api/cv/detections?source_id=…&camera_id=A` (or B). The frame GET supplies the
+unquoted ETag for `frame_id` and the server's JPEG receipt time from
+`X-CV-Frame-Ms` for `timestamp_ms` (Unix milliseconds).
+
+```json
+{
+  "schema_version": 1,
+  "camera_id": "A",
+  "frame_id": "<ETag>",
+  "timestamp_ms": 1760000000000,
+  "objects": [
+    {
+      "label": "chair",
+      "confidence": 0.93,
+      "bbox": [0.31, 0.28, 0.69, 0.90],
+      "position": "center",
+      "relative_depth": "near",
+      "track_id": "A-12",
+      "obstacle_candidate": true,
+      "risk": "caution"
+    }
+  ]
+}
+```
+
+The service validates metadata against the pinned frame. Legacy payloads with
+only `frame_id` and `objects` are normalized to v1 on receipt. The Agent consumes
+the accepted snapshot directly, including any validated `item_feature` fields.
+`GET /api/preview/A` returns the same public fields plus the matching base64
+`jpeg`, with item descriptors omitted. In a preview, `objects: null` means
+the JPEG has no current detection result, while `objects: []` means the CV
+worker processed the frame and found no objects.

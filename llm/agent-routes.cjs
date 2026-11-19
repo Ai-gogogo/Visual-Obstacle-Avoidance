@@ -3,6 +3,7 @@ const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(addr
 const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
+const DETECTION_SCHEMA_VERSION = 1;
 
 function validItemFeature(feature) {
   return feature?.version === 'spatial-hsv-v1' &&
@@ -72,13 +73,24 @@ function createAgentRoutes(options, sessions, read, respond) {
       const payload = await asJSON(req,600_000);
       const objects = parseObjects(payload?.objects);
       if (!objects || typeof payload.frame_id !== 'string') return error(res,400,'Invalid detections.');
+      const versioned = ['schema_version','camera_id','timestamp_ms'].some(key => Object.hasOwn(payload,key));
+      if (versioned && (payload.schema_version !== DETECTION_SCHEMA_VERSION ||
+          payload.camera_id !== camera || !Number.isSafeInteger(payload.timestamp_ms))) {
+        return error(res,400,'Invalid detection frame metadata.');
+      }
       const captured = slot.cvFrames?.get(payload.frame_id);
       if (session.slots[camera] !== slot || !recent(captured) ||
-          (slot.detection && slot.detection.stamp > captured.stamp)) {
+          (slot.detection && slot.detection.timestamp_ms > captured.stamp)) {
         return error(res,409,'Frame expired or replaced.');
       }
+      if (versioned && payload.timestamp_ms !== captured.stamp) {
+        return error(res,400,'Detection timestamp does not match the pinned frame.');
+      }
       if (slot.detection?.frame_id === payload.frame_id) return res.writeHead(204).end();
-      slot.detection = {...captured,frame_id:payload.frame_id,objects};
+      slot.detection = {
+        schema_version:DETECTION_SCHEMA_VERSION, camera_id:camera, frame_id:payload.frame_id,
+        timestamp_ms:captured.stamp, objects, frame:captured.frame
+      };
       const now = Date.now();
       for (const [id,stamp] of session.alertCooldown) if (now-stamp > 5000) session.alertCooldown.delete(id);
       const hazards = objects.filter(object => object.risk !== 'normal' && object.confidence >= 0.5)
@@ -166,4 +178,4 @@ function createAgentRoutes(options, sessions, read, respond) {
   return {handle, close:agent.close};
 }
 
-module.exports = {createAgentRoutes};
+module.exports = {createAgentRoutes, DETECTION_SCHEMA_VERSION};

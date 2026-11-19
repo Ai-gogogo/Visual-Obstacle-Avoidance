@@ -57,7 +57,7 @@ class CameraWorker:
         etag = frame.headers["ETag"]
         pending = self.pending.get(source)
         if pending and pending[0] == etag:
-            objects = pending[1]
+            payload = pending[1]
         else:
             try:
                 with Image.open(io.BytesIO(frame.content)) as jpeg:
@@ -69,16 +69,17 @@ class CameraWorker:
 
             objects = detect(self.model, image)
             stream = frame.headers.get("X-CV-Stream-Id")
-            if stream:  # Older servers can still consume untracked detections.
+            frame_stamp = frame.headers.get("X-CV-Frame-Ms")
+            stamp = int(frame_stamp) if frame_stamp is not None else None
+            if stream and stamp is not None:  # Older servers can still consume untracked detections.
                 tracker = self.trackers.get(source)
                 if tracker is None or tracker.stream_id != stream:
                     tracker = self.trackers[source] = FrameTracker(stream, self.side, self.ids)
                     self.risk_assessments[source] = RiskAssessment()
-                stamp = int(frame.headers["X-CV-Frame-Ms"])
                 tracker.update(objects, stamp)
             for obj in objects:
                 obj["obstacle_candidate"] = is_obstacle_candidate(obj["bbox"])
-            if stream:
+            if stream and stamp is not None:
                 self.risk_assessments[source].update(objects, stamp)
             else:
                 for obj in objects:
@@ -89,9 +90,11 @@ class CameraWorker:
                 for obj, feature in zip(items, item_features(bgr, [obj["bbox"] for obj in items])):
                     if feature:
                         obj["item_feature"] = feature
-            self.pending[source] = (etag, objects)
-        result = self.http.post(self.api + "/detections", params=params, timeout=3,
-                                json={"frame_id": etag.strip('"'), "objects": objects})
+            payload = {"frame_id": etag.strip('"'), "objects": objects}
+            if stamp is not None:
+                payload.update(schema_version=1, camera_id=self.side, timestamp_ms=stamp)
+            self.pending[source] = (etag, payload)
+        result = self.http.post(self.api + "/detections", params=params, timeout=3, json=payload)
         if result.status_code not in (404, 409):
             result.raise_for_status()
             if self.record and "X-CV-Accepted-Ms" in result.headers:

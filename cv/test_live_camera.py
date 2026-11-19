@@ -79,6 +79,7 @@ class LiveCameraTests(unittest.TestCase):
         # starts the phone has already uploaded another blank. All three IDs differ.
         original_get = self.cv.get
         frame_ids = {}
+        metadata = {}
 
         def switch_after_read(url, **kwargs):
             response = original_get(url, **kwargs)
@@ -88,6 +89,8 @@ class LiveCameraTests(unittest.TestCase):
                 self.upload(a, self.bus)
             elif url.endswith("/frame"):
                 frame_ids["fetched"] = response.headers["ETag"].strip('"')
+                frame_stamp = int(response.headers["X-CV-Frame-Ms"])
+                metadata.update(schema_version=1, camera_id="A", timestamp_ms=frame_stamp)
                 self.upload(a, self.blank)
                 preview = self.request("GET", "/api/frame/A", self.desk)
                 frame_ids["latest"] = preview.headers["ETag"].strip('"')
@@ -97,7 +100,9 @@ class LiveCameraTests(unittest.TestCase):
               patch.object(self.cv, "post", wraps=self.cv.post) as publish):
             self.worker.poll()
         self.assertEqual(len(set(frame_ids.values())), 3)
-        self.assertEqual(publish.call_args.kwargs["json"]["frame_id"], frame_ids["fetched"])
+        payload = publish.call_args.kwargs["json"]
+        self.assertEqual(payload["frame_id"], frame_ids["fetched"])
+        self.assertEqual({key: payload[key] for key in metadata}, metadata)
         reply = self.scene()
         self.assertEqual(reply["source"], "yolo")
         self.assertIn("bus (center)", reply["reply_text"])

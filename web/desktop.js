@@ -159,6 +159,9 @@ async function readFrame(feed, version) {
       return;
     }
     const snapshot = await response.json();
+    if (snapshot.camera_id !== undefined && snapshot.camera_id !== feed.side) {
+      throw new Error('Preview camera does not match the requested feed.');
+    }
     const image = new Image();
     image.src = 'data:image/jpeg;base64,' + snapshot.jpeg;
     await image.decode();

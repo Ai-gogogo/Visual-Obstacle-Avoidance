@@ -67,7 +67,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
   const failure = (status, message) => Object.assign(new Error(message), {status, publicMessage:message});
   const output = (text, source = 'memory', extra = {}) => ({reply_text:text, source, confirmation:null, ...extra});
   const copyFrame = slot => fresh(slot?.stamp) && slot.frame;
-  const detections = slot => fresh(slot?.detection?.stamp) ? slot.detection : null;
+  const detections = slot => fresh(slot?.detection?.timestamp_ms) ? slot.detection : null;
 
   async function runResource(kind, operation) {
     if (busy.has(kind)) {
@@ -205,9 +205,9 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
         return best?.row.id === item.id && best.score >= 0.92 && (!second || best.score-second.score >= 0.06)
           ? [{score:best.score,object:objects[index]}] : [];
       });
-      if (matches.length === 1 && fresh(scene.stamp)) {
+      if (matches.length === 1 && fresh(scene.timestamp_ms)) {
         const {position} = matches[0].object;
-        const observed = {time:new Date(scene.stamp).toISOString(),camera:side,position};
+        const observed = {time:new Date(scene.timestamp_ms).toISOString(),camera:scene.camera_id,position};
         database().prepare('UPDATE memory SET last_seen=? WHERE id=?').run(JSON.stringify(observed),item.id);
         const positionText = {left:'左侧',center:'中央',right:'右侧'}[position];
         return output(isChinese ? '相机 ' + side + ' 画面' + positionText + '可能是你的' + item.name + '。' :

@@ -3,7 +3,7 @@ const https = require('node:https');
 const { randomBytes, randomInt } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
-const { createAgentRoutes } = require('../llm/agent-routes.cjs');
+const { createAgentRoutes, DETECTION_SCHEMA_VERSION } = require('../llm/agent-routes.cjs');
 
 const files = {
   '/': ['index.html','text/html; charset=utf-8'],
@@ -129,7 +129,7 @@ function createServer(options = {}) {
       if (method === 'GET' && action === 'preview') {
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
-        const detection = slot.detection && now - slot.detection.stamp <= FRESH ? slot.detection : null;
+        const detection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
         const frame = detection?.frame ?? slot.frame;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
         // A raw preview can acquire boxes without the camera uploading a new JPEG.
@@ -137,7 +137,11 @@ function createServer(options = {}) {
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
         const objects = detection?.objects.map(({item_feature, ...object}) => object) ?? null;
-        return respond(res,200,{frame_id, jpeg:frame.toString('base64'), objects});
+        return respond(res,200,{
+          schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
+          timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
+          jpeg:frame.toString('base64'), objects
+        });
       }
       if (method === 'POST' && action === 'pair') {
         for (const [code, entry] of codes) if (entry.session === token && entry.slot === side) codes.delete(code);
