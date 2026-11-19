@@ -61,7 +61,9 @@ function renderDetections() {
   const rows = list.map(object => {
     const row = document.createElement('tr');
     const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
-    for (const text of [trackedLabel(object), 'Camera ' + object.camera, value, object.position]) {
+    const cells = [trackedLabel(object), 'Camera ' + object.camera, value, object.position];
+    if (!sampleMode) cells.push(object.relative_depth ?? 'unknown');
+    for (const text of cells) {
       const cell = document.createElement('td');
       cell.textContent = text;
       row.append(cell);
@@ -69,6 +71,7 @@ function renderDetections() {
     return row;
   });
   $('#detection-rows').replaceChildren(...rows);
+  $('#depth-heading').hidden = sampleMode;
   $('#detection-measure').textContent = sampleMode ? 'Distance' : 'Confidence';
   $('#detection-count').textContent = waiting ? 'Waiting' :
     list.length + (list.length === 1 ? ' object' : ' objects');
@@ -190,7 +193,7 @@ function renderMode(demo) {
   sampleMode = demo;
   $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
   $('#assist-mode').textContent = demo ? 'Sample scene' : 'Live preview mode';
-  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'YOLO detections from each displayed camera frame.';
+  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'Depth compares objects on the same level ground within each camera view.';
   $('#voice-message').textContent = '';
   feeds.forEach(feed => setFeed(feed,false));
   refreshPolling();

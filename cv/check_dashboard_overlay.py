@@ -30,9 +30,12 @@ def check_dual_views(page, host, desktop, model, person, screenshots):
     with requests.Session() as http:
         workers = {side: CameraWorker(host, model, http, side) for side in "AB"}
 
-        def show(side, left):
+        def show(side, left, second_person=False):
             frame = Image.new("RGB", (640, 360), "#dedede")
             frame.paste(person, (left, 44))
+            if second_person:
+                small = person.resize((person.width // 2, person.height // 2))
+                frame.paste(small, (36, 72))
             jpeg = io.BytesIO()
             frame.save(jpeg, "JPEG", quality=85)
             http.put(host + "/api/frame", headers=headers[side], data=jpeg.getvalue(), timeout=3).raise_for_status()
@@ -49,6 +52,7 @@ def check_dual_views(page, host, desktop, model, person, screenshots):
             canvas = page.locator(f'[data-camera="{side}"] canvas')
             expect(canvas).to_have_attribute("data-frame-id", snapshot["frame_id"])
             expect(rows.filter(has_text=f"Camera {side}")).to_contain_text(position)
+            expect(rows.filter(has_text=f"Camera {side}").get_by_role("cell", name="unknown", exact=True)).to_be_visible()
             track_id = snapshot["objects"][0]["track_id"]
             assert track_id.startswith(side + "-")
             expect(rows.filter(has_text=f"Camera {side}")).to_contain_text("#" + track_id)
@@ -59,9 +63,13 @@ def check_dual_views(page, host, desktop, model, person, screenshots):
         if screenshots:
             page.locator(".feed-grid").screenshot(path=str(screenshots / "dual.png"))
         http.delete(host + "/api/frame", headers=headers["B"], timeout=3).raise_for_status()
-        updated = show("A", 500)
+        updated = show("A", 500, second_person=True)
         expect(page.locator('[data-camera="A"] canvas')).to_have_attribute("data-frame-id", updated["frame_id"])
-        expect(rows.filter(has_text="Camera A")).to_contain_text("right")
+        a_rows = rows.filter(has_text="Camera A")
+        expect(a_rows.filter(has_text="right").get_by_role("cell", name="near", exact=True)).to_be_visible()
+        expect(a_rows.filter(has_text="left").get_by_role("cell", name="far", exact=True)).to_be_visible()
+        if screenshots:
+            page.locator("#detection-rows").screenshot(path=str(screenshots / "depth-rows.png"))
         expect(page.locator('[data-camera="B"] canvas')).to_be_hidden()
         expect(rows.filter(has_text="Camera B")).to_have_count(0)
 
@@ -143,6 +151,7 @@ def exercise(page, host, model, screenshots):
         check_dual_views(page, host, desktop, model, person, screenshots)
         page.get_by_role("button", name="Show sample feeds").click()
         expect(rows).to_have_count(4)
+        expect(page.locator("#depth-heading")).to_be_hidden()
         expect(page.locator("#detection-measure")).to_have_text("Distance")
 
 

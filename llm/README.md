@@ -67,11 +67,14 @@ Ollama 需要在本机 127.0.0.1:11434 运行。建议在启动 Ollama 的环境
       "confidence": 0.94,
       "bbox": [0.42, 0.26, 0.61, 0.81],
       "track_id": "A-21",
+      "relative_depth": "unknown",
       "risk": "normal"
     }
   ]
 }
 ~~~
+
+`relative_depth` 比较同一相机同一帧内可比较的物体。取值为 `near`（较近）、`far`（较远）或 `unknown`（无法判断）。缺少此字段或值无法识别时按 `unknown` 处理。在 Agent 选择一台相机后可询问“哪个物体更近？”。
 
 结果过期、相机重配或提交了比当前结果更早的帧时返回 409，这时取新帧再推理。先按相机独立处理。后续若切换 WebRTC，复用这套数据契约，把 JPEG 适配到 WebRTC 后端的帧缓存即可。
 

@@ -267,6 +267,18 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       return output(habits.length ? habits.join(isChinese ? '；' : '. ') : isChinese ? '还没有保存习惯。' : 'No habits are saved yet.');
     }
     const slot = session.slots[side];
+    const depthQuestion = /(?:哪个|哪些|哪一个|谁|什么东西)(?:物体|东西|人)?(?:看起来|离我|距离我)?(?:比较|更|最|较)?(?:近|远)|\b(?:which|what)(?: object| objects| one| person)? (?:is|are|looks?|seems?) (?:the )?(?:closer|closest|nearer|nearest|farther|furthest|farthest|further)\b/iu;
+    if (input.mode !== 'image' && depthQuestion.test(text)) {
+      if (twoCameras) return oneCamera();
+      const scene = detections(slot);
+      if (!scene) return output(isChinese ? '当前没有可用的 YOLO 检测。' : 'There are no recent YOLO detections.', 'unavailable');
+      const far = /远|\b(?:farther|furthest|farthest|further)\b/iu.test(text);
+      const matches = scene.objects.filter(o => o.relative_depth === (far ? 'far' : 'near'));
+      if (!matches.length) return output(isChinese ? '这一帧无法判断相对远近。' : 'I cannot tell the relative depth in this frame.', 'yolo');
+      const names = matches.map(o => isChinese ? o.label + '（' + {left:'左侧',center:'中央',right:'右侧'}[o.position] + '）' : o.label + ' (' + o.position + ')');
+      return output(isChinese ? '相机 ' + side + ' 中看起来较' + (far ? '远' : '近') + '的有：' + names.join('、') + '。' :
+        'In Camera ' + side + ', these appear ' + (far ? 'farther' : 'closer') + ': ' + names.join(', ') + '.', 'yolo');
+    }
     const wantsImage = input.mode === 'image' || /什么颜色|哪种颜色|看图|画面细节|what colou?r|look at (?:the|this) (?:picture|frame)/iu.test(text) ||
       (twoCameras && /画面|相机|有什么|看到|前方|周围|camera|compare|differences|in front|surroundings|what (?:can|do) you see/iu.test(text));
     if (input.mode === 'scene' || (!wantsImage && /前面有什么|前方|周围|看到什么|in front|surroundings|what (?:can|do) you see/iu.test(text))) {

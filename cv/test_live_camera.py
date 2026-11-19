@@ -111,6 +111,37 @@ class LiveCameraTests(unittest.TestCase):
             self.worker.poll()  # Unchanged frame, HTTP 304.
             self.assertEqual(predict.call_count, 1)
 
+    def test_relative_depth_in_each_camera_preview_and_agent(self):
+        with Image.open(ASSETS / "bus.jpg") as photo:
+            person = photo.crop((44, 390, 244, 907))
+        phones = {side: self.pair(side) for side in "AB"}
+        b_worker = CameraWorker(self.base, self.model, self.cv, "B")
+        def replay(side, worker, placements):
+            image = Image.new("RGB", (640, 540), "#dedede")
+            for x, z in placements:
+                # Level camera: projected body height and foot-to-horizon offset vary as 1/z.
+                height = round(510 / z)
+                feet = round(190 + 450 / z)
+                sprite = person.resize((round(height * person.width / person.height), height))
+                image.paste(sprite, (x, feet - height))
+            self.upload(phones[side], phone_jpeg(image))
+            worker.poll()
+            snapshot = self.request("GET", "/api/preview/" + side, self.desk).json()
+            return {o["position"]: o.get("relative_depth") for o in snapshot["objects"] if o["label"] == "person"}
+
+        def ask(side, question="Which object is closer?"):
+            return self.request("POST", "/api/agent/chat", self.desk,
+                                json={"camera_id": side, "text": question}).json()["reply_text"]
+
+        self.assertEqual(replay("A", self.worker, [(40, 2), (505, 4)]), {"left":"near", "right":"far"})
+        self.assertEqual(replay("B", b_worker, [(40, 4), (505, 2)]), {"left":"far", "right":"near"})
+        self.assertIn("person (left)", ask("A"))
+        self.assertNotIn("person (right)", ask("A"))
+        self.assertIn("person (right)", ask("B"))
+        self.assertIn("person（右侧）", ask("A", "哪个物体更远？"))
+        self.assertEqual(replay("A", self.worker, [(40, 2)]), {"left":"unknown"})
+        self.assertIn("cannot tell", ask("A"))
+
     def test_lost_ack_retries_identical_tracks_without_repeating_inference(self):
         self.upload(self.pair("A"), self.bus)
         post = self.cv.post
