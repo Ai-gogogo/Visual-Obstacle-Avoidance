@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VisionAssist</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="desktop.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="shell masthead">
+    <a class="wordmark" href="#monitor"><span class="mark" aria-hidden="true">◉</span>VisionAssist</a>
+    <nav aria-label="Desktop pages">
+      <a href="#monitor" data-route="monitor" aria-current="page">Judge view</a>
+      <a href="#assist" data-route="assist">Voice assistant</a>
+    </nav>
+    <button type="button" class="quiet contrast" id="contrast" aria-pressed="false">High contrast</button>
+  </header>
+  <main id="main" class="shell" tabindex="-1">
+    <section id="monitor" data-page>
+      <div class="page-head">
+        <div><h1 tabindex="-1">Live perception</h1><p>Compare two camera views and inspect object detections.</p></div>
+        <div class="toolbar"><button class="quiet" id="mode">Show live cameras</button><button class="primary" id="pair">Pair a phone</button></div>
+      </div>
+      <div class="feed-grid">
+        <article class="feed" data-camera="A">
+          <header><div><span class="camera-icon" aria-hidden="true">A</span><h2>Camera A</h2></div><span class="status feed-status">Sample feed</span></header>
+          <div class="frame"><div class="sample-image sample-a" role="img" aria-label="Sample lab view with a chair and a desk"></div><img class="live-frame" alt="Live camera A preview" hidden><p class="no-feed" hidden>Waiting for Camera A</p><div class="overlays" aria-hidden="true"></div></div>
+          <footer><span>Primary view</span><span class="feed-summary">2 sample detections</span></footer>
+        </article>
+        <article class="feed" data-camera="B">
+          <header><div><span class="camera-icon" aria-hidden="true">B</span><h2>Camera B</h2></div><span class="status feed-status">Sample feed</span></header>
+          <div class="frame"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><img class="live-frame" alt="Live camera B preview" hidden><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
+          <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
+        </article>
+      </div>
+      <section class="detections" aria-labelledby="detections-title">
+        <div class="section-head"><div><h2 id="detections-title">Detected objects</h2><p id="detection-note">Sample annotations · distances are illustrative.</p></div><span class="status" id="detection-count">4 objects</span></div>
+        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th scope="col">Distance</th><th scope="col">Position in frame</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
+        <p class="empty" id="empty-detections" hidden>Live video preview is available once paired. This prototype has no live detection or distance source.</p>
+      </section>
+    </section>
+    <section id="assist" data-page hidden>
+      <div class="page-head"><div><h1 tabindex="-1">Voice assistant</h1><p>Ask about your surroundings or type a question.</p></div><span class="status" id="assist-mode">Sample scene</span></div>
+      <div class="assist-grid">
+        <section class="voice-card" aria-labelledby="voice-title">
+          <div class="voice-head"><h2 id="voice-title">Ask a question</h2><span class="status" id="voice-state">Ready</span></div>
+          <div class="voice-core">
+            <div class="rings"><button id="mic" class="mic" aria-label="Start voice input"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-3 0h6"/></svg></button></div>
+            <p class="voice-prompt" id="voice-prompt">Tap to speak</p>
+            <p class="voice-help">Voice input may use your browser’s speech service.</p>
+          </div>
+          <form id="question-form"><label for="question">Type a question</label><div class="input-row"><input id="question" type="text" placeholder="What’s in front of the sample camera?" maxlength="200" required><button class="primary">Ask</button></div></form>
+        </section>
+        <section class="response-card" aria-labelledby="response-title">
+          <div class="section-head"><h2 id="response-title">Latest response</h2><span class="status" id="response-tag">Sample</span></div>
+          <p id="response">A chair is centered in Camera A. The sample distance is 1.4 meters.</p>
+          <div id="voice-message" role="status"></div>
+          <div class="response-actions"><button class="quiet" id="describe">Describe surroundings</button><button class="quiet" id="replay">Read aloud</button><button class="quiet stop" id="stop">Stop audio</button></div>
+        </section>
+      </div>
+    </section>
+  </main>
+  <dialog id="pair-dialog" aria-labelledby="pair-title">
+    <form method="dialog"><button class="quiet dialog-close" aria-label="Close pairing dialog">Close</button></form>
+    <h2 id="pair-title">Pair a phone</h2>
+    <p>Open the camera site on the phone and enter the code for the camera slot you want.</p>
+    <p id="phone-address" class="address"></p>
+    <div class="pair-options">
+      <button type="button" class="primary" data-pair="A">Code for Camera A</button>
+      <button type="button" class="primary" data-pair="B">Code for Camera B</button>
+    </div>
+    <div id="pair-result" role="status"></div>
+  </dialog>
+</body>
+</html>
