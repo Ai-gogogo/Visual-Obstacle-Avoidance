@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import csv
 import io
 import sys
+from itertools import count
 from pathlib import Path
 from threading import Event, Lock
 
@@ -12,6 +13,7 @@ import requests
 from PIL import Image, ImageOps
 
 from detect_image import DEFAULT_WEIGHTS, detect
+from tracking import FrameTracker
 
 
 class CameraWorker:
@@ -22,13 +24,17 @@ class CameraWorker:
         self.model = model
         self.http = session
         self.etags = {}
+        self.trackers = {}
+        self.pending = {}  # Preserve the exact payload when a POST acknowledgment is lost.
+        self.ids = count(1)
 
     def poll(self):
         sources = self.http.get(self.api + "/sources", timeout=3)
         sources.raise_for_status()
         active = {s["source_id"] for s in sources.json()["sources"] if s["camera_id"] == self.side}
-        for source in self.etags.keys() - active:
-            del self.etags[source]
+        for cache in (self.etags, self.trackers, self.pending):
+            for source in cache.keys() - active:
+                del cache[source]
         for source in active:
             self.process_frame(source)
 
@@ -42,15 +48,26 @@ class CameraWorker:
         # The phone may upload again between discovery, this GET and publication.
         # Only the ETag on these JPEG bytes identifies the image we will process.
         etag = frame.headers["ETag"]
-        try:
-            with Image.open(io.BytesIO(frame.content)) as jpeg:
-                image = ImageOps.exif_transpose(jpeg).convert("RGB")
-        except (OSError, Image.DecompressionBombError) as error:
-            self.etags[source] = etag
-            print(f"Skipping unreadable Camera {self.side} frame: {error}", file=sys.stderr)
-            return
+        pending = self.pending.get(source)
+        if pending and pending[0] == etag:
+            objects = pending[1]
+        else:
+            try:
+                with Image.open(io.BytesIO(frame.content)) as jpeg:
+                    image = ImageOps.exif_transpose(jpeg).convert("RGB")
+            except (OSError, Image.DecompressionBombError) as error:
+                self.etags[source] = etag
+                print(f"Skipping unreadable Camera {self.side} frame: {error}", file=sys.stderr)
+                return
 
-        objects = detect(self.model, image)
+            objects = detect(self.model, image)
+            stream = frame.headers.get("X-CV-Stream-Id")
+            if stream:  # Older servers can still consume untracked detections.
+                tracker = self.trackers.get(source)
+                if tracker is None or tracker.stream_id != stream:
+                    tracker = self.trackers[source] = FrameTracker(stream, self.side, self.ids)
+                tracker.update(objects, int(frame.headers["X-CV-Frame-Ms"]))
+            self.pending[source] = (etag, objects)
         result = self.http.post(self.api + "/detections", params=params, timeout=3,
                                 json={"frame_id": etag.strip('"'), "objects": objects})
         if result.status_code not in (404, 409):
@@ -61,6 +78,7 @@ class CameraWorker:
         # Accepted or obsolete. A transient transport/server failure above leaves
         # this ETag eligible for retry if the same JPEG is still available.
         self.etags[source] = etag
+        del self.pending[source]
 
 
 # Existing single-camera callers can keep their original constructor.

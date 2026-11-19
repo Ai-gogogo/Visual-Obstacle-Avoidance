@@ -95,7 +95,7 @@ function createServer(options = {}) {
         const slot = session.slots[entry.slot];
         phones.delete(slot.phone);
         const phone = key();
-        session.slots[entry.slot] = {phone, stamp:0};
+        session.slots[entry.slot] = {phone, streamID:key(), stamp:0};
         phones.set(phone, {session:entry.session, slot:entry.slot});
         attempts.delete(ip);
         return respond(res, 200, {token:phone});

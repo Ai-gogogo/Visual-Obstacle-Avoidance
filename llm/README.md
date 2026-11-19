@@ -54,7 +54,7 @@ Ollama 需要在本机 127.0.0.1:11434 运行。建议在启动 Ollama 的环境
 当前 VisionAssist 的手机数据入口是本地 JPEG 配对预览。CV 可以用 Python 从同一电脑的回环地址获取 JPEG，再发布同帧结果。服务器使用实收时间验证新鲜度，结果失效后停止为当前画面提供回答。示例检测从未进入 Agent。启动 Dashboard 后才会提供可用的 CV 数据源。
 
 1. `GET /api/cv/sources` 返回已配对且帧仍新鲜的 `sources`。每项包括 `source_id`、`camera_id` 和 `frame_id`。
-2. `GET /api/cv/frame?source_id=...&camera_id=A` 返回 JPEG。用本次响应 `ETag` 去掉外层引号以获得真实 `frame_id`。用 `If-None-Match` 可以避免重复推理。返回 204 表示暂时没帧，304 表示帧没变。
+2. `GET /api/cv/frame?source_id=...&camera_id=A` 返回 JPEG。响应头 `X-CV-Stream-Id` 标识本次配对，重新配对时会更换。`X-CV-Frame-Ms` 是服务器收到该帧的毫秒时间戳。用本次响应 `ETag` 去掉外层引号以获得真实 `frame_id`。用 `If-None-Match` 可以避免重复推理。返回 204 表示暂时没帧，304 表示帧没变。
 3. `POST /api/cv/detections?source_id=...&camera_id=A` 提交同帧检测，一次提交完整结果。坐标归一化到 0–1，顺序 `[x1, y1, x2, y2]`，方位为 `left / center / right`。没有检测到物体时提交空数组。
 
 ~~~json
@@ -66,7 +66,7 @@ Ollama 需要在本机 127.0.0.1:11434 运行。建议在启动 Ollama 的环境
       "position": "center",
       "confidence": 0.94,
       "bbox": [0.42, 0.26, 0.61, 0.81],
-      "track_id": 21,
+      "track_id": "A-21",
       "risk": "normal"
     }
   ]

@@ -50,6 +50,10 @@ function makeAnnotations() {
   }
 }
 
+function trackedLabel(object) {
+  return object.track_id ? object.label + ' #' + object.track_id : object.label;
+}
+
 function renderDetections() {
   const list = sampleMode ? sample : feeds.flatMap(feed =>
     (feed.objects ?? []).map(object => ({...object, camera:feed.side})));
@@ -57,7 +61,7 @@ function renderDetections() {
   const rows = list.map(object => {
     const row = document.createElement('tr');
     const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
-    for (const text of [object.label, 'Camera ' + object.camera, value, object.position]) {
+    for (const text of [trackedLabel(object), 'Camera ' + object.camera, value, object.position]) {
       const cell = document.createElement('td');
       cell.textContent = text;
       row.append(cell);
@@ -83,11 +87,12 @@ function paintCamera(canvas, image, snapshot) {
   ctx.font = '600 ' + fontSize + 'px system-ui';
   ctx.lineWidth = Math.max(2, width / 240);
   ctx.textBaseline = 'top';
-  for (const {bbox:[x1,y1,x2,y2], label, confidence, position} of snapshot.objects ?? []) {
+  for (const object of snapshot.objects ?? []) {
+    const {bbox:[x1,y1,x2,y2], confidence, position} = object;
     const x = x1 * width, y = y1 * height;
     ctx.strokeStyle = '#8ce9ff';
     ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
-    const caption = label + ' · ' + Math.round(confidence*100) + '% · ' + position;
+    const caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position;
     const labelWidth = Math.min(width, Math.ceil(ctx.measureText(caption).width) + 8);
     const left = Math.min(x, width-labelWidth);
     const top = Math.max(0, y-fontSize-6);

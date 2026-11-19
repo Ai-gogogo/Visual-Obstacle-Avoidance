@@ -49,7 +49,8 @@ function createAgentRoutes(options, sessions, read, respond) {
       for (const [id, item] of slot.cvFrames) if (!recent(item)) slot.cvFrames.delete(id);
       slot.cvFrames.set(slot.etag.slice(1,-1),{frame:slot.frame,stamp:slot.stamp});
       while (slot.cvFrames.size > 8) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
-      return res.writeHead(200,{'Content-Type':'image/jpeg',ETag:slot.etag}).end(slot.frame);
+      return res.writeHead(200,{'Content-Type':'image/jpeg',ETag:slot.etag,
+        'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
     return error(res,404,'Unknown CV route.');

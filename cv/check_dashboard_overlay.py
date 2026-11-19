@@ -28,13 +28,15 @@ def pair_phone(page, host, side):
 def check_dual_views(page, host, desktop, model, person, screenshots):
     headers = {side: pair_phone(page, host, side) for side in "AB"}
     with requests.Session() as http:
+        workers = {side: CameraWorker(host, model, http, side) for side in "AB"}
+
         def show(side, left):
             frame = Image.new("RGB", (640, 360), "#dedede")
             frame.paste(person, (left, 44))
             jpeg = io.BytesIO()
             frame.save(jpeg, "JPEG", quality=85)
             http.put(host + "/api/frame", headers=headers[side], data=jpeg.getvalue(), timeout=3).raise_for_status()
-            CameraWorker(host, model, http, side).poll()
+            workers[side].poll()
             snapshot = http.get(host + "/api/preview/" + side, headers=desktop, timeout=3).json()
             assert base64.b64decode(snapshot["jpeg"]) == jpeg.getvalue()
             return snapshot
@@ -47,6 +49,9 @@ def check_dual_views(page, host, desktop, model, person, screenshots):
             canvas = page.locator(f'[data-camera="{side}"] canvas')
             expect(canvas).to_have_attribute("data-frame-id", snapshot["frame_id"])
             expect(rows.filter(has_text=f"Camera {side}")).to_contain_text(position)
+            track_id = snapshot["objects"][0]["track_id"]
+            assert track_id.startswith(side + "-")
+            expect(rows.filter(has_text=f"Camera {side}")).to_contain_text("#" + track_id)
             x1, y1, _, y2 = snapshot["objects"][0]["bbox"]
             png = canvas.evaluate("c => c.toDataURL('image/png').split(',')[1]")
             with Image.open(io.BytesIO(base64.b64decode(png))) as rendered:
@@ -74,7 +79,7 @@ def exercise(page, host, model, screenshots):
     person.thumbnail((122, 272))
     with requests.Session() as http:
         worker = CameraWorker(host, model, http, 'A')
-        for state, left in [("left", 24), ("right", 500), ("empty", None), ("reappeared", 24)]:
+        for state, left in [("left", 24), ("continuous", 48), ("right", 500), ("empty", None), ("reappeared", 24)]:
             image = Image.new("RGB", (640, 360), "#dedede")
             if left is not None:
                 image.paste(person, (left, 44))
@@ -96,7 +101,13 @@ def exercise(page, host, model, screenshots):
                     expect(page.locator("#empty-detections")).to_be_visible()
                 else:
                     person_box = next(o for o in snapshot["objects"] if o["label"] == "person")
-                    position = "left" if left == 24 else "right"
+                    position = "right" if state == "right" else "left"
+                    track_id = person_box["track_id"]
+                    expect(rows.filter(has_text="person").first).to_contain_text("#" + track_id)
+                    if state == "left":
+                        initial_id = track_id
+                    elif state == "continuous":
+                        assert track_id == initial_id
                     assert person_box["position"] == position
                     expect(rows.filter(has_text="person").first).to_contain_text(position)
                     x1, y1, _, y2 = person_box["bbox"]

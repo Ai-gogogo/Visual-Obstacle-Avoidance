@@ -14,7 +14,7 @@ from ultralytics import YOLO
 from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
-from live_camera import CameraAWorker
+from live_camera import CameraAWorker, CameraWorker
 
 
 def phone_jpeg(image):
@@ -111,6 +111,30 @@ class LiveCameraTests(unittest.TestCase):
             self.worker.poll()  # Unchanged frame, HTTP 304.
             self.assertEqual(predict.call_count, 1)
 
+    def test_lost_ack_retries_identical_tracks_without_repeating_inference(self):
+        self.upload(self.pair("A"), self.bus)
+        post = self.cv.post
+        sent = []
+
+        def lose_first_ack(url, **kwargs):
+            response = post(url, **kwargs)
+            self.assertEqual(response.status_code, 204)
+            sent.append(kwargs["json"])
+            if len(sent) == 1:
+                raise requests.ConnectionError("Simulated lost acknowledgement")
+            return response
+
+        with (patch.object(self.cv, "post", side_effect=lose_first_ack),
+              patch.object(self.model, "predict", wraps=self.model.predict) as predict):
+            with self.assertRaises(requests.ConnectionError):
+                self.worker.poll()
+            self.worker.poll()
+            self.assertEqual(predict.call_count, 1)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[0], sent[1])
+        self.assertTrue(all(o["track_id"] for o in sent[0]["objects"]))
+        self.assertIn("bus (center)", self.scene()["reply_text"])
+
     def test_dashboard_returns_pixels_and_boxes_from_one_processed_frame(self):
         phone = self.pair("A")
         path = "/api/preview/A"
@@ -205,6 +229,54 @@ class LiveCameraTests(unittest.TestCase):
         self.assertIn("No confident objects", self.scene("A")["reply_text"])
         self.assertEqual(self.scene("B")["source"], "unavailable")
         self.assertEqual(self.request("GET", "/api/preview/B", self.desk).status_code, 204)
+
+    def test_track_ids_in_two_person_replay_and_immediate_repair(self):
+        phones = {side: self.pair(side) for side in "AB"}
+        b_worker = CameraWorker(self.base, self.model, self.cv, "B")
+        with Image.open(ASSETS / "bus.jpg") as photo:
+            upper = photo.crop((44, 390, 244, 907))
+            lower = photo.crop((220, 402, 346, 862))
+        for crop in [upper, lower]:
+            crop.thumbnail((110, 240))
+
+        def frame_at(x):
+            image = Image.new("RGB", (640, 540), "#dedede")
+            image.paste(upper, (x, 8))
+            image.paste(lower, (540 - x, 282))
+            return phone_jpeg(image)
+
+        def people(side):
+            snapshot = self.request("GET", "/api/preview/" + side, self.desk).json()
+            people = sorted((o for o in snapshot["objects"] if o["label"] == "person"),
+                            key=lambda o: o["bbox"][1])
+            self.assertEqual(len(people), 2)
+            self.assertTrue(all(o["track_id"] for o in people))
+            self.assertNotEqual(people[0]["track_id"], people[1]["track_id"])
+            return [o["track_id"] for o in people], people[0]["position"]
+
+        positions = set()
+        for i, x in enumerate(range(32, 514, 24)):
+            self.upload(phones["A"], frame_at(x))
+            self.worker.poll()
+            ids, position = people("A")
+            positions.add(position)
+            if i == 0:
+                a_ids = ids
+            self.assertEqual(ids, a_ids)
+        self.assertEqual(positions, {"left", "center", "right"})
+        self.upload(phones["B"], frame_at(32))
+        b_worker.poll()
+        b_ids, _ = people("B")
+        self.assertTrue(set(a_ids).isdisjoint(b_ids))
+
+        # Replace A directly between polls; source_id is unchanged, with no offline poll.
+        phones["A"] = self.pair("A")
+        self.upload(phones["A"], frame_at(x))
+        self.worker.poll()
+        self.assertTrue(set(a_ids).isdisjoint(people("A")[0]))
+        self.upload(phones["B"], frame_at(40))
+        b_worker.poll()
+        self.assertEqual(people("B")[0], b_ids)
 
     def test_running_cli_follows_phone_uploads(self):
         script = Path(__file__).with_name("live_camera.py")
