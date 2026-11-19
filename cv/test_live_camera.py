@@ -163,6 +163,49 @@ class LiveCameraTests(unittest.TestCase):
         self.worker.poll()
         self.assertIn("bus (center)", self.scene()["reply_text"])
 
+    def test_dual_cli_keeps_frames_and_answers_separate_after_b_disconnects(self):
+        process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("live_camera.py")),
+                                    "--server", self.base])
+        self.addCleanup(process.wait, 5)
+        self.addCleanup(process.terminate)
+        phones = {side: self.pair(side) for side in "AB"}
+        images = {"A": self.bus, "B": self.blank}
+
+        def wait_for_results():
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                self.assertIsNone(process.poll())
+                for side, jpeg in images.items():
+                    self.upload(phones[side], jpeg)
+                time.sleep(0.22)
+                results = {}
+                for side, jpeg in images.items():
+                    value = self.request("GET", "/api/preview/" + side, self.desk).json()
+                    if value["objects"] is not None and base64.b64decode(value["jpeg"]) == jpeg:
+                        results[side] = value
+                if len(results) == len(images):
+                    return results
+            self.fail("A camera did not publish fresh matching detections")
+
+        both = wait_for_results()
+        self.assertNotEqual(both["A"]["frame_id"], both["B"]["frame_id"])
+        source = self.request("GET", "/api/cv/sources").json()["sources"][0]["source_id"]
+        wrong = self.cv.post(self.base + "/api/cv/detections", params={"source_id": source, "camera_id": "B"},
+                             json={"frame_id": both["A"]["frame_id"], "objects": both["A"]["objects"]}, timeout=3)
+        self.assertEqual(wrong.status_code, 409)
+        self.assertTrue(any(o["label"] == "bus" for o in both["A"]["objects"]))
+        self.assertEqual(both["B"]["objects"], [])
+        self.assertIn("bus (center)", self.scene("A")["reply_text"])
+        self.assertIn("No confident objects", self.scene("B")["reply_text"])
+        self.request("DELETE", "/api/frame", phones["B"])
+        images = {"A": self.blank}
+        after = wait_for_results()
+        self.assertNotEqual(after["A"]["frame_id"], both["A"]["frame_id"])
+        self.assertEqual(after["A"]["objects"], [])
+        self.assertIn("No confident objects", self.scene("A")["reply_text"])
+        self.assertEqual(self.scene("B")["source"], "unavailable")
+        self.assertEqual(self.request("GET", "/api/preview/B", self.desk).status_code, 204)
+
     def test_running_cli_follows_phone_uploads(self):
         script = Path(__file__).with_name("live_camera.py")
         process = subprocess.Popen([sys.executable, str(script), "--server", self.base])

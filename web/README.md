@@ -2,7 +2,7 @@
 
 ## 先看设计
 
-- 电脑打开 `index.html`。默认进入 **Judge view**，显示两路示例画面和物体框。配对后进入实时模式，Camera A 显示 YOLO 框和检测列表，Camera B 显示原始预览。顶部 **Voice assistant** 切到用户页。
+- 电脑打开 `index.html`。默认进入 **Judge view**，显示两路示例画面和物体框。配对后进入实时模式，两路分别叠加本相机的 YOLO 框，检测列表标明 Camera A 或 B。顶部 **Voice assistant** 切到用户页。
 - 手机打开相机入口 `camera.html`。首屏只有配对所需操作。配对、授权并启动相机后，页面只显示取景画面。离开页面会结束采集。
 
 ## 试实际配对
@@ -20,13 +20,13 @@
 
 运行 `node --test pairing.test.cjs ../llm/agent.test.cjs`。覆盖配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。
 
-## Camera A 实时检测框
+## Camera A 和 B 实时检测框
 
-从仓库根目录启动 Web 服务和 [Camera A 的 CV 进程](../cv/README.md#live-camera-a)。在 Judge view 配对 Camera A 后，框旁和列表中会显示类别、置信度、左中右位置。空帧清空检测框，手机离线或画面超过五秒未更新时清空预览。
+从仓库根目录启动 Web 服务和 [双相机 CV 进程](../cv/README.md#live-cameras-a-and-b)。在 Judge view 分别配对两台手机后，框旁和列表中会显示类别、置信度、左中右位置。空帧清空检测框，手机离线或画面超过五秒未更新时只清空对应相机的预览和列表项。
 
-控制台使用当前桌面会话的 Bearer token 读取 `GET /api/preview/A`。一次响应中的 `frame_id`、Base64 JPEG 和 `objects` 来自同一帧。初次等待 YOLO 或推理结果过期时，仍可预览新鲜的原图（`objects: null`）。已推理的空帧返回 `objects: []`。响应 ETag 区分原图和带结果的状态；未变返回 304，离线返回 204。
+控制台使用当前桌面会话的 Bearer token 分别读取 `GET /api/preview/A` 和 `GET /api/preview/B`。一次响应中的 `frame_id`、Base64 JPEG 和 `objects` 来自同一帧。初次等待 YOLO 或推理结果过期时，仍可预览新鲜的原图（`objects: null`）。已推理的空帧返回 `objects: []`。响应 ETag 区分原图和带结果的状态；未变返回 304，离线返回 204。
 
-浏览器验收在临时会话中回放 JPEG，使用真实 YOLO 和 Chromium，检查框的移动、像素位置、空帧、断线、助手回答及样例模式。在已安装 CV 依赖的环境中，从仓库根目录运行：
+浏览器验收在临时会话中回放 JPEG，使用真实 YOLO 和 Chromium，检查框的移动、像素位置、空帧、双路的框与各自帧 ID、B 断开后 A 的更新、助手回答及样例模式。在已安装 CV 依赖的环境中，从仓库根目录运行：
 
 ```sh
 python -m pip install playwright==1.56.0

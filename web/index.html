@@ -32,14 +32,14 @@
         </article>
         <article class="feed" data-camera="B">
           <header><div><span class="camera-icon" aria-hidden="true">B</span><h2>Camera B</h2></div><span class="status feed-status">Sample feed</span></header>
-          <div class="frame"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><img class="live-frame" alt="Live camera B preview" hidden><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
+          <div class="frame"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><canvas class="live-frame" role="img" aria-label="Live camera B preview with YOLO detections" hidden></canvas><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
           <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
         </article>
       </div>
       <section class="detections" aria-labelledby="detections-title">
         <div class="section-head"><div><h2 id="detections-title">Detected objects</h2><p id="detection-note">Sample annotations · distances are illustrative.</p></div><span class="status" id="detection-count">4 objects</span></div>
         <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th id="detection-measure" scope="col">Distance</th><th scope="col">Position in frame</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
-        <p class="empty" id="empty-detections" hidden>Waiting for Camera A detections.</p>
+        <p class="empty" id="empty-detections" hidden>Waiting for camera detections.</p>
       </section>
     </section>
     <section id="assist" data-page hidden>

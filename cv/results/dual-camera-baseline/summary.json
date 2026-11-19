@@ -1,0 +1,25 @@
+{
+  "window_seconds": 30,
+  "upload_period_ms": 220,
+  "uploads_per_camera": 137,
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "device": "CPU",
+  "model": "YOLO11n",
+  "python": "3.12.1",
+  "ultralytics": "8.4.0",
+  "torch": "2.9.0",
+  "cameras": {
+    "A": {
+      "frames": 136,
+      "fps": 4.53,
+      "latency_median_ms": 173.0,
+      "latency_p95_ms": 248
+    },
+    "B": {
+      "frames": 136,
+      "fps": 4.53,
+      "latency_median_ms": 161.5,
+      "latency_p95_ms": 224
+    }
+  }
+}

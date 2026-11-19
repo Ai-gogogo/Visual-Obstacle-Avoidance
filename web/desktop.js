@@ -50,12 +50,14 @@ function makeAnnotations() {
   }
 }
 
-function renderDetections(objects) {
-  const list = sampleMode ? sample : (objects ?? []);
+function renderDetections() {
+  const list = sampleMode ? sample : feeds.flatMap(feed =>
+    (feed.objects ?? []).map(object => ({...object, camera:feed.side})));
+  const waiting = !sampleMode && feeds.every(feed => feed.objects == null);
   const rows = list.map(object => {
     const row = document.createElement('tr');
     const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
-    for (const text of [object.label, 'Camera ' + (object.camera ?? 'A'), value, object.position]) {
+    for (const text of [object.label, 'Camera ' + object.camera, value, object.position]) {
       const cell = document.createElement('td');
       cell.textContent = text;
       row.append(cell);
@@ -64,15 +66,15 @@ function renderDetections(objects) {
   });
   $('#detection-rows').replaceChildren(...rows);
   $('#detection-measure').textContent = sampleMode ? 'Distance' : 'Confidence';
-  $('#detection-count').textContent = !sampleMode && objects == null ? 'Waiting' :
+  $('#detection-count').textContent = waiting ? 'Waiting' :
     list.length + (list.length === 1 ? ' object' : ' objects');
   $('.table-wrap').hidden = !list.length;
   $('#empty-detections').hidden = Boolean(list.length);
-  $('#empty-detections').textContent = objects == null ? 'Waiting for Camera A detections.' :
-    'No objects detected in this frame.';
+  $('#empty-detections').textContent = waiting ? 'Waiting for camera detections.' :
+    'No objects detected in the processed views.';
 }
 
-function paintCameraA(canvas, image, snapshot) {
+function paintCamera(canvas, image, snapshot) {
   const width = canvas.width = image.naturalWidth;
   const height = canvas.height = image.naturalHeight;
   const ctx = canvas.getContext('2d');
@@ -124,16 +126,10 @@ function setFeed(feed, connected, message) {
   image.hidden = sampleMode || !connected;
   if (!connected) {
     feed.etag = undefined;
-    if (feed.side === 'A') {
-      image.getContext('2d').clearRect(0,0,image.width,image.height);
-      delete image.dataset.frameId;
-      renderDetections(null);
-    }
-  }
-  if (!connected && feed.url) {
-    URL.revokeObjectURL(feed.url);
-    image.removeAttribute('src');
-    feed.url = undefined;
+    image.getContext('2d').clearRect(0,0,image.width,image.height);
+    delete image.dataset.frameId;
+    feed.objects = null;
+    renderDetections();
   }
   const empty = node.querySelector('.no-feed');
   empty.hidden = sampleMode || connected;
@@ -146,7 +142,7 @@ async function readFrame(feed, version) {
   try {
     const headers = {Authorization:'Bearer '+token};
     if (feed.etag) headers['If-None-Match'] = feed.etag;
-    const path = feed.side === 'A' ? '/api/preview/A' : '/api/frame/B';
+    const path = '/api/preview/' + feed.side;
     const response = await fetch(path, {headers, signal:AbortSignal.timeout(3000)});
     if (version !== pollVersion || response.status === 304) return;
     if (response.status !== 200) {
@@ -154,25 +150,16 @@ async function readFrame(feed, version) {
       setFeed(feed,false,response.status === 401 ? 'Session expired. Pair the phone again.' : undefined);
       return;
     }
-    if (feed.side === 'A') {
-      const snapshot = await response.json();
-      const image = new Image();
-      image.src = 'data:image/jpeg;base64,' + snapshot.jpeg;
-      await image.decode();
-      if (version !== pollVersion) return;
-      paintCameraA(feed.node.querySelector('canvas'), image, snapshot);
-      feed.etag = response.headers.get('etag');
-      setFeed(feed,true);
-      renderDetections(snapshot.objects);
-      return;
-    }
-    const frame = await response.blob();
+    const snapshot = await response.json();
+    const image = new Image();
+    image.src = 'data:image/jpeg;base64,' + snapshot.jpeg;
+    await image.decode();
     if (version !== pollVersion) return;
-    if (feed.url) URL.revokeObjectURL(feed.url);
-    feed.url = URL.createObjectURL(frame);
+    paintCamera(feed.node.querySelector('canvas'), image, snapshot);
     feed.etag = response.headers.get('etag');
-    feed.node.querySelector('.live-frame').src = feed.url;
+    feed.objects = snapshot.objects;
     setFeed(feed,true);
+    renderDetections();
   } catch {
     if (version !== pollVersion) return;
     setFeed(feed,false,'Connection interrupted');
@@ -184,13 +171,13 @@ function refreshPolling() {
   if (sampleMode || currentPage !== 'monitor') return;
   feeds.forEach(feed => setFeed(feed,false));
   if (!token) return;
-  async function poll() {
+  async function poll(feed) {
     if (version !== pollVersion) return;
-    if (!token) { feeds.forEach(feed => setFeed(feed,false,'Pair the phone again.')); return; }
-    await Promise.all(feeds.map(feed => readFrame(feed,version)));
-    if (version === pollVersion) setTimeout(poll,260);
+    if (!token) { setFeed(feed,false,'Pair the phone again.'); return; }
+    await readFrame(feed,version);
+    if (version === pollVersion) setTimeout(() => poll(feed),260);
   }
-  poll();
+  feeds.forEach(poll);
 }
 
 function renderMode(demo) {
@@ -198,7 +185,7 @@ function renderMode(demo) {
   sampleMode = demo;
   $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
   $('#assist-mode').textContent = demo ? 'Sample scene' : 'Live preview mode';
-  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'YOLO detections from the displayed Camera A frame.';
+  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'YOLO detections from each displayed camera frame.';
   $('#voice-message').textContent = '';
   feeds.forEach(feed => setFeed(feed,false));
   refreshPolling();
@@ -875,7 +862,7 @@ window.addEventListener('pagehide', () => { stopAudio(); pollVersion += 1; });
 window.addEventListener('pageshow', event => { if (event.persisted) refreshPolling(); });
 window.addEventListener('hashchange',showPage);
 makeAnnotations();
-renderDetections(null);
+renderDetections();
 showPage();
 
 $('#confirm-save').addEventListener('click',() => finishConfirmation(true));

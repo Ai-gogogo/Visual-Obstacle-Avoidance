@@ -77,7 +77,8 @@ function createAgentRoutes(options, sessions, read, respond) {
           text:'Caution. ' + obstacle.label + ', Camera ' + camera + ', ' + obstacle.position + '.', stamp:captured.stamp});
       }
       session.alerts = session.alerts.slice(-20);
-      return res.writeHead(204).end();
+      // Measured on one clock, from server receipt of the JPEG to acceptance of CV results.
+      return res.writeHead(204, {'X-CV-Accepted-Ms':now, 'X-CV-Latency-Ms':now-captured.stamp}).end();
     }
   }
 

@@ -126,7 +126,7 @@ function createServer(options = {}) {
       const session = sessions.get(token);
       if (!session) return respond(res, 401, {error:'Desktop session ended. Generate a new pairing code.'});
       const slot = session.slots[side];
-      if (method === 'GET' && action === 'preview' && side === 'A') {
+      if (method === 'GET' && action === 'preview') {
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
         const detection = slot.detection && now - slot.detection.stamp <= FRESH ? slot.detection : null;

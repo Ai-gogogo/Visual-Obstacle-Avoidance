@@ -1,4 +1,4 @@
-# Camera A and single-image object detection
+# Dual-camera and single-image object detection
 
 Run the detector on one local photo. It writes `annotated.jpg` and `detections.json` into a new directory. Both use the display orientation of the image, including the rotation stored by a phone camera.
 
@@ -39,7 +39,7 @@ On the example photo, the CPU run found a bus at center and four people (two lef
 
 The CV suite checks the two position boundaries, box normalization, annotation coordinates, real detections on the bus photo and an empty prediction on a rotated blank JPEG. Confidence scores can vary slightly by runtime.
 
-## Live Camera A
+## Live cameras A and B
 
 Use the same environment and weights as the single-image detector. From the repository root, start the Web server in one terminal and the CV worker in another:
 
@@ -52,12 +52,26 @@ node web/server.cjs
 python cv/live_camera.py
 ```
 
-Open the dashboard at `http://localhost:8765/`, pair **Camera A**, and start the camera at `/camera`. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
+Open the dashboard at `http://localhost:8765/`, generate independent pairing codes for **Camera A** and **Camera B**, then open `/camera` on each device and enter its code. Either camera can run alone. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
 
-In Voice assistant, select **Camera A** and ask “What is in front of me?” The worker loads YOLO once, polls the latest available JPEG, and submits all detections with that JPEG’s ETag. An unchanged frame skips inference. An empty prediction clears the object list. The Agent answers from the most recent accepted detection within the server’s five-second freshness window. Newer preview frames can arrive while inference runs. Re-pairing replaces the old camera slot. Leave the worker running to pick up the new stream, or stop it with Ctrl+C.
+In Voice assistant, select **Camera A** or **Camera B** and ask “What is in front of me?” Each camera has a separate polling thread, resident YOLO model and HTTP session. Its frame cache is scoped to the dashboard source. Each result is submitted with the camera ID and the ETag of the JPEG actually processed. An unchanged frame skips inference. An empty prediction clears the object list. The Agent answers from the most recent accepted detection within the server’s five-second freshness window. Newer preview frames can arrive while inference runs. Re-pairing replaces the old camera slot. Leave the worker running to pick up the new stream, or stop it with Ctrl+C.
 
-The live integration tests in `test_live_camera.py` replay JPEGs through the actual Node server and Agent with real YOLO weights. They exercise the running CLI, a camera change during inference, unchanged and expired frames, Camera B isolation, and re-pairing. Run them with the CV environment active and Node available:
+The live integration tests in `test_live_camera.py` replay JPEGs through the actual Node server and Agent with real YOLO weights. They exercise the running CLI, a camera change during inference, unchanged and expired frames, simultaneous feeds, B disconnecting while A continues, and re-pairing. Run them with the CV environment active and Node available:
 
 ```sh
 python -m unittest discover -s cv -p test_live_camera.py -v
 ```
+
+## Dual-camera performance
+
+To log accepted detections during a real run, use `python cv/live_camera.py --metrics /path/to/new.csv`. Each row identifies the source, camera and frame. Both timestamps used for latency come from the server: from receipt of the complete JPEG to acceptance of the matching detection. This includes waiting for the worker to poll, decoding, CPU inference and result submission. Phone capture, upload to the server and browser rendering occur outside this interval. Duplicate submissions do not add samples.
+
+Run the isolated benchmark from the repository root:
+
+```sh
+python cv/benchmark_dual_camera.py --output /tmp/visionassist-dual-run
+```
+
+It starts the normal worker and a private loopback server, pairs two simulated phones, and replays the bundled bus (A) and soccer (B) photos as JPEGs with a 640-pixel maximum edge and quality 70. Both streams submit a new frame every 220 ms. Measurement starts after both cameras return actual detections. Effective FPS is the number of distinct frames received and accepted within the same 30-second window divided by 30. Latency is summarized by median and nearest-rank P95.
+
+The [saved baseline](results/dual-camera-baseline/summary.json) and [per-frame timings](results/dual-camera-baseline/frames.csv) are from one CPU run on this Mac. The input cadence limits the observed FPS. Physical phones and Wi-Fi may give different results.

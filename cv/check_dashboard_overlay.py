@@ -1,4 +1,4 @@
-"""Exercise the Camera A dashboard in Chromium with actual YOLO and HTTP pairing."""
+"""Exercise the dual-camera dashboard in Chromium with actual YOLO and HTTP pairing."""
 import argparse
 import base64
 import io
@@ -12,27 +12,68 @@ from ultralytics import YOLO
 from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
-from live_camera import CameraAWorker
+from live_camera import CameraWorker
+
+
+def pair_phone(page, host, side):
+    page.get_by_role("button", name="Pair a phone").click()
+    page.get_by_role("button", name=f"Code for Camera {side}").click()
+    code = page.locator(".pair-code").inner_text().replace(" ", "")
+    response = requests.post(host + "/api/join", json={"code": code}, timeout=3)
+    response.raise_for_status()
+    page.get_by_role("button", name="Close pairing dialog").click()
+    return {"Authorization": "Bearer " + response.json()["token"], "Content-Type": "image/jpeg"}
+
+
+def check_dual_views(page, host, desktop, model, person, screenshots):
+    headers = {side: pair_phone(page, host, side) for side in "AB"}
+    with requests.Session() as http:
+        def show(side, left):
+            frame = Image.new("RGB", (640, 360), "#dedede")
+            frame.paste(person, (left, 44))
+            jpeg = io.BytesIO()
+            frame.save(jpeg, "JPEG", quality=85)
+            http.put(host + "/api/frame", headers=headers[side], data=jpeg.getvalue(), timeout=3).raise_for_status()
+            CameraWorker(host, model, http, side).poll()
+            snapshot = http.get(host + "/api/preview/" + side, headers=desktop, timeout=3).json()
+            assert base64.b64decode(snapshot["jpeg"]) == jpeg.getvalue()
+            return snapshot
+
+        a = show("A", 24)
+        b = show("B", 500)
+        assert a["frame_id"] != b["frame_id"]
+        rows = page.locator("#detection-rows tr")
+        for side, snapshot, position in [("A", a, "left"), ("B", b, "right")]:
+            canvas = page.locator(f'[data-camera="{side}"] canvas')
+            expect(canvas).to_have_attribute("data-frame-id", snapshot["frame_id"])
+            expect(rows.filter(has_text=f"Camera {side}")).to_contain_text(position)
+            x1, y1, _, y2 = snapshot["objects"][0]["bbox"]
+            png = canvas.evaluate("c => c.toDataURL('image/png').split(',')[1]")
+            with Image.open(io.BytesIO(base64.b64decode(png))) as rendered:
+                assert rendered.getpixel((round(x1*640), round((y1+y2)*180)))[:3] == (140, 233, 255)
+        if screenshots:
+            page.locator(".feed-grid").screenshot(path=str(screenshots / "dual.png"))
+        http.delete(host + "/api/frame", headers=headers["B"], timeout=3).raise_for_status()
+        updated = show("A", 500)
+        expect(page.locator('[data-camera="A"] canvas')).to_have_attribute("data-frame-id", updated["frame_id"])
+        expect(rows.filter(has_text="Camera A")).to_contain_text("right")
+        expect(page.locator('[data-camera="B"] canvas')).to_be_hidden()
+        expect(rows.filter(has_text="Camera B")).to_have_count(0)
 
 
 def exercise(page, host, model, screenshots):
     with page.expect_response(lambda r: r.url == host + "/api/session") as session:
         page.goto(host)
     desktop = {"Authorization": "Bearer " + session.value.json()["token"]}
-    page.get_by_role("button", name="Pair a phone").click()
-    page.get_by_role("button", name="Code for Camera A").click()
-    code = page.locator(".pair-code").inner_text().replace(" ", "")
-    phone = requests.post(host + "/api/join", json={"code": code}, timeout=3).json()["token"]
-    page.get_by_role("button", name="Close pairing dialog").click()
+    headers = pair_phone(page, host, "A")
 
     feed = page.locator('[data-camera="A"]')
     canvas = feed.locator("canvas")
     with Image.open(ASSETS / "bus.jpg") as photo:
         person = photo.crop((44, 390, 244, 907))
     person.thumbnail((122, 272))
-    headers = {"Authorization": "Bearer " + phone, "Content-Type": "image/jpeg"}
     with requests.Session() as http:
-        worker = CameraAWorker(host, model, http)
+        worker = CameraWorker(host, model, http, 'A')
         for state, left in [("left", 24), ("right", 500), ("empty", None), ("reappeared", 24)]:
             image = Image.new("RGB", (640, 360), "#dedede")
             if left is not None:
@@ -88,6 +129,7 @@ def exercise(page, host, model, screenshots):
         expect(feed.locator(".feed-status")).to_have_text("Offline")
         if screenshots:
             feed.screenshot(path=str(screenshots / "offline.png"))
+        check_dual_views(page, host, desktop, model, person, screenshots)
         page.get_by_role("button", name="Show sample feeds").click()
         expect(rows).to_have_count(4)
         expect(page.locator("#detection-measure")).to_have_text("Distance")
@@ -113,7 +155,7 @@ def main():
                 browser.close()
         finally:
             server.terminate()
-    print("Passed: moving box, empty frame, disconnect, Agent response and sample view.")
+    print("Passed: dual overlays, per-camera rows, B disconnect with A updating, single-view regressions and Agent response.")
 
 
 if __name__ == "__main__":
