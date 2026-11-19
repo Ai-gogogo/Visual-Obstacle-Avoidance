@@ -53,8 +53,9 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
       assert.equal(data.language,'zh');
       return {audio:Buffer.from('RIFF mocked WAV').toString('base64')};
     }
-    const unknown = Buffer.from(data.image,'base64')[2] === 9;
-    return {features:[{version:'test',vector:unknown ? [0,1] : [1,0]}]};
+    const byte = Buffer.from(data.image,'base64')[2];
+    const vector = byte === 9 ? [0,1] : byte === 8 ? [0.9,Math.sqrt(1-0.9**2)] : [1,0];
+    return {features:[{version:'test',vector}]};
   };
   const generate = async (messages,image) => {
     generated.push({messages,image});
@@ -121,6 +122,14 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.equal((await chat('Is it safe to walk forward?')).source,'unavailable');
   assert.equal((await call('/api/memory/items/'+saved.id,{method:'PATCH',token:desk,body:{name:'蓝水杯'}})).status,204);
   assert.equal((await chat('我的蓝水杯在哪里？')).source,'camera');
+  await push(phone,8);
+  const uncertainFrame = (await call('/api/cv/frame'+query)).headers.get('etag').slice(1,-1);
+  assert.equal((await publish(uncertainFrame,[{...objects[0],risk:'urgent'}])).status,204);
+  const candidate = await chat('我的蓝水杯在哪里？');
+  assert.match(candidate.confirmation.summary,/确认这是你的物品/);
+  assert.equal((await chat('确认')).source,'history');
+  const updated = await json(await call('/api/memory/items/'+saved.id+'/history',{token:desk}),200);
+  assert.equal(updated.observations.length,2);
   assert.equal((await chat('Who is this?')).reply_text,'No people are enrolled.');
   await push(phone,3);
   const person = await chat('登记亲友 小林，哥哥');

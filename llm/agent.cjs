@@ -134,7 +134,9 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
   function stage(session, data, isChinese) {
     const pending = {...data, id:randomUUID(), until:Date.now()+60_000};
     session.pending = pending;
-    const summary = data.kind === 'person'
+    const summary = data.observation
+      ? (isChinese ? '请确认这是你的物品：' : 'Confirm this is your item: ') + data.target
+      : data.kind === 'person'
       ? (isChinese ? '确认已获本人同意，并登记' : 'Confirm the person consented and enroll ') + data.name
       : (isChinese ? '保存：' : 'Save: ') + data.name;
     return output(summary, 'confirmation', {confirmation:{id:pending.id, summary}});
@@ -148,6 +150,13 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     if (!accepted) {
       delete session.pending;
       return output(isChinese ? '已取消。' : 'Cancelled.');
+    }
+    if (pending.observation) {
+      const item = find('item',pending.name);
+      if (item?.id !== pending.itemId) throw failure(409, 'This item was changed or removed.');
+      saveObservation(item.id,pending.observation);
+      delete session.pending;
+      return output(isChinese ? '已记录这次出现。' : 'Observation saved.', 'history', {observation:pending.observation});
     }
     const store = database();
     store.exec('BEGIN IMMEDIATE');
@@ -227,6 +236,13 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     return output(isChinese ? '我无法确认这个人的身份。' : 'I could not confirm who this is.', 'camera');
   }
 
+  function saveObservation(id, observed) {
+    const store = database();
+    store.prepare('INSERT OR IGNORE INTO observation VALUES(?,?,?,?)').run(id, observed.time, observed.camera, observed.position);
+    store.prepare("UPDATE memory SET last_seen=? WHERE id=? AND (last_seen IS NULL OR json_extract(last_seen,'$.time') <= ?)")
+      .run(JSON.stringify(observed), id, observed.time);
+  }
+
   async function locate(session, side, item, isChinese) {
     const slot = session.slots[side];
     const scene = detections(slot);
@@ -234,20 +250,23 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     if (objects.length) {
       const {features} = await extract('item', scene.frame, objects.map(object => object.bbox));
       const options = records('item').filter(row => row.label === item.label);
-      const matches = features.flatMap((feature,index) => {
+      const candidates = features.flatMap((feature,index) => {
         if (!feature) return [];
         const [best,second] = rank(feature, options);
-        return best?.row.id === item.id && best.score >= 0.92 && (!second || best.score-second.score >= 0.06)
-          ? [{score:best.score,object:objects[index]}] : [];
+        if (best?.row.id !== item.id || best.score < 0.86) return [];
+        return [{confident:best.score >= 0.92 && (!second || best.score-second.score >= 0.06),
+          position:objects[index].position}];
       });
-      if (matches.length === 1 && session.slots[side] === slot && fresh(scene.stamp) && find('item', item.name)?.id === item.id) {
-        const {position} = matches[0].object;
+      if (candidates.length === 1 && session.slots[side] === slot && fresh(scene.stamp) && find('item', item.name)?.id === item.id) {
+        const {position,confident} = candidates[0];
         const observed = {time:new Date(scene.stamp).toISOString(),camera:side,position};
-        const store = database();
-        store.prepare('INSERT OR IGNORE INTO observation VALUES(?,?,?,?)').run(item.id, observed.time, side, position);
-        store.prepare("UPDATE memory SET last_seen=? WHERE id=? AND (last_seen IS NULL OR json_extract(last_seen,'$.time') <= ?)")
-          .run(JSON.stringify(observed), item.id, observed.time);
         const positionText = {left:'左侧',center:'中央',right:'右侧'}[position];
+        if (!confident) {
+          const target = isChinese ? item.name + '（相机 ' + side + '，' + positionText + '）' :
+            item.name + ' (Camera ' + side + ', ' + position + ')';
+          return stage(session,{name:item.name,target,itemId:item.id,observation:observed},isChinese);
+        }
+        saveObservation(item.id,observed);
         return output(isChinese ? '相机 ' + side + ' 画面' + positionText + '可能是你的' + item.name + '。' :
           'Your ' + item.name + ' may be in Camera ' + side + ', on the ' + position + ' of the frame.', 'camera', {observation:observed});
       }
