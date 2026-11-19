@@ -98,6 +98,7 @@ function createServer(options = {}) {
         session.slots[entry.slot] = {phone, streamID:key(), stamp:0};
         phones.set(phone, {session:entry.session, slot:entry.slot});
         attempts.delete(ip);
+        res.setHeader('X-Server-Ms', Date.now());
         return respond(res, 200, {token:phone});
       }
       if (route === '/api/frame' && ['PUT','DELETE'].includes(method)) {
@@ -118,6 +119,17 @@ function createServer(options = {}) {
         slot.frame = frame;
         slot.stamp = Date.now();
         slot.etag = '"' + key() + '"';
+        const sample = Number(req.headers['x-sample-ms']);
+        const uncertainty = Number(req.headers['x-clock-error-ms']);
+        slot.sample = Number.isSafeInteger(sample) && Math.abs(slot.stamp-sample) < FRESH &&
+          Number.isSafeInteger(uncertainty) && uncertainty >= 0 && uncertainty <= 250
+          ? {ms:sample, error:uncertainty} : null;
+        if (entry.slot === 'B' && slot.sample) {
+          slot.history ||= [];
+          slot.history.push({id:slot.etag.slice(1,-1), frame, stamp:slot.stamp, sample:slot.sample});
+          if (slot.history.length > 6) slot.history.shift();
+        }
+        res.setHeader('X-Server-Ms', slot.stamp);
         return res.writeHead(204).end();
       }
       const match = /^\/api\/(pair|frame|preview)\/([AB])$/.exec(route);
@@ -140,7 +152,9 @@ function createServer(options = {}) {
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
-          jpeg:frame.toString('base64'), objects
+          jpeg:frame.toString('base64'), objects,
+          ...(detection?.stereoStatus ? {stereo_status:detection.stereoStatus} : {}),
+          ...(detection?.depthPreview ? {depth_preview:detection.depthPreview} : {})
         });
       }
       if (method === 'POST' && action === 'pair') {

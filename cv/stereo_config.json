@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "image_size_px": [null, null],
+  "baseline_m": null,
+  "camera_A": {"fx": null, "fy": null, "cx": null, "cy": null, "distortion": null},
+  "camera_B": {"fx": null, "fy": null, "cx": null, "cy": null, "distortion": null},
+  "rotation_A_to_B": null,
+  "translation_direction_A_to_B": null,
+  "max_pair_skew_ms": 65,
+  "num_disparities": 96,
+  "min_depth_m": 0.25,
+  "max_depth_m": 8.0
+}

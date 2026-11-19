@@ -55,6 +55,8 @@ function trackedLabel(object) {
 }
 
 function renderDetections() {
+  const stereo = !sampleMode && !$('#stereo-view').hidden;
+  $('#metric-heading').hidden = !stereo;
   const list = sampleMode ? sample : feeds.flatMap(feed =>
     (feed.objects ?? []).map(object => ({...object, camera:feed.side})));
   const waiting = !sampleMode && feeds.every(feed => feed.objects == null);
@@ -63,6 +65,7 @@ function renderDetections() {
     const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
     const cells = [trackedLabel(object), 'Camera ' + object.camera, value, object.position];
     if (!sampleMode) cells.push(object.relative_depth ?? 'unknown');
+    if (stereo) cells.push(Number.isFinite(object.depth_m) ? object.depth_m.toFixed(2) + ' m' : '—');
     for (const text of cells) {
       const cell = document.createElement('td');
       cell.textContent = text;
@@ -79,6 +82,22 @@ function renderDetections() {
   $('#empty-detections').hidden = Boolean(list.length);
   $('#empty-detections').textContent = waiting ? 'Waiting for camera detections.' :
     'No objects detected in the processed views.';
+}
+
+function showDepth(snapshot) {
+  const status = snapshot?.stereo_status;
+  const messages = {
+    ready:'Camera A depth · nearer surfaces are brighter. Black pixels have no measurement.',
+    size_mismatch:'Depth unavailable · check both phones’ image dimensions against calibration.',
+    waiting_for_pair:'Depth waiting for two time-matched camera frames.',
+    no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
+  };
+  $('#stereo-view').hidden = !status;
+  $('#stereo-caption').textContent = messages[status] ?? '';
+  const image = $('#stereo-map');
+  image.hidden = !snapshot?.depth_preview;
+  if (image.hidden) image.removeAttribute('src');
+  else image.src = 'data:image/png;base64,' + snapshot.depth_preview;
 }
 
 function paintCamera(canvas, image, snapshot) {
@@ -133,6 +152,7 @@ function setFeed(feed, connected, message) {
   const image = node.querySelector('.live-frame');
   image.hidden = sampleMode || !connected;
   if (!connected) {
+    if (feed.side === 'A') showDepth(null);
     feed.etag = undefined;
     image.getContext('2d').clearRect(0,0,image.width,image.height);
     delete image.dataset.frameId;
@@ -169,6 +189,7 @@ async function readFrame(feed, version) {
     paintCamera(feed.node.querySelector('canvas'), image, snapshot);
     feed.etag = response.headers.get('etag');
     feed.objects = snapshot.objects;
+    if (feed.side === 'A') showDepth(snapshot);
     setFeed(feed,true);
     renderDetections();
   } catch {

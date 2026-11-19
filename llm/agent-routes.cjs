@@ -61,16 +61,36 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (req.headers['if-none-match'] === slot.etag) return res.writeHead(304).end();
       slot.cvFrames ||= new Map();
       for (const [id, item] of slot.cvFrames) if (!recent(item)) slot.cvFrames.delete(id);
-      slot.cvFrames.set(slot.etag.slice(1,-1),{frame:slot.frame,stamp:slot.stamp});
+      const id = slot.etag.slice(1,-1);
+      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,stamp:slot.stamp,sample:slot.sample});
       while (slot.cvFrames.size > 8) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
       return res.writeHead(200,{'Content-Type':'image/jpeg',ETag:slot.etag,
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
+    }
+    if (route === '/api/cv/stereo-partner' && req.method === 'GET' && camera === 'A') {
+      const left = slot.cvFrames?.get(requestURL.searchParams.get('frame_id'));
+      const limit = Number(requestURL.searchParams.get('max_skew_ms'));
+      if (!Number.isInteger(limit) || limit <= 0 || limit > 250) return error(res,400,'Invalid time tolerance.');
+      if (!recent(left) || !left.sample) return res.writeHead(204).end();
+      const right = session.slots.B;
+      let best;
+      let smallest = Infinity;
+      for (const candidate of right.history ?? []) {
+        const difference = Math.abs(candidate.sample.ms - left.sample.ms) + candidate.sample.error + left.sample.error;
+        if (recent(candidate) && difference <= limit && difference < smallest) {
+          best = candidate;
+          smallest = difference;
+        }
+      }
+      if (!best) return res.writeHead(204).end();
+      left.partner = {id:best.id, stream:right.streamID, stamp:best.stamp};
+      return res.writeHead(200,{'Content-Type':'image/jpeg', 'X-Partner-Id':best.id}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
     return error(res,404,'Unknown CV route.');
 
     async function publish() {
-      const payload = await asJSON(req,600_000);
+      const payload = await asJSON(req,600_000 + 128_000);
       const objects = parseObjects(payload?.objects);
       if (!objects || typeof payload.frame_id !== 'string') return error(res,400,'Invalid detections.');
       const versioned = ['schema_version','camera_id','timestamp_ms'].some(key => Object.hasOwn(payload,key));
@@ -91,6 +111,23 @@ function createAgentRoutes(options, sessions, read, respond) {
         schema_version:DETECTION_SCHEMA_VERSION, camera_id:camera, frame_id:payload.frame_id,
         timestamp_ms:captured.stamp, objects, frame:captured.frame
       };
+      const partner = captured.partner;
+      if (camera === 'A' && payload.stereo) {
+        slot.detection.stereoStatus = ['size_mismatch','no_matches'].includes(payload.stereo.status)
+          ? payload.stereo.status : 'waiting_for_pair';
+      }
+      if (camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
+          partner.stream === session.slots.B.streamID) {
+        for (const [i, object] of objects.entries()) {
+          const z = payload.objects[i].depth_m;
+          if (Number.isFinite(z) && z > 0) object.depth_m = z;
+        }
+        const preview = payload.stereo.preview;
+        if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
+          slot.detection.depthPreview = preview;
+          slot.detection.stereoStatus = 'ready';
+        }
+      }
       const now = Date.now();
       for (const [id,stamp] of session.alertCooldown) if (now-stamp > 5000) session.alertCooldown.delete(id);
       const hazards = objects.filter(object => object.risk !== 'normal' && object.confidence >= 0.5)

@@ -36,9 +36,13 @@
           <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
         </article>
       </div>
+      <figure id="stereo-view" hidden>
+        <figcaption id="stereo-caption"></figcaption>
+        <img id="stereo-map" alt="Forward depth from Camera A" hidden>
+      </figure>
       <section class="detections" aria-labelledby="detections-title">
         <div class="section-head"><div><h2 id="detections-title">Detected objects</h2><p id="detection-note">Sample annotations · distances are illustrative.</p></div><span class="status" id="detection-count">4 objects</span></div>
-        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th id="detection-measure" scope="col">Distance</th><th scope="col">Position in frame</th><th id="depth-heading" scope="col" hidden>Relative depth</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th id="detection-measure" scope="col">Distance</th><th scope="col">Position in frame</th><th id="depth-heading" scope="col" hidden>Relative depth</th><th id="metric-heading" scope="col" hidden>Forward depth (A)</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
         <p class="empty" id="empty-detections" hidden>Waiting for camera detections.</p>
       </section>
     </section>
