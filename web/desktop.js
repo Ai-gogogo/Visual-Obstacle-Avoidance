@@ -211,6 +211,7 @@ let alertSequence = 0;
 let warningUntil = 0;
 let lastWarningRisk;
 let pendingReminder;
+let deferredReply;
 let warningActive = false;
 
 function setVoiceState(title, prompt, label) {
@@ -253,6 +254,7 @@ function resumeListening() {
 function interruptTurn() {
   pendingTurn?.abort();
   pendingTurn = undefined;
+  deferredReply = undefined;
   pauseListening();
   clearTimeout(recoveryTimer);
   releaseSpeech();
@@ -272,8 +274,14 @@ function stopAudio() {
 function stopPlayback(message = '') {
   if (!speech) return;
   const restoreFocus = document.activeElement === $('#stop');
+  const reply = warningActive && !message ? deferredReply : undefined;
+  deferredReply = undefined;
   clearTimeout(recoveryTimer);
   releaseSpeech();
+  if (reply) {
+    speakLocal(reply);
+    return;
+  }
   if (!voiceSession) ready();
   else if (reviewing) setVoiceState('Review','Review the transcription before sending','End conversation');
   else if (!voiceSession.capture) setVoiceState('Starting','Waiting for the microphone','End conversation');
@@ -284,7 +292,10 @@ function stopPlayback(message = '') {
 }
 
 async function speakLocal(text, warning = false) {
-  if (!warning && warningActive) return;
+  if (!warning && warningActive) {
+    deferredReply = text;
+    return;
+  }
   pauseListening();
   clearTimeout(recoveryTimer);
   const output = {controller:new AbortController()};
@@ -539,9 +550,10 @@ async function applyVoiceCommand(turn, question, command, speak) {
 }
 
 function beginTurn(prompt) {
-  interruptTurn();
+  if (warningActive) pauseListening();
+  else interruptTurn();
   pendingTurn = new AbortController();
-  if (voiceSession) setVoiceState('Processing',prompt,'End conversation');
+  if (voiceSession && !warningActive) setVoiceState('Processing',prompt,'End conversation');
   $('#voice-message').textContent = prompt;
   return pendingTurn;
 }
@@ -570,7 +582,7 @@ async function sendQuestion(turn, question, speak, mode) {
 }
 
 async function answer(question, speak = false, mode) {
-  if (warningActive) return;
+  if (pendingTurn) return;
   setReview(false);
   const turn = beginTurn('Waiting for the local assistant…');
   try { await sendQuestion(turn,question,speak,mode); }
@@ -836,12 +848,17 @@ async function pollAlerts() {
     const now = Date.now();
     if (warning && (now >= warningUntil || (urgent && lastWarningRisk !== 'urgent'))) {
       alertSequence = sequence;
-      interruptTurn();
       lastWarningRisk = warning.risk;
       warningUntil = now+3000;
       const banner = $('#obstacle-alert');
       banner.textContent = warning.text;
-      speakLocal(warning.text,true);
+      const conversationInUse = pendingTurn || speech || reviewing || confirmation || voiceSession?.segment?.chunks.length;
+      if (urgent || !conversationInUse) {
+        pauseListening();
+        clearTimeout(recoveryTimer);
+        releaseSpeech();
+        speakLocal(warning.text,true);
+      }
       setTimeout(() => {
         if (Date.now() >= warningUntil) banner.textContent = '';
       },3400);

@@ -38,6 +38,26 @@ test('a habit is private until confirmation, persists after restart and can be d
   } finally { agent.close(); rmSync(directory,{recursive:true,force:true}); }
 });
 
+test('natural water-bottle enrollment uses the sole live camera and stays out of habits', async () => {
+  const feature = {version:'spatial-hsv-v1',vector:[1,...Array(539).fill(0)]};
+  const bottle = {label:'bottle',position:'center',confidence:.95,bbox:[.2,.1,.8,.9],item_feature:feature};
+  const agent = createAgent({filename:':memory:',generate:async () => 'Unexpected general response'});
+  const session = {slots:{A:{detection:{timestamp_ms:Date.now(),camera_id:'A',objects:[bottle]}},B:{}}};
+  try {
+    for (const text of ['这是我的水杯','记住，这是我的水杯，以后帮我找']) {
+      const proposal = await agent.chat(session,{text,camera_id:'both'});
+      assert.equal(proposal.source,'confirmation');
+      assert.match(proposal.confirmation.summary,/物品/);
+      assert.deepEqual(agent.records('habit'),[]);
+      assert.deepEqual(agent.records('item'),[]);
+      if (text.startsWith('这是')) await agent.chat(session,{text:'取消'});
+    }
+    await agent.chat(session,{text:'确认'});
+    assert.equal(agent.records('item')[0].name,'水杯');
+    assert.equal((await agent.chat(session,{text:'我的水杯在哪里？',camera_id:'both'})).source,'camera');
+  } finally { agent.close(); }
+});
+
 test('paired camera, exact-frame YOLO, alerts, assisted vision and local model adapters', async t => {
   const generated = [];
   const itemFeature = index => ({

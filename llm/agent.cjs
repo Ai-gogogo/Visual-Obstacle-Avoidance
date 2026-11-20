@@ -148,6 +148,8 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       ? (isChinese ? '请确认这是你的物品：' : 'Confirm this is your item: ') + data.target
       : data.kind === 'person'
       ? (isChinese ? '确认已获本人同意，并登记' : 'Confirm the person consented and enroll ') + data.name
+      : data.kind === 'item'
+      ? (isChinese ? '确认登记相机 ' + data.camera + ' 中的物品：' : 'Confirm the item in Camera ' + data.camera + ': ') + data.name
       : (isChinese ? '保存：' : 'Save: ') + data.name;
     return output(summary, 'confirmation', {confirmation:{id:pending.id, summary}});
   }
@@ -216,13 +218,15 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     }
     const scene = detections(slot);
     if (!scene) return output(isChinese ? '当前没有可用的 YOLO 检测。' : 'There are no recent YOLO detections.', 'unavailable');
-    const objects = scene.objects.filter(object => object.label !== 'person' && object.confidence >= 0.5);
+    const isDrinkContainer = /水杯|杯子|水瓶|\b(?:cup|mug|tumbler|bottle)\b/iu.test(name);
+    const objects = scene.objects.filter(object => object.label !== 'person' && object.confidence >= 0.5 &&
+      (!isDrinkContainer || ['cup','bottle','mug','tumbler'].includes(object.label)));
     const centered = objects.filter(object => object.position === 'center');
     const target = objects.length === 1 ? objects[0] : centered.length === 1 ? centered[0] : null;
     if (!target) return output(isChinese ? '请把要登记的物品单独放在画面中央。' : 'Center one item to register it.', 'unavailable');
     const [feature] = await itemFeatures(scene, [target]);
     if (!feature) return output(isChinese ? '物品太小，请靠近一些。' : 'The item is too small. Move the camera closer.', 'unavailable');
-    return stage(session, {kind,name,label:target.label,feature}, isChinese);
+    return stage(session, {kind,name,label:target.label,feature,camera:side}, isChinese);
   }
 
   async function identify(session, side, isChinese) {
@@ -303,6 +307,11 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     const side = input.camera_id === 'B' ? 'B' : 'A';
     const twoCameras = input.camera_id === 'both';
     const oneCamera = () => output(isChinese ? '请先选定相机 A 或 B。' : 'Select Camera A or B first.', 'unavailable');
+    const itemCamera = () => {
+      if (!twoCameras) return side;
+      const live = ['A','B'].filter(id => detections(session.slots[id]));
+      return live.length === 1 ? live[0] : null;
+    };
     if (/^([确確][认認](?:保存)?|取消|yes|confirm|cancel|no)[.!。！]?$/iu.test(text) && session.pending) {
       return confirm(session, session.pending.id, /^(?:[确確][认認]|yes|confirm)/iu.test(text), isChinese);
     }
@@ -319,9 +328,17 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       const [name,relationship] = person[1].split(/[,，]/u,2).map(clean);
       return enroll(session,side,'person',name,isChinese,relationship);
     }
-    const item = /^(?:register item\s+|登记物品[：:\s]*)(.+)$/iu.exec(text) ||
-      /^(?:这个|这只|这把|这一)(.+?)是我的[。.!！]?$/u.exec(text);
-    if (item) return twoCameras ? oneCamera() : enroll(session,side,'item',clean(item[1]),isChinese);
+    const itemText = text.replace(/^(?:请)?[记記]住[，,:：\s]*/u,'');
+    const item = /^(?:register item\s+|登记物品[：:\s]*)(.+)$/iu.exec(itemText) ||
+      /^(?:这个|这只|这把|这一)([^，,。.!！?？]+?)是我的[。.!！]?$/u.exec(itemText) ||
+      /^这是我的([^，,。.!！?？]+?)(?:[，,。]\s*(?:以后|下次)(?:再)?(?:帮我|提醒我)找(?:它)?)?[。.!！]?$/u.exec(itemText);
+    if (item) {
+      const camera = itemCamera();
+      if (!camera && !['A','B'].some(id => detections(session.slots[id]))) return output(isChinese
+        ? '请把物品对准相机，等画面出现检测结果后再登记。'
+        : 'Point a camera at the item and wait for detections before registering it.', 'unavailable');
+      return camera ? enroll(session,camera,'item',clean(item[1]),isChinese) : oneCamera();
+    }
     const habit = /^(?:[记記]住[，,:：\s]*|remember[,:\s]+)(.+)$/iu.exec(text);
     if (habit) return stage(session,{kind:'habit',name:clean(habit[1])},isChinese);
     if (/这是谁|那是谁|who is (?:this|that|in (?:front|the frame))/iu.test(text)) return twoCameras ? oneCamera() : identify(session,side,isChinese);
@@ -344,7 +361,10 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       });
       if (matches.length === 1) {
         if (historyOnly) return lastSeen(matches[0],isChinese,true);
-        return twoCameras ? oneCamera() : locate(session,side,matches[0],isChinese);
+        const camera = itemCamera();
+        if (camera) return locate(session,camera,matches[0],isChinese);
+        if (!['A','B'].some(id => detections(session.slots[id]))) return lastSeen(matches[0],isChinese);
+        return oneCamera();
       }
       if (matches.length > 1) return output(isChinese ? '你是在找哪一件物品？' : 'Which registered item are you looking for?');
       if (/\bmy\b|我的/iu.test(text)) return output(isChinese ? '没有找到这个名称的登记物品。' : 'No registered item matches that name.');
