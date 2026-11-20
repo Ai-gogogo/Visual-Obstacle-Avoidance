@@ -279,6 +279,9 @@ function createServer(options = {}) {
         slot.rtcQuality = quality;
         const id = slot.rtcID = key();
         const answer = await rtc.offer(id,{...offer,quality},{
+          size(event) {
+            if (session.slots[side] === slot) slot.rtcStats = {size_mismatch:true,width:event.width,height:event.height};
+          },
           frame(event) {
             if (session.slots[side] !== slot) return;
             const frame = Buffer.from(event.jpeg,'base64');

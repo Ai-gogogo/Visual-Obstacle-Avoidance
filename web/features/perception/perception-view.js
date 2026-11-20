@@ -31,7 +31,7 @@ export function createPerceptionView($, signal) {
       spatial: $('#depth-spatial').checked,
       temporal: $('#depth-temporal').checked,
       meters: $('#depth-meters').checked,
-      fiveMm: Math.max(0, $('#depth-five-mm').valueAsNumber || 0)
+      fiveMm: 73.025 // Measured span of five printed squares (2⅞ inches), in mm.
     };
   }
 
@@ -129,10 +129,9 @@ export function createPerceptionView($, signal) {
     const palette = $('#depth-palette').value;
     const [nearColor,farColor] = {gray:['bright','dark'],turbo:['red','purple'],viridis:['yellow','purple']}[palette];
     const opt = depthOptions();
-    $('#depth-length-label').hidden = !opt.meters;
     $('#depth-reading').textContent = !opt.meters ? '' : near
       ? (Number.isFinite(snapshot.center_m) ? 'Center: '+snapshot.center_m.toFixed(2)+' m' : 'Center: no reliable depth')
-      : opt.fiveMm ? 'Waiting for measured depth…' : 'For checkerboard calibration, enter the measured width of five squares.';
+      : 'Waiting for measured depth…';
     $('#depth-reticle').hidden = !(opt.meters && near && preview);
     const range = opt.meters && near ? ' ('+near+' m to '+far+' m)' : '';
     $('#depth-scale').textContent = preview

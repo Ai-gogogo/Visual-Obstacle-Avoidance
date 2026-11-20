@@ -15,6 +15,7 @@ from rtc_timing import CaptureTimeline, video_ssrc
 
 SNAPSHOT_PERIOD = 0.1
 FRAME_TIMEOUT = 4
+FIRST_FRAME_TIMEOUT = 20
 MAX_SOURCES = 8
 
 
@@ -103,12 +104,19 @@ async def main():
     async def collect(camera_id, camera, track):
         try:
             while not camera.closed:
-                frame = await asyncio.wait_for(track.recv(), FRAME_TIMEOUT)
+                timeout = FRAME_TIMEOUT if camera.sequence else FIRST_FRAME_TIMEOUT
+                frame = await asyncio.wait_for(track.recv(), timeout)
+                if not camera.sequence:
+                    print(f"WebRTC first frame: {frame.width} x {frame.height}, requested {camera.quality}",
+                          file=sys.stderr, flush=True)
                 camera.sequence += 1
                 camera.frame = frame
                 camera.decoded_at = time.time_ns() // 1_000_000
                 camera.changed.set()
-        except (MediaStreamError, TimeoutError):
+        except TimeoutError:
+            print(f"WebRTC frame timeout: decoded={camera.sequence}, ICE={camera.peer.iceConnectionState}",
+                  file=sys.stderr, flush=True)
+        except MediaStreamError:
             pass
         finally:
             await close_camera(camera_id, camera)
@@ -118,15 +126,20 @@ async def main():
         expected = {"portrait-low": (480, 640), "portrait-full": (1080, 1920)}.get(camera.quality)
         encoder = SnapshotEncoder(max(expected) if expected else (960 if camera.quality == "hd" else 640))
         previous_frames = 0
+        last_size = None
         previous_time = time.monotonic()
         fps = 0
         try:
             while not camera.closed:
                 sequence, frame = await camera.next_frame(sequence)
                 if expected and (frame.width, frame.height) != expected:
+                    if last_size != (frame.width, frame.height):
+                        last_size = (frame.width, frame.height)
+                        await emit(kind="size", id=camera_id, width=frame.width, height=frame.height)
                     # A transient adaptation must never enter calibration as the requested mode.
                     await asyncio.sleep(SNAPSHOT_PERIOD)
                     continue
+                last_size = None
                 decoded_at = camera.decoded_at
                 timing = camera.timeline.estimate(frame, time.monotonic_ns() // 1_000_000)
                 jpeg = await asyncio.to_thread(encoder.encode, frame)

@@ -18,8 +18,10 @@ except ModuleNotFoundError as error:
 
 
 class ClockedVideo(VideoStreamTrack):
+    size = (480, 640)
+
     async def recv(self):
-        frame = (await super().recv()).reformat(width=480, height=640)
+        frame = (await super().recv()).reformat(width=self.size[0], height=self.size[1])
         frame.pts = time.monotonic_ns() * 90_000 // 1_000_000_000
         return frame
 
@@ -94,8 +96,21 @@ class TransportTest(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(.2)
                 peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
                 self.addAsyncCleanup(peer.close)
-                peer.addTrack(ClockedVideo())
+                track = ClockedVideo()
+                if side == "A":
+                    track.size = (640, 480)
+                peer.addTrack(track)
                 await negotiate(peer, "/api/webrtc/offer?quality=portrait-low", phone["token"])
+                if side == "A":
+                    async with asyncio.timeout(5):
+                        while True:
+                            state = await call("GET", "/api/webrtc/status", 200, phone["token"])
+                            if state.get("size_mismatch"):
+                                break
+                            await asyncio.sleep(.1)
+                    self.assertFalse(state["receiving"])
+                    self.assertEqual((state["width"], state["height"]), track.size)
+                    track.size = (480, 640)
                 return phone["token"]
 
             a, b = await asyncio.gather(pair("A"), pair("B"))

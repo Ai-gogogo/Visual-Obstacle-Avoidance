@@ -24,6 +24,12 @@
 
 在 Mac 上安装 `cv/rtc-requirements.txt` 中的依赖，启动网页服务时把 `VISIONASSIST_RTC_PYTHON` 设为该 Python 解释器的绝对路径。在 **Pair a phone → Wi-Fi · WebRTC** 分别为 A、B 生成二维码，两台 iPhone 在同一局域网内用 Safari 打开 HTTPS 相机页。保持机位与竖屏方向，Rice 对应 A，Jia 对应 B。默认档位是 **480 × 640 · WebRTC**，也可选 **1080 × 1920 · WebRTC**。接收端校验解码尺寸，分析快照保留相同像素尺寸。网络需允许两台手机与 Mac 的媒体流量。USB 配对保留在同一弹窗。
 
+如果 Mac 用 8775 提供桌面 HTTP、8776 单独提供手机 HTTPS，在存放现有 `server.pem` 和 `server.key` 的目录运行以下命令，把网卡地址和仓库路径换成本机实际值。手机代理会转发配对、WebRTC 信令、状态和时钟；仪表盘与 USB 管理接口由本机桌面服务提供。
+
+```sh
+PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/to/Visual-Obstacle-Avoidance/web/phone-proxy.cjs
+```
+
 480 × 640 USB 标定可以在实拍几何一致时复用。给 CV worker 传入 `--rtc-reference` 和已有的高、低标定，Mac 会在有时间匹配的 A/B 帧后比较两侧静止场景特征。参考文件可用 `python cv/rtc_geometry.py 已标定的低像素双目录像.webm reference.npz` 从原录像生成。保持左右顺序及相同背景。若背景已更换或特征不足，应另用固定棋盘对照验证。手动确认机位、镜头、裁切与标定一致后，才使用 `--allow-webrtc-stereo`。查看实收尺寸、解码 FPS 以及同步状态可用手机相机页。
 
 ## 验证接口

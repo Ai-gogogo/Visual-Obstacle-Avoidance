@@ -36,6 +36,7 @@ function createRtcBridge(python) {
     const source = sources.get(event.id);
     if (!source) return;
     if (event.kind === 'frame') source.frame(event);
+    if (event.kind === 'size') source.size(event);
     if (event.kind === 'closed') {
       sources.delete(event.id);
       source.closed();

@@ -101,5 +101,4 @@ td{font-size:.94rem}
 .depth-controls { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem 1rem; padding:.6rem 1rem; }
 .depth-controls label { display:inline-flex; align-items:center; gap:.4rem; }
 .depth-controls [hidden] { display:none; }
-#depth-five-mm { width:6rem; }
 #depth-reticle { position:absolute; left:50%; top:50%; width:12px; height:12px; transform:translate(-50%,-50%); border:1px solid white; outline:1px solid black; border-radius:50%; pointer-events:none; }

@@ -185,9 +185,8 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   });
   scope.signal.addEventListener('abort',clearReplay,{once:true});
   listen($('#depth-palette'), 'change', VisionPerceptionView.repaintDepth);
-  for (const id of ['depth-spatial','depth-temporal','depth-meters','depth-five-mm']) {
+  for (const id of ['depth-spatial','depth-temporal','depth-meters']) {
     listen($('#'+id), 'change', () => {
-      $('#depth-length-label').hidden = !$('#depth-meters').checked;
       refreshPolling();
       VisionPerceptionView.renderDetections(sampleMode, feeds);
     });

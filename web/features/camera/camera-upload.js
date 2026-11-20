@@ -178,7 +178,8 @@ export function createCameraUpload(video, report) {
     const peer = rtcPeer = new RTCPeerConnection({iceServers:[]});
     const auth = {Authorization:'Bearer '+token};
     const offerPath = '/api/webrtc/offer?quality='+rtcMode;
-    const started = performance.now();
+    let negotiatedAt;
+    let triedSensorOrientation = false;
     let received = false;
     let clockRefreshAt = 0;
 
@@ -202,7 +203,7 @@ export function createCameraUpload(video, report) {
       });
     }
 
-    async function endRtc() {
+    async function endRtc(reason) {
       if (rtcPeer !== peer || run !== currentRun) return;
       rtcPeer = undefined;
       controller.abort();
@@ -211,7 +212,7 @@ export function createCameraUpload(video, report) {
         const response = await fetch('/api/webrtc/offer',{method:'DELETE',headers:auth,signal:AbortSignal.timeout(3000)});
         if (!response.ok) throw new Error('Camera session ended.');
         if (run !== currentRun) return;
-        stop('WebRTC interrupted. Check Wi-Fi and reconnect with the same resolution.');
+        stop(reason || 'WebRTC interrupted. Check Wi-Fi and reconnect with the same resolution.');
       } catch {
         if (run === currentRun) stop('Camera connection interrupted. Pair again to reconnect.');
       }
@@ -225,7 +226,23 @@ export function createCameraUpload(video, report) {
         if (!response.ok) throw new Error('Receiver unavailable.');
         const state = await response.json();
         if (rtcPeer !== peer || run !== currentRun) return;
-        if (!state.receiving && (received || performance.now()-started > 8000)) return endRtc();
+        const width = rtcMode === 'portrait-full' ? 1080 : 480;
+        const height = rtcMode === 'portrait-full' ? 1920 : 640;
+        if (!received && state.size_mismatch && state.width === height && state.height === width &&
+            !triedSensorOrientation) {
+          triedSensorOrientation = true;
+          const track = stream.getVideoTracks()[0];
+          // Some phone cameras interpret constraints in sensor orientation.
+          // Retry on the same physical track and verify the decoded result on the Mac.
+          await track.applyConstraints({...track.getConstraints(),width:{exact:height},height:{exact:width}})
+            .catch(() => {});
+        }
+        if (!state.receiving && (received || performance.now()-negotiatedAt > 20000)) {
+          const target = rtcMode === 'portrait-full' ? '1080 × 1920' : '480 × 640';
+          return endRtc(state.size_mismatch
+            ? 'Mac received '+state.width+' × '+state.height+' px. Calibration requires '+target+' px.'
+            : 'Mac has no usable video frames. WebRTC ICE state: '+peer.iceConnectionState+'.');
+        }
         if (state.receiving) {
           received = true;
           if (performance.now() >= clockRefreshAt) {
@@ -254,6 +271,7 @@ export function createCameraUpload(video, report) {
         if (peer.connectionState === 'failed') void endRtc();
       });
       await exchangeVideoOffer(peer,offerPath,token,controller.signal);
+      negotiatedAt = performance.now();
       await checkReceiver();
     } catch {
       await endRtc();

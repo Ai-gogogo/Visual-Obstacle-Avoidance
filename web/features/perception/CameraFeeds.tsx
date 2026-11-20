@@ -124,10 +124,6 @@ export function CameraFeeds() {
           <label><input type="checkbox" id="depth-spatial" /> Edge-aware filter (WLS)</label>
           <label><input type="checkbox" id="depth-temporal" /> Temporal median</label>
           <label><input type="checkbox" id="depth-meters" /> Show meters</label>
-          <label id="depth-length-label" hidden>
-            Width of 5 printed squares (mm)
-            <input type="number" id="depth-five-mm" min="0" step="any" inputMode="decimal" />
-          </label>
           <span id="depth-reading" role="status"></span>
         </div>
         <footer>
