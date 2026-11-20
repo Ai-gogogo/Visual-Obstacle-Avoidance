@@ -5,12 +5,45 @@ const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 const DETECTION_SCHEMA_VERSION = 1;
 
+
 function validItemFeature(feature) {
-  return feature?.version === 'spatial-hsv-v1' &&
-    Array.isArray(feature.vector) && feature.vector.length === 540 &&
-    feature.vector.every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
-    Math.abs(feature.vector.reduce((sum,value) => sum + value * value,0) - 1) <= 0.001;
+  if (!feature || !Array.isArray(feature.vector)) {
+    return false;
+  }
+
+  const specs = {
+    "spatial-hsv-v1": {
+      dimensions: 540,
+      nonnegative: true
+    },
+    "siglip2-base-patch16-224-v1": {
+      dimensions: 768,
+      nonnegative: false
+    }
+  };
+
+  const spec = specs[feature.version];
+
+  if (!spec || feature.vector.length !== spec.dimensions) {
+    return false;
+  }
+
+  const vector = feature.vector;
+
+  if (!vector.every(value =>
+    Number.isFinite(value) &&
+    (!spec.nonnegative || (value >= 0 && value <= 1))
+  )) {
+    return false;
+  }
+
+  const normSquared = vector.reduce(
+    (sum, value) => sum + value * value, 0
+  );
+
+  return Math.abs(normSquared - 1) <= 0.001;
 }
+
 
 function parseObjects(objects) {
   if (!Array.isArray(objects) || objects.length > 40) return null;
