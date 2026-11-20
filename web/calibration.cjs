@@ -50,8 +50,9 @@ async function calibration(session, action, id) {
       await fs.mkdir(root,{recursive:true});
       const tmp = await fs.mkdtemp(path.join(root,'.saving-'));
       try {
-        await fs.writeFile(path.join(tmp,'A.jpg'),pair.left);
-        await fs.writeFile(path.join(tmp,'B.jpg'),pair.right);
+        const extension = type => type === 'image/png' ? 'png' : 'jpg';
+        await fs.writeFile(path.join(tmp,'A.'+extension(pair.types[0])),pair.left);
+        await fs.writeFile(path.join(tmp,'B.'+extension(pair.types[1])),pair.right);
         if (!current()) throw new Error('Camera changed. Try again.');
         await fs.rename(tmp,path.join(root,pair.id));
       } finally { await fs.rm(tmp,{force:true,recursive:true}); }
@@ -67,7 +68,9 @@ async function calibration(session, action, id) {
       .map(p => ({p,skew:Math.abs(A.sample.ms-p.sample.ms)+A.sample.error+p.sample.error}))
       .sort((a,b) => a.skew-b.skew);
     const matched = candidates[0]?.skew <= 65;
-    const right = matched ? candidates[0].p.frame : B.frame;
+    const rightFrame = matched ? candidates[0].p : B;
+    const right = rightFrame.frame;
+    const types = [A.frameType,rightFrame.frameType];
     const images = [left,right].map(b => b.toString('base64'));
     const boards = await inspect(images);
     if (!current()) return {count,message:'Camera changed. Waiting for a fresh pair.'};
@@ -79,9 +82,9 @@ async function calibration(session, action, id) {
     else {
       const pose = boards.map(b => b.corners.map(pt => pt.map(x => x/Math.max(...b.size))));
       if (state.poses.some(p => similar(pose,p))) message = 'Pose already saved. '+tip;
-      else state.pair = {id:frameID,left,right,pose,stamp};
+      else state.pair = {id:frameID,left,right,types,pose,stamp};
     }
-    return {images,boards,count,message,id:state.pair?.id};
+    return {images,types,boards,count,message,id:state.pair?.id};
   } finally { state.busy = false; }
 }
 module.exports = {calibration};

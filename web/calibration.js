@@ -16,9 +16,10 @@
       if (version !== generation) return;
       if (!response.ok) throw new Error(data.error || 'Calibration unavailable.');
       if (data.images) {
-        const images = await Promise.all(data.images.map(async jpeg => {
+        const images = await Promise.all(data.images.map(async (bytes,i) => {
           const image = new Image();
-          image.src = 'data:image/jpeg;base64,'+jpeg;
+          const type = data.types?.[i] === 'image/png' ? 'image/png' : 'image/jpeg';
+          image.src = 'data:'+type+';base64,'+bytes;
           await image.decode();
           return image;
         }));

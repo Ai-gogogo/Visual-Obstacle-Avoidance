@@ -42,7 +42,8 @@ test('desktop and two phones pair independently and stale frames are withheld', 
   assert.deepEqual(Buffer.from(await (await call('/api/frame/B','GET',desk)).arrayBuffer()),jpegB);
   assert.equal((await call('/api/frame/A','GET',desk,undefined,{'If-None-Match':frameA.headers.get('etag')})).status,304);
   assert.equal((await call('/api/frame/A','GET',a)).status,401);
-  assert.equal((await call('/api/agent/alerts','GET',desk)).status,200);
+  const readiness = async () => (await read(await call('/api/agent/alerts','GET',desk),200)).cameras;
+  assert.deepEqual(await readiness(),{A:'live',B:'live'});
   const {sources} = await read(await call('/api/cv/sources'),200);
   const source = sources.find(entry => entry.camera_id === 'A');
   const query = '?camera_id=A&source_id='+source.source_id;
@@ -57,6 +58,7 @@ test('desktop and two phones pair independently and stale frames are withheld', 
   await publishFrame();
   const measured = await read(await call('/api/preview/A','GET',desk),200);
   assert.deepEqual(measured.objects,[]);
+  assert.deepEqual(await readiness(),{A:'detecting',B:'live'});
   const nextA = Buffer.from([255,216,33,255,217]);
   t.mock.timers.tick(100);
   assert.equal((await push(a,nextA)).status,204);
@@ -67,6 +69,11 @@ test('desktop and two phones pair independently and stale frames are withheld', 
   assert.deepEqual(Buffer.from(delayed.jpeg,'base64'),nextA);
   assert.equal(delayed.objects,null);
   assert.equal(delayed.depth_preview,undefined);
+  assert.equal((await readiness()).A,'live');
+  const staleReply = await read(await call('/api/agent/chat','POST',desk,
+    JSON.stringify({text:'What is in front of me?',mode:'scene',camera_id:'A'}),
+    {'Content-Type':'application/json'}),200);
+  assert.equal(staleReply.source,'unavailable');
   await publishFrame();
   const current = await read(await call('/api/preview/A','GET',desk),200);
   assert.equal(current.analysis_delayed,undefined);

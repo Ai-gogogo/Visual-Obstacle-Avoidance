@@ -22,24 +22,24 @@
     <p class="obstacle-alert" id="obstacle-alert" role="alert"></p>
     <section id="monitor" data-page>
       <div class="page-head">
-        <div><h1 tabindex="-1">Live perception</h1><p>Inspect Camera A detections and their stereo depth.</p></div>
-        <div class="toolbar"><button class="quiet" id="open-calibration">Stereo calibration</button><button class="quiet" id="mode">Show live cameras</button><button class="primary" id="pair">Pair a phone</button></div>
+        <div><h1 tabindex="-1">Live perception</h1><p>Compare both camera feeds and depth aligned to Camera A.</p></div>
+        <div class="toolbar"><button class="quiet" id="pixel-preview" type="button" aria-pressed="false" aria-controls="camera-feeds" hidden>Actual pixels</button><button class="quiet" id="open-calibration">Stereo calibration</button><button class="quiet" id="mode">Show live cameras</button><button class="primary" id="pair">Pair a phone</button></div>
       </div>
-      <div class="feed-grid">
+      <div class="feed-grid" id="camera-feeds">
         <article class="feed" data-camera="A">
           <header><div><span class="camera-icon" aria-hidden="true">A</span><h2>Camera A</h2></div><span class="status feed-status">Sample feed</span></header>
-          <div class="frame"><div class="sample-image sample-a" role="img" aria-label="Sample lab view with a chair and a desk"></div><canvas class="live-frame" role="img" aria-label="Live camera A preview with YOLO detections" hidden></canvas><p class="no-feed" hidden>Waiting for Camera A</p><div class="overlays" aria-hidden="true"></div></div>
-          <footer><span>Primary view</span><span class="feed-summary">2 sample detections</span></footer>
+          <div class="frame camera-frame" role="region" aria-label="Camera A image"><div class="sample-image sample-a" role="img" aria-label="Sample lab view with a chair and a desk"></div><canvas class="live-frame" role="img" aria-label="Live camera A preview with YOLO detections" hidden></canvas><p class="no-feed" hidden>Waiting for Camera A</p><div class="overlays" aria-hidden="true"></div></div>
+          <footer><span class="frame-size" hidden></span><span class="feed-summary">2 sample detections</span></footer>
         </article>
         <article class="feed" data-camera="B">
           <header><div><span class="camera-icon" aria-hidden="true">B</span><h2>Camera B</h2></div><span class="status feed-status">Sample feed</span></header>
-          <div class="frame"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><canvas class="live-frame" role="img" aria-label="Live camera B preview with YOLO detections" hidden></canvas><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
-          <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
+          <div class="frame camera-frame" role="region" aria-label="Camera B image"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><canvas class="live-frame" role="img" aria-label="Live camera B preview" hidden></canvas><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
+          <footer><span class="frame-size" hidden></span><span class="feed-summary">2 sample detections</span></footer>
         </article>
         <article class="feed" id="stereo-view" hidden>
           <header><h2>Stereo depth map</h2></header>
           <div class="frame"><canvas id="stereo-map" class="live-frame" role="img" aria-label="Stereo depth aligned to Camera A" hidden></canvas><p id="stereo-caption" class="no-feed"></p></div>
-          <footer>Camera A + B <span id="depth-scale"></span></footer>
+          <footer><span class="frame-size" id="depth-preview-size" hidden></span><span class="frame-size" id="depth-coverage" hidden></span><span id="depth-scale"></span></footer>
         </article>
       </div>
       <section class="detections" aria-labelledby="detections-title">
@@ -60,6 +60,17 @@
             <p class="voice-help" id="voice-help">Pause after each question. The assistant replies and listens again. Tap to end the conversation.</p>
           </div>
           <p class="active-options" id="active-options">Left camera (A) · System language</p>
+          <section class="assist-details quick-actions" aria-labelledby="quick-actions-title">
+            <div class="voice-head"><h2 id="quick-actions-title">Quick actions</h2><button type="button" class="quiet" id="assist-pair">Pair a camera</button></div>
+            <p id="camera-readiness" role="status">Checking camera connections…</p>
+            <div class="toolbar">
+              <button type="button" class="quiet" id="describe">Describe surroundings</button>
+              <button type="button" class="quiet" data-question="find">Find my item</button>
+              <button type="button" class="quiet" data-question="register">Register this item</button>
+              <button type="button" class="quiet" data-question="remember">Remember a habit</button>
+              <button type="button" class="quiet" id="recall-habits">Recall saved habits</button>
+            </div>
+          </section>
           <details class="assist-details">
             <summary>Voice controls and settings</summary>
             <p>Say “Only look left”, “Use both cameras”, “Switch to Mandarin”, or “Export the conversation”.</p>
@@ -110,13 +121,14 @@
           <p id="conversation-empty">Start talking to see your conversation here.</p>
           <ol id="conversation-log" tabindex="0" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions"></ol>
           <div id="voice-message" role="status"></div>
+          <p id="response-timing" hidden></p>
           <p id="export-status" role="status"></p>
           <div id="confirm-memory" hidden>
             <p id="confirmation-summary"></p>
             <div class="toolbar"><button type="button" class="primary" id="confirm-save">Confirm and save</button>
             <button type="button" class="quiet" id="confirm-cancel">Cancel</button></div>
           </div>
-          <div class="response-actions"><button class="quiet" id="describe">Compare cameras</button><button class="quiet" id="replay">Read aloud</button><button class="quiet stop" id="stop" type="button" hidden>Stop playback</button></div>
+          <div class="response-actions"><button class="quiet" id="replay">Read aloud</button><button class="quiet stop" id="stop" type="button" hidden>Stop playback</button></div>
         </section>
       </div>
     </section>

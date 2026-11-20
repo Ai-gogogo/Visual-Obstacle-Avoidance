@@ -42,11 +42,17 @@ h2{font-size:1.18rem;letter-spacing:-.02em}
 .camera-icon{display:grid;place-items:center;width:1.9rem;height:1.9rem;border-radius:.48rem;background:var(--tint);color:var(--accent);font-weight:750}
 .status{display:inline-block;border-radius:99rem;padding:.23rem .62rem;background:var(--tint);color:var(--accent);font-size:.84rem;font-weight:700}
 .status.live{background:var(--green-bg);color:var(--green)}
-.frame{aspect-ratio:3/2;position:relative;background:var(--frame);display:grid;place-items:center;color:#e3ecf8;overflow:hidden}
+.frame{aspect-ratio:var(--camera-aspect,3/2);position:relative;background:var(--frame);display:grid;place-items:center;color:#e3ecf8;overflow:hidden}
 .sample-image,.live-frame,.overlays{position:absolute;inset:0;width:100%;height:100%}
 .sample-image{background-image:url(demo-lab.webp);background-size:200% 100%}
 .sample-b{background-position:right center}
 .live-frame{object-fit:contain}
+.frame-size{font-variant-numeric:tabular-nums}
+#camera-feeds{align-items:start}
+#camera-feeds .feed header{min-height:3.3rem}
+#camera-feeds[data-actual-pixels] .camera-frame[data-has-pixels]{aspect-ratio:auto;display:block;max-height:min(75vh,640px);overflow:auto}
+#camera-feeds[data-actual-pixels] .camera-frame[data-has-pixels] .live-frame{position:static;display:block;width:auto;height:auto}
+.camera-frame:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
 .no-feed{padding:1rem;text-align:center}
 .box{position:absolute;border:2px solid var(--box-color);box-shadow:0 0 0 1px #0007;--box-color:#b9fc79}
 .box[data-kind=object]{--box-color:#8ce9ff}
@@ -80,6 +86,9 @@ td{font-size:.94rem}
 .assist-details,#memory-panel{border-top:1px solid var(--line);padding:.65rem 0}
 .assist-details summary,#memory-panel summary{cursor:pointer;font-weight:650}
 .assist-details > p,.assist-details form,.voice-options{margin-top:.65rem}
+.quick-actions .toolbar{margin-top:.65rem}
+#camera-readiness,#response-timing{color:var(--muted);font-size:.91rem}
+#response-timing{margin-top:.35rem;font-variant-numeric:tabular-nums}
 .voice-options{display:grid;gap:.75rem}
 .voice-options label{display:flex;align-items:center;flex-wrap:wrap;gap:.45rem}
 .voice-options select{font:inherit;color:inherit;background:var(--surface);border-radius:.3rem;padding:.3rem}
@@ -124,11 +133,15 @@ dialog p{color:var(--muted);margin-bottom:.8rem}
 .phone form{margin-top:1.5rem}
 .phone input{font-size:1.65rem;letter-spacing:.18em}
 .phone input::placeholder{letter-spacing:.1em}
+.phone label[for=camera-quality]{margin-top:.9rem}
+.phone #camera-quality{width:100%;padding:.55rem;font:inherit}
+#camera-quality-note{font-size:.87rem;margin-top:.3rem}
 .phone form button{width:100%;min-height:3.4rem;margin-top:.75rem}
 #phone-status:empty{display:none}
 #phone-status{margin-top:1rem}
 .phone-preview{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
 @media(hover:hover){nav a:hover,.quiet:hover{background:var(--tint)}.primary:hover,.mic:hover{filter:brightness(.9)}}
+@media(min-width:1060px){#camera-feeds[data-live]{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:760px){.masthead{flex-wrap:wrap;padding-block:.65rem}.page-head{align-items:flex-start;flex-direction:column}.feed-grid,.assist-grid{grid-template-columns:minmax(0,1fr)}.contrast{margin-left:auto}.masthead nav{order:1;width:100%}}
 @media(max-width:400px){th,td{padding:.5rem}.feed header,.feed footer{padding:.65rem}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}button:active{transform:none}}

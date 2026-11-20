@@ -99,6 +99,12 @@ function showDepth(snapshot, preview) {
   const canvas = $('#stereo-map');
   canvas.hidden = !preview;
   $('#stereo-caption').hidden = Boolean(preview);
+  const size = $('#depth-preview-size');
+  size.hidden = !preview;
+  const coverage = $('#depth-coverage');
+  const fraction = snapshot?.depth_valid_fraction;
+  coverage.hidden = !preview || !Number.isFinite(fraction);
+  if (!coverage.hidden) coverage.textContent = (100 * fraction).toFixed(1) + '% valid depth';
   const [near, far] = snapshot?.depth_range_m ?? [];
   $('#depth-scale').textContent = preview
     ? (near ? 'Bright ' + near + ' m · dark ' + far + ' m' : 'Near is bright, far is dark') + ' · black is unknown'
@@ -106,6 +112,7 @@ function showDepth(snapshot, preview) {
   if (preview) {
     canvas.width = preview.naturalWidth;
     canvas.height = preview.naturalHeight;
+    size.textContent = canvas.width + ' × ' + canvas.height + ' px preview';
     canvas.getContext('2d').drawImage(preview, 0, 0);
     canvas.dataset.frameId = snapshot.frame_id;
   } else {
@@ -176,13 +183,28 @@ function setFeed(feed, connected, message) {
   status.classList.toggle('live', !sampleMode && connected);
   const image = node.querySelector('.live-frame');
   image.hidden = sampleMode || !connected;
+  const frame = image.parentElement;
+  const size = node.querySelector('.frame-size');
+  size.hidden = sampleMode || !connected;
+  frame.toggleAttribute('data-has-pixels', !size.hidden);
+  frame.tabIndex = !size.hidden && $('#camera-feeds').hasAttribute('data-actual-pixels') ? 0 : -1;
   if (!connected) {
-    if (feed.side === 'A') showDepth(null);
+    if (sampleMode) frame.style.removeProperty('--camera-aspect');
+    if (feed.side === 'A') {
+      if (sampleMode) $('#stereo-map').parentElement.style.removeProperty('--camera-aspect');
+      showDepth(null);
+    }
     feed.etag = undefined;
     image.getContext('2d').clearRect(0,0,image.width,image.height);
     delete image.dataset.frameId;
+    const hadObjects = feed.objects != null;
     feed.objects = null;
-    renderDetections();
+    if (feed.side === 'A' || hadObjects) renderDetections();
+  } else {
+    const aspect = image.width + ' / ' + image.height;
+    frame.style.setProperty('--camera-aspect', aspect);
+    if (feed.side === 'A') $('#stereo-map').parentElement.style.setProperty('--camera-aspect', aspect);
+    size.textContent = image.width + ' × ' + image.height + ' px';
   }
   const empty = node.querySelector('.no-feed');
   empty.hidden = sampleMode || connected;
@@ -208,16 +230,18 @@ async function readFrame(feed, version) {
       throw new Error('Preview camera does not match the requested feed.');
     }
     const image = new Image();
-    image.src = 'data:image/jpeg;base64,' + snapshot.jpeg;
+    image.src = snapshot.png ? 'data:image/png;base64,' + snapshot.png : 'data:image/jpeg;base64,' + snapshot.jpeg;
     const depth = snapshot.depth_preview ? new Image() : null;
     if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
     await Promise.all([image.decode(), depth?.decode()]);
     if (version !== pollVersion) return;
     paintCamera(feed.node.querySelector('canvas'), image, snapshot);
     feed.etag = response.headers.get('etag');
+    const hasDetections = feed.objects != null || snapshot.objects != null;
     feed.objects = snapshot.objects;
     if (feed.side === 'A') showDepth(snapshot,depth);
     setFeed(feed,true);
+    if (snapshot.png) feed.node.querySelector('.frame-size').textContent += ' · Lossless PNG';
     if (snapshot.analysis_delayed) {
       feed.node.querySelector('.feed-summary').textContent = 'Live preview · analysis catching up';
     } else if (snapshot.road_edge?.point) {
@@ -225,7 +249,7 @@ async function readFrame(feed, version) {
       feed.node.querySelector('.feed-summary').textContent = Number.isFinite(meters)
         ? 'Road edge ahead · '+meters.toFixed(1)+' m' : 'Possible road ahead · distance unavailable';
     }
-    renderDetections();
+    if (feed.side === 'A' || hasDetections) renderDetections();
   } catch {
     if (version !== pollVersion) return;
     setFeed(feed,false,'Connection interrupted');
@@ -241,15 +265,16 @@ function refreshPolling() {
     if (version !== pollVersion) return;
     if (!token) { setFeed(feed,false,'Pair the phone again.'); return; }
     await readFrame(feed,version);
-    if (version === pollVersion) setTimeout(() => poll(feed),150);
+    if (version === pollVersion) setTimeout(() => poll(feed),feed.side === 'A' ? 150 : 220);
   }
-  poll(feeds.find(feed => feed.side === 'A'));
+  feeds.forEach(poll);
 }
 
 function renderMode(demo) {
   stopAudio();
   sampleMode = demo;
-  feeds.find(feed => feed.side === 'B').node.hidden = !demo;
+  $('#camera-feeds').toggleAttribute('data-live', !demo);
+  $('#pixel-preview').hidden = demo;
   $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
   $('#assist-mode').textContent = demo ? 'Sample scene' : 'Live preview mode';
   $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'Relative depth compares ground contacts. Forward depth is measured from Camera A using both phones.';
@@ -259,6 +284,7 @@ function renderMode(demo) {
 }
 
 let pendingTurn;
+let latestTiming;
 let reviewing = false;
 let exporting = false;
 const conversation = readConversation();
@@ -311,7 +337,7 @@ function resumeListening() {
 }
 
 function interruptTurn() {
-  pendingTurn?.abort();
+  pendingTurn?.controller.abort();
   pendingTurn = undefined;
   deferredReply = undefined;
   pauseListening();
@@ -340,7 +366,7 @@ function stopPlayback(message = '') {
   clearTimeout(recoveryTimer);
   releaseSpeech();
   if (reply) {
-    speakLocal(reply);
+    speakLocal(reply.text,false,reply.turn);
     return;
   }
   if (!voiceSession) ready();
@@ -352,9 +378,9 @@ function stopPlayback(message = '') {
   if (message) $('#voice-message').textContent = message;
 }
 
-async function speakLocal(text, warning = false) {
+async function speakLocal(text, warning = false, turn) {
   if (!warning && warningActive) {
-    deferredReply = text;
+    deferredReply = {text,turn};
     return;
   }
   pauseListening();
@@ -379,6 +405,10 @@ async function speakLocal(text, warning = false) {
     output.audio.onended = () => finish();
     output.audio.onerror = () => finish('Local playback failed. The text is still available.');
     await output.audio.play();
+    if (turn && speech === output) {
+      turn.audioMs = Math.round(performance.now()-turn.startedAt);
+      renderTiming(turn);
+    }
     if (!warning && speech === output) setVoiceState('Speaking',
       voiceSession ? 'Listening resumes after the reply' : 'Playing reply. Tap to stop playback.',label);
   } catch (error) {
@@ -412,12 +442,24 @@ async function agentRequest(...args) {
   return response.status === 204 ? null : response.json();
 }
 
-function renderReply(result) {
+function renderTiming(turn) {
+  if (turn !== latestTiming || turn.textMs == null) return;
+  const timing = $('#response-timing');
+  timing.hidden = false;
+  timing.textContent = 'Text ready in '+turn.textMs+' ms' +
+    (turn.audioMs == null ? '' : ' · Audio started in '+turn.audioMs+' ms');
+}
+
+function renderReply(result, turn) {
   confirmation = result.confirmation;
   $('#confirm-memory').hidden = !confirmation;
   $('#confirmation-summary').textContent = confirmation?.summary || '';
   $('#voice-message').textContent = '';
   addMessage('assistant',result.reply_text);
+  if (turn) {
+    turn.textMs = Math.round(performance.now()-turn.startedAt);
+    renderTiming(turn);
+  }
 }
 
 function readConversation() {
@@ -610,10 +652,12 @@ async function applyVoiceCommand(turn, question, command, speak) {
   if (speak) speakLocal(reply);
 }
 
-function beginTurn(prompt) {
+function beginTurn(prompt, startedAt = performance.now()) {
   if (warningActive) pauseListening();
   else interruptTurn();
-  pendingTurn = new AbortController();
+  pendingTurn = {controller:new AbortController(),startedAt};
+  latestTiming = pendingTurn;
+  $('#response-timing').hidden = true;
   if (voiceSession && !warningActive) setVoiceState('Processing',prompt,'End conversation');
   $('#voice-message').textContent = prompt;
   return pendingTurn;
@@ -632,14 +676,10 @@ async function sendQuestion(turn, question, speak, mode) {
   addMessage('user',question);
   const response = await agentRequest('/api/agent/chat','POST',JSON.stringify({
     text:question, mode, camera_id:$('#agent-camera').value
-  }),'application/json',turn.signal);
+  }),'application/json',turn.controller.signal);
   if (pendingTurn !== turn || currentPage !== 'assist') return;
-  renderReply(response);
-  if (speak) speakLocal(response.reply_text);
-  if ($('#memory-panel').open) {
-    refreshMemory();
-    loadPreferences().catch(error => { $('#memory-status').textContent = error.message; });
-  }
+  renderReply(response,turn);
+  if (speak) speakLocal(response.reply_text,false,turn);
 }
 
 async function answer(question, speak = false, mode) {
@@ -678,12 +718,12 @@ function wakeCommand(transcript) {
   return match ? text.slice(match[0].length).replace(/^[\s,.!?:，。！？：]+/u,'') : null;
 }
 
-async function transcribeTurn(active, chunks, sampleRate) {
-  const turn = beginTurn('Transcribing locally…');
+async function transcribeTurn(active, chunks, sampleRate, startedAt) {
+  const turn = beginTurn('Transcribing locally…',startedAt);
   try {
     const audio = wavRecording(chunks,sampleRate);
     const language = active.waitingForWakeWord ? 'auto' : transcriptionLanguage();
-    let {text} = await agentRequest('/api/agent/transcribe?language='+language,'POST',audio,audio.type,turn.signal);
+    let {text} = await agentRequest('/api/agent/transcribe?language='+language,'POST',audio,audio.type,turn.controller.signal);
     if (pendingTurn !== turn) return;
     if (active.waitingForWakeWord) {
       const command = wakeCommand(text || '');
@@ -719,6 +759,7 @@ function readMicrophone(active, {samples,rms}) {
   if (voiceSession !== active || !active.listening) return;
   const segment = active.segment;
   const speaking = rms >= Math.max(0.006,segment.floor*2.7);
+  if (speaking) segment.lastVoiceAt = performance.now();
   if (!segment.chunks.length) {
     segment.lead.push(samples);
     if (segment.lead.length > 9) segment.lead.shift();
@@ -741,7 +782,7 @@ function readMicrophone(active, {samples,rms}) {
     active.segment = {lead:[],chunks:[],onset:0,voiced:0,quiet:0,floor:segment.floor};
     return;
   }
-  transcribeTurn(active, segment.chunks, active.context.sampleRate);
+  transcribeTurn(active, segment.chunks, active.context.sampleRate, segment.lastVoiceAt);
 }
 
 function showMicrophoneError(english, chinese) {
@@ -821,25 +862,28 @@ async function startVoice(waitingForWakeWord = false) {
 }
 
 async function finishConfirmation(accepted) {
-  if (!confirmation) return;
+  if (!confirmation || pendingTurn) return;
   const selected = confirmation;
+  const turn = beginTurn('Updating saved memory…');
   const buttons = [...$('#confirm-memory').querySelectorAll('button')];
   buttons.forEach(button => { button.disabled = true; });
   try {
     const result = await agentRequest('/api/agent/confirm','POST',JSON.stringify({
       id:selected.id,accepted,language:/[\u3400-\u9fff]/u.test(selected.summary) ? 'zh' : 'en'
-    }));
-    if (confirmation !== selected) return;
+    }),'application/json',turn.controller.signal);
+    if (confirmation !== selected || pendingTurn !== turn) return;
     addMessage('user',accepted ? 'Confirmed' : 'Cancelled');
-    renderReply(result);
+    renderReply(result,turn);
+    if (voiceSession) speakLocal(result.reply_text,false,turn);
     $('#replay').focus();
-    if ($('#memory-panel').open) {
-    refreshMemory();
-    loadPreferences().catch(error => { $('#memory-status').textContent = error.message; });
-  }
+    if ($('#memory-panel').open) refreshMemory();
+    if ($('#preferences-panel').open) loadPreferences().catch(error => { $('#preferences-status').textContent = error.message; });
   } catch (error) {
-    $('#voice-message').textContent = error.message;
-  } finally { buttons.forEach(button => { button.disabled = false; }); }
+    if (pendingTurn === turn) $('#voice-message').textContent = error.message;
+  } finally {
+    completeTurn(turn);
+    buttons.forEach(button => { button.disabled = false; });
+  }
 }
 
 async function refreshMemory() {
@@ -929,11 +973,21 @@ async function loadPreferences() {
 
 let pendingRoadAlert;
 let activeWarningRisk;
+function updateCameraReadiness(cameras) {
+  const status = $('#camera-readiness');
+  const labels = {offline:'offline',waiting:'waiting for video',live:'live',detecting:'detecting objects'};
+  const text = cameras
+    ? ['A','B'].map(side => 'Camera '+side+' · '+(labels[cameras[side]] || 'unknown')).join('  /  ')
+    : 'Camera status unavailable';
+  if (status.textContent !== text) status.textContent = text;
+}
+
 async function pollAlerts() {
   try {
     const allowReminder = currentPage === 'assist';
-    const {sequence,alerts,reminder} = await agentRequest('/api/agent/alerts?after='+alertSequence+
+    const {sequence,alerts,reminder,cameras} = await agentRequest('/api/agent/alerts?after='+alertSequence+
       (allowReminder ? '&reminders=1' : ''),'GET');
+    if (allowReminder) updateCameraReadiness(cameras);
     if (reminder && allowReminder) pendingReminder = {text:reminder,until:Date.now()+15_000};
     if (!allowReminder || pendingReminder?.until < Date.now()) pendingReminder = undefined;
     alertSequence = sequence;
@@ -971,6 +1025,7 @@ async function pollAlerts() {
       speakLocal(message);
     }
   } catch (error) {
+    if (currentPage === 'assist') updateCameraReadiness();
     if (error.status === 403 || location.protocol === 'file:') return;
     if (error.status === 401) {
       alertSequence = 0;
@@ -982,13 +1037,15 @@ async function pollAlerts() {
 }
 const dialog = $('#pair-dialog');
 const pairButtons = [...document.querySelectorAll('[data-pair]')];
-$('#pair').addEventListener('click', () => {
+function openPairDialog() {
   $('#phone-address').textContent = location.protocol === 'file:'
     ? 'Start the local server to enable pairing. See README.md.'
     : new URL('/camera',location.href).href;
   $('#pair-result').textContent = '';
   dialog.showModal();
-});
+}
+$('#pair').addEventListener('click',openPairDialog);
+$('#assist-pair').addEventListener('click',openPairDialog);
 pairButtons.forEach(button => button.addEventListener('click', async () => {
   const version = ++pairingVersion;
   const result = $('#pair-result');
@@ -1009,8 +1066,10 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
     code.className = 'pair-code';
     code.textContent = codeResponse.code.replace(/^(...)/,'$1 ');
     result.replaceChildren('Camera '+side+' · expires in five minutes',code);
-    if (sampleMode) renderMode(false);
-    else refreshPolling();
+    if (currentPage === 'monitor') {
+      if (sampleMode) renderMode(false);
+      else refreshPolling();
+    }
   } catch (error) {
     if (version === pairingVersion) result.textContent = error.message;
   } finally {
@@ -1020,12 +1079,35 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
 }));
 dialog.addEventListener('close', () => { pairingVersion += 1; });
 $('#mode').addEventListener('click', () => renderMode(!sampleMode));
+$('#pixel-preview').addEventListener('click', event => {
+  const active = $('#camera-feeds').toggleAttribute('data-actual-pixels');
+  event.currentTarget.setAttribute('aria-pressed', String(active));
+  document.querySelectorAll('.camera-frame[data-has-pixels]').forEach(frame => {
+    frame.tabIndex = active ? 0 : -1;
+  });
+});
 $('#contrast').addEventListener('click', () => setContrast(!document.documentElement.hasAttribute('data-contrast')));
 $('#mic').addEventListener('click',() => startVoice());
 $('#wake-voice').addEventListener('click',() => startVoice(true));
 $('#describe').addEventListener('click', () => {
-  if ($('#agent-camera').value === 'both') answer('Compare the views from Camera A and Camera B.',true,'image');
-  else answer('Describe surroundings',true,'scene');
+  const zh = transcriptionLanguage() === 'zh';
+  if ($('#agent-camera').value === 'both') answer(zh ? '比较相机 A 和相机 B 的画面。' : 'Compare the views from Camera A and Camera B.',true,'image');
+  else answer(zh ? '我前面有什么？' : 'What is in front of me?',true,'scene');
+});
+$('#recall-habits').addEventListener('click', () =>
+  answer(transcriptionLanguage() === 'zh' ? '我保存了哪些习惯？' : 'What habits have I saved?',true));
+document.querySelectorAll('[data-question]').forEach(button => {
+  button.addEventListener('click', () => {
+    if (pendingTurn || reviewing) return;
+    const templates = transcriptionLanguage() === 'zh'
+      ? {find:'帮我找我的',register:'登记物品：',remember:'记住，'}
+      : {find:'Where is my ',register:'Register item ',remember:'Remember, '};
+    $('#keyboard-input').open = true;
+    const input = $('#question');
+    input.value = templates[button.dataset.question];
+    input.focus();
+    input.setSelectionRange(input.value.length,input.value.length);
+  });
 });
 ['#agent-camera','#voice-language','#review-voice'].forEach(selector =>
   $(selector).addEventListener('change', () => syncVoiceSettings()));
