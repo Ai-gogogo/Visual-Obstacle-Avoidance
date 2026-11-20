@@ -91,6 +91,7 @@ function showDepth(snapshot, preview) {
     uncalibrated:'Load the calibration for this phone pair to measure depth.',
     size_mismatch:'Depth unavailable · check both phones’ image dimensions against calibration.',
     waiting_for_pair:'Depth waiting for two time-matched camera frames.',
+    unavailable:'Depth processing is unavailable. Camera A is still detecting objects.',
     no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
   };
   $('#stereo-view').hidden = sampleMode;
@@ -206,6 +207,9 @@ async function readFrame(feed, version) {
     feed.objects = snapshot.objects;
     if (feed.side === 'A') showDepth(snapshot,depth);
     setFeed(feed,true);
+    if (snapshot.analysis_delayed) {
+      feed.node.querySelector('.feed-summary').textContent = 'Live preview · analysis catching up';
+    }
     renderDetections();
   } catch {
     if (version !== pollVersion) return;
@@ -222,7 +226,7 @@ function refreshPolling() {
     if (version !== pollVersion) return;
     if (!token) { setFeed(feed,false,'Pair the phone again.'); return; }
     await readFrame(feed,version);
-    if (version === pollVersion) setTimeout(() => poll(feed),260);
+    if (version === pollVersion) setTimeout(() => poll(feed),150);
   }
   poll(feeds.find(feed => feed.side === 'A'));
 }

@@ -4,6 +4,7 @@ const { once } = require('node:events');
 const {createServer} = require('./server.cjs');
 
 test('desktop and two phones pair independently and stale frames are withheld', async t => {
+  t.mock.timers.enable({apis:['Date'], now:Date.now()});
   const server = createServer();
   server.listen(0,'127.0.0.1');
   await once(server,'listening');
@@ -41,12 +42,42 @@ test('desktop and two phones pair independently and stale frames are withheld', 
   assert.deepEqual(Buffer.from(await (await call('/api/frame/B','GET',desk)).arrayBuffer()),jpegB);
   assert.equal((await call('/api/frame/A','GET',desk,undefined,{'If-None-Match':frameA.headers.get('etag')})).status,304);
   assert.equal((await call('/api/frame/A','GET',a)).status,401);
+  assert.equal((await call('/api/agent/alerts','GET',desk)).status,200);
+  const {sources} = await read(await call('/api/cv/sources'),200);
+  const source = sources.find(entry => entry.camera_id === 'A');
+  const query = '?camera_id=A&source_id='+source.source_id;
+  const publishFrame = async () => {
+    const frame = await call('/api/cv/frame'+query);
+    assert.equal(frame.status,200);
+    const result = await call('/api/cv/detections'+query,'POST',undefined,
+      JSON.stringify({frame_id:frame.headers.get('etag').slice(1,-1),objects:[]}),
+      {'Content-Type':'application/json'});
+    assert.equal(result.status,204);
+  };
+  await publishFrame();
+  const measured = await read(await call('/api/preview/A','GET',desk),200);
+  assert.deepEqual(measured.objects,[]);
+  const nextA = Buffer.from([255,216,33,255,217]);
+  t.mock.timers.tick(100);
+  assert.equal((await push(a,nextA)).status,204);
+  t.mock.timers.tick(700);
+  const delayed = await read(await call('/api/preview/A','GET',desk),200);
+  assert.equal(delayed.analysis_delayed,true);
+  assert.notEqual(delayed.frame_id,measured.frame_id);
+  assert.deepEqual(Buffer.from(delayed.jpeg,'base64'),nextA);
+  assert.equal(delayed.objects,null);
+  assert.equal(delayed.depth_preview,undefined);
+  await publishFrame();
+  const current = await read(await call('/api/preview/A','GET',desk),200);
+  assert.equal(current.analysis_delayed,undefined);
+  assert.equal(current.frame_id,delayed.frame_id);
+  assert.deepEqual(current.objects,[]);
   const {token:a2} = await read(await join(await pair('A')),200);
   assert.equal((await push(a,jpegA)).status,401);
   assert.equal((await call('/api/frame/A','GET',desk)).status,204);
   assert.equal((await push(a2,jpegA)).status,204);
   assert.equal((await call('/api/frame','DELETE',a2)).status,204);
   assert.equal((await call('/api/frame/A','GET',desk)).status,204);
-  await new Promise(resolve => setTimeout(resolve,5100));
+  t.mock.timers.tick(5100);
   assert.equal((await call('/api/frame/B','GET',desk,undefined,{'If-None-Match':'"unknown"'})).status,204);
 });
