@@ -2,11 +2,14 @@ const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { existsSync, mkdirSync } = require('node:fs');
 const { createInterface } = require('node:readline');
+const { setTimeout: delay } = require('node:timers/promises');
 const path = require('node:path');
 const {embedLocally,semanticMatches} = require('./semantic-memory.cjs');
 const {PLAN_FORMAT,routineStatement,routineObservation,parsePlan,planStep} = require('./routines.cjs');
 
 const MAX_FRAME_AGE = 5000;
+const OCR_ROOM_SAMPLE_GAP = 2000;
+const OCR_ROOM_WAIT = 800;
 const PREVIEW_MAX_ANALYSIS_LAG_MS = 750;
 const cn = text => /[\u3400-\u9fff]/u.test(text);
 const clean = text => typeof text === 'string' ? text.trim().slice(0, 200) : '';
@@ -19,6 +22,13 @@ function currentDetection(slot) {
   if (slot.frame && slot.frame !== detection.frame &&
       Date.now()-detection.timestamp_ms > PREVIEW_MAX_ANALYSIS_LAG_MS) return null;
   return detection;
+}
+
+function wantsReadText(text) {
+  const command = text.normalize('NFKC').replace(/[.!?。！？]+$/u, '').replace(/\s+/gu, ' ');
+  const english = /^(?:(?:please,? |(?:can|could|would) you )?(?:help me )?(?:read(?: aloud)?|identify|recognize) (?:the |this |that )?(?:text|door sign|room number|sign)(?: (?:on (?:the|this|that) sign|in (?:front of me|the (?:image|frame|camera view))))?(?: for me|,? please)?|what (?:does (?:the|this|that) (?:door sign|sign|text) say|is written (?:here|there|on (?:the|this|that) (?:door|sign))))$/iu;
+  const chinese = /^(?:(?:请|請)?(?:帮我|幫我)?(?:读|讀|念|识别|識別)(?:一下|出来|出來)?(?:画面里|畫面裡|上面|前面|这块|這塊|这个|這個|这段|這段|门牌上的|門牌上的)?(?:文字|字|门牌号?|門牌號?|房间号|房間號|标志|標誌|标牌|標牌)(?:读出来|讀出來|念出来|念出來)?|(?:上面|这上面|這上面|门牌上|門牌上|标志上|標誌上|牌子上)(?:写|寫)了?(?:什么|什麼)(?:字)?)$/u;
+  return english.test(command) || chinese.test(command.replace(/\s/gu, ''));
 }
 
 function localPython() {
@@ -43,9 +53,9 @@ function localWorker(mode, data) {
   });
 }
 
-function createSpeechWorker(mode, resultField, timeoutMs) {
+function createSessionWorker(mode, resultField, timeoutMs) {
   let child, pending, idle;
-  const failure = () => new Error('Local speech worker failed.');
+  const failure = () => new Error('Local Python session worker failed.');
 
   function close(error = failure()) {
     clearTimeout(idle);
@@ -86,12 +96,12 @@ function createSpeechWorker(mode, resultField, timeoutMs) {
   return {
     close,
     request(data) {
-      // The Agent admits one request per speech worker at a time.
+      // The Agent admits one request per session worker at a time.
       clearTimeout(idle);
       const process = child || start();
       return new Promise((resolve,reject) => {
         const timeout = setTimeout(() => {
-          close();
+          close(Object.assign(new Error('Local Python session worker timed out.'), {code:'ETIMEDOUT'}));
           process.kill();
         },timeoutMs);
         pending = {resolve,reject,timeout};
@@ -159,9 +169,12 @@ async function ollama(messages, image, format, onPlacement) {
   }
 }
 
-function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now } = {}) {
-  const transcriber = worker === localWorker ? createSpeechWorker('stt-session','text',55_000) : null;
-  const alertSpeaker = worker === localWorker ? createSpeechWorker('tts-session','audio',15_000) : null;
+function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now, recognizeText } = {}) {
+  const transcriber = worker === localWorker ? createSessionWorker('stt-session','text',55_000) : null;
+  const alertSpeaker = worker === localWorker ? createSessionWorker('tts-session','audio',15_000) : null;
+  const demoOcr = !recognizeText && process.env.VISIONASSIST_OCR_DEMO === '1';
+  const localOcr = !demoOcr && !recognizeText ? createSessionWorker('ocr','text',20_000) : null;
+  const ocr = demoOcr ? async () => ({text:'Study Room G17'}) : recognizeText || (({image}) => localOcr.request({image:image.toString('base64')}));
   let db;
   let lastPlacement;
   const recordPlacement = placement => { lastPlacement = placement; };
@@ -337,6 +350,63 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     busy.add(kind);
     try { return await operation(); }
     finally { busy.delete(kind); }
+  }
+
+  async function readText(session, side, isChinese, verifyRoom) {
+    const slot = session.slots[side];
+    const reply = (status, zh, en) => output(isChinese ? zh : en, 'unavailable', {ocr_status:status});
+    const changed = () => reply('camera_changed', '相机连接已更换，请重新请求识别。', 'The camera connection changed. Please try again.');
+    const stale = () => reply('stale_frame', '画面已过期，请等相机恢复实时画面后再试。', 'The camera frame expired. Wait for a live image and try again.');
+    const uncertain = () => reply('uncertain', '文字看不清，请靠近并稳住相机后再试。', 'The text is unclear. Move the camera closer, hold it steady, and try again.');
+    if (!slot?.frame) return reply('no_frame', '所选相机当前没有画面。', 'The selected camera has no recent frame.');
+    if (!fresh(slot.stamp)) return stale();
+
+    const capture = () => ({image:slot.frame, camera_id:side, frame_id:slot.etag.slice(1,-1), timestamp_ms:slot.stamp});
+    const first = capture();
+    const valid = () => session.slots[side] === slot && slot.frame && fresh(first.timestamp_ms);
+    const roomCodes = text => [...new Set((text ?? '').toUpperCase().match(/\bG[0-9]{2}\b/g) ?? [])];
+    const recognize = image => runResource('ocr', () => ocr(image));
+    async function nextRoomFrame() {
+      const until = Date.now() + OCR_ROOM_WAIT;
+      while (valid() && slot.etag.slice(1,-1) === first.frame_id && Date.now() < until) await delay(50);
+      if (!valid() || slot.etag.slice(1,-1) === first.frame_id) return null;
+      const gap = slot.stamp - first.timestamp_ms;
+      return gap > 0 && gap <= OCR_ROOM_SAMPLE_GAP ? capture() : null;
+    }
+
+    let result;
+    try {
+      const next = verifyRoom && !demoOcr ? nextRoomFrame() : null;
+      result = await recognize(first);
+      if (valid() && next && roomCodes(result?.text).length) {
+        const codes = roomCodes(result.text);
+        if (codes.length !== 1) return uncertain();
+        const second = await next;
+        if (session.slots[side] !== slot) return changed();
+        if (!fresh(first.timestamp_ms)) return stale();
+        if (!second) return uncertain();
+        const checked = roomCodes((await recognize(second))?.text);
+        if (session.slots[side] !== slot) return changed();
+        if (!fresh(second.timestamp_ms)) return stale();
+        if (checked.length !== 1 || checked[0] !== codes[0]) return uncertain();
+        return output(codes[0], 'ocr', {ocr_status:'room_confirmed'});
+      }
+    } catch (error) {
+      if (error.publicMessage) throw error;
+      if (session.slots[side] !== slot) return changed();
+      if (error.code === 'ETIMEDOUT') return reply('timeout', '文字识别超时，请重试。', 'Text recognition timed out. Please try again.');
+      return reply('worker_error', '文字识别暂不可用，请稍后重试。', 'Text recognition is currently unavailable. Please try again.');
+    }
+    if (session.slots[side] !== slot) return changed();
+    if (!fresh(first.timestamp_ms)) return stale();
+    if (result?.invalid_frame) return reply('invalid_frame', '无法读取相机画面，请重试。', 'Could not read the camera image. Please try again.');
+    const text = typeof result?.text === 'string' ? result.text.trim() : '';
+    if (!text) return result?.uncertain ? uncertain() : reply('no_text', '画面中未发现文字。请将相机对准文字后再试。',
+      'I found no text in this frame. Point the camera at the text and try again.');
+    if (demoOcr) return output((isChinese ? '文字识别演示。' : 'Text recognition demo. ') + text, 'ocr_demo');
+    if (verifyRoom && result.uncertain) return uncertain();
+    const prefix = result.uncertain ? (isChinese ? '部分文字不清楚。能读到：' : 'Some text is unclear. I can read: ') : '';
+    return output((prefix + text).slice(0,650), 'ocr', {ocr_status:result.uncertain ? 'partial' : 'recognized'});
   }
 
   async function extract(kind, frame, boxes) {
@@ -535,6 +605,10 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       return confirm(session, session.pending.id, /^(?:[确確][认認]|yes|confirm)/iu.test(text), isChinese);
     }
     delete session.pending;
+    if (input.mode === 'read_text' || (!input.mode && wantsReadText(text))) {
+      const verifyRoom = /\broom number\b|门牌号|門牌號|房间号|房間號/iu.test(text);
+      return twoCameras ? oneCamera() : readText(session,side,isChinese,verifyRoom);
+    }
     const introduction = text.normalize('NFKC').replace(/[\s,.!?，。！？]+/gu,'');
     if (!input.mode && /^(?:(?:你好|您好)?(?:请|請)?(?:你是[谁誰]|你叫(?:什么|什麼)(?:名字)?|你能做(?:什么|什麼)|(?:用一句(?:话|話))?(?:自我介绍|自我介紹|介绍一下自己|介紹一下自己))|whoareyou|what['’]?syourname|whatcanyoudo|introduceyourself)$/iu.test(introduction)) {
       return output(isChinese
@@ -673,7 +747,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   }
 
   return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory, modelRuntime,
-    close() { transcriber?.close(); alertSpeaker?.close(); db?.close(); },
+    close() { transcriber?.close(); alertSpeaker?.close(); localOcr?.close(); db?.close(); },
     remove(kind,id) { return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0; },
     async synthesize(text, priority) {
       if (typeof text !== 'string' || !text.trim() || text.length > 650) throw failure(400, 'Give a short reply to speak.');

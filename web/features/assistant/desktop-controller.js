@@ -31,6 +31,7 @@ export function mountDesktop(root, voicePresentation) {
   let recoveryTimer;
   let speech;
   let currentPage;
+  let cameraSelectionVersion = 0;
 
   function showPage() {
     const hash = location.hash;
@@ -147,7 +148,7 @@ export function mountDesktop(root, voicePresentation) {
     }
     pauseListening();
     clearTimeout(recoveryTimer);
-    const output = {controller:new AbortController()};
+    const output = {controller:new AbortController(),ocr:turn?.ocr};
     speech = output;
     warningActive = warning;
     const label = voiceSession ? 'End conversation' : 'Stop playback';
@@ -365,10 +366,13 @@ export function mountDesktop(root, voicePresentation) {
     const command = mode ? null : matchVoiceCommand(question);
     if (command) return applyVoiceCommand(turn,question,command,speak);
     addMessage('user',question);
+    const selectionVersion = cameraSelectionVersion;
     const response = await agentRequest('/api/agent/chat','POST',JSON.stringify({
       text:question, mode, camera_id:$('#agent-camera').value
     }),'application/json',turn.controller.signal);
     if (pendingTurn !== turn || currentPage !== 'assist') return;
+    turn.ocr = Boolean(response.ocr_status || response.source === 'ocr_demo');
+    if (turn.ocr && selectionVersion !== cameraSelectionVersion) return;
     renderReply(response,turn);
     if (speak) speakLocal(response.reply_text,false,turn);
   }
@@ -611,7 +615,13 @@ export function mountDesktop(root, voicePresentation) {
       input.setSelectionRange(input.value.length,input.value.length);
     });
   });
-  ['#agent-camera','#voice-language','#review-voice'].forEach(selector =>
+  listen($('#agent-camera'), 'change', () => {
+    cameraSelectionVersion++;
+    if (deferredReply?.turn?.ocr) deferredReply = undefined;
+    if (speech?.ocr) stopPlayback();
+    syncVoiceSettings();
+  });
+  ['#voice-language','#review-voice'].forEach(selector =>
     listen($(selector), 'change', () => syncVoiceSettings()));
   listen(window, 'languagechange', () => syncVoiceSettings(false));
   restoreVoiceSettings();
