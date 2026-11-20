@@ -6,6 +6,7 @@ const status = document.querySelector('#phone-status');
 const connect = document.querySelector('#connect');
 const canvas = document.createElement('canvas');
 const context = canvas.getContext('2d');
+const lensStatus = document.querySelector('#lens-status');
 let stream;
 let token;
 let timer;
@@ -33,6 +34,7 @@ function stop(message = '') {
   stream = undefined;
   video.srcObject = null;
   video.hidden = true;
+  lensStatus.hidden = true;
   card.hidden = false;
   connect.disabled = false;
   status.textContent = message;
@@ -82,6 +84,45 @@ async function upload(currentRun, sampleTime) {
   }
 }
 
+// An ultrawide physical lens can report 1× relative to itself.
+async function openWideCamera(devices) {
+  const open = video => devices.getUserMedia({video,audio:false});
+  const rear = {facingMode:{ideal:'environment'}};
+  const ultra = label => /ultra[ -]?wide|超广角|超廣角/i.test(label) &&
+    !/front|user.facing|前置/i.test(label);
+  let media = await open(rear);
+  try {
+    let track = media.getVideoTracks()[0];
+    if (!ultra(track.label)) {
+      const cameras = await devices.enumerateDevices().catch(() => []);
+      const target = cameras.find(d => d.kind === 'videoinput' && d.deviceId && ultra(d.label));
+      if (target && target.deviceId !== track.getSettings().deviceId) {
+        media.getTracks().forEach(t => t.stop());
+        try {
+          media = await open({deviceId:{exact:target.deviceId}, facingMode:{exact:'environment'}});
+        } catch (error) {
+          if (error.name === 'NotAllowedError') throw error;
+          media = await open(rear);
+        }
+        track = media.getVideoTracks()[0];
+      }
+    }
+    const settings = () => track.getSettings();
+    const label = track.label || 'Camera';
+    if (ultra(label) && settings().facingMode !== 'user')
+      return {media,description:label+' · Ultra wide lens'};
+    const range = track.getCapabilities?.().zoom;
+    if (settings().facingMode !== 'user' && range?.min <= 0.5 && range.max >= 0.5) {
+      try { await track.applyConstraints({zoom:{exact:0.5}}); } catch { /* report actual settings below */ }
+      if (settings().zoom === 0.5) return {media,description:label+' · 0.5× zoom'};
+    }
+    return {media,description:label+' · 0.5× unavailable or unconfirmed'};
+  } catch (error) {
+    media.getTracks().forEach(t => t.stop());
+    throw error;
+  }
+}
+
 form.addEventListener('submit', async event => {
   event.preventDefault();
   const code = codeField.value.replace(/[\s-]/g,'');
@@ -95,7 +136,7 @@ form.addEventListener('submit', async event => {
   connect.disabled = true;
   status.textContent = 'Allow camera access to connect.';
   try {
-    const media = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+    const {media,description} = await openWideCamera(navigator.mediaDevices);
     if (run !== currentRun) { media.getTracks().forEach(track => track.stop()); return; }
     stream = media;
     const sent = performance.now();
@@ -113,6 +154,8 @@ form.addEventListener('submit', async event => {
     video.srcObject = stream;
     video.hidden = false;
     card.hidden = true;
+    lensStatus.textContent = description;
+    lensStatus.hidden = false;
     await video.play();
     nextFrame(currentRun);
   } catch (error) {
