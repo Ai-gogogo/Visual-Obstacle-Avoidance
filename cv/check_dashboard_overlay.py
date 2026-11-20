@@ -3,6 +3,10 @@ import argparse
 import base64
 import io
 import subprocess
+import time
+
+import cv2
+import numpy as np
 from pathlib import Path
 
 import requests
@@ -13,6 +17,8 @@ from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
 from live_camera import CameraWorker
+from stereo_depth import StereoDepth
+from test_stereo_depth import configuration
 
 
 def pair_phone(page, host, side):
@@ -25,53 +31,55 @@ def pair_phone(page, host, side):
     return {"Authorization": "Bearer " + response.json()["token"], "Content-Type": "image/jpeg"}
 
 
-def check_dual_views(page, host, desktop, model, person, screenshots):
+def check_dual_views(page, host, desktop, model, screenshots):
     headers = {side: pair_phone(page, host, side) for side in "AB"}
+    config = configuration()
+    # Project the bundled photograph as a flat card 2 m away (240 px * 0.1 m / 2 m).
+    with Image.open(ASSETS / "bus.jpg") as photo:
+        card = photo.convert("RGB")
+        card.thumbnail((320, 192))
+    left = np.full((192, 320, 3), 160, np.uint8)
+    x = (320-card.width) // 2
+    left[:, x:x+card.width] = cv2.cvtColor(np.asarray(card), cv2.COLOR_RGB2BGR)
+    right = cv2.warpAffine(left, np.float32([[1, 0, -12], [0, 1, 0]]), (320, 192))
     with requests.Session() as http:
-        workers = {side: CameraWorker(host, model, http, side) for side in "AB"}
+        worker = CameraWorker(host, model, http, "A", stereo=StereoDepth(config))
+        def upload(side, image, stamp):
+            timing = {"X-Sample-Ms": str(stamp), "X-Clock-Error-Ms": "2"}
+            http.put(host + "/api/frame", headers={**headers[side], **timing},
+                     data=cv2.imencode(".jpg", image)[1].tobytes(), timeout=3).raise_for_status()
 
-        def show(side, left, second_person=False):
-            frame = Image.new("RGB", (640, 360), "#dedede")
-            frame.paste(person, (left, 44))
-            if second_person:
-                small = person.resize((person.width // 2, person.height // 2))
-                frame.paste(small, (36, 72))
-            jpeg = io.BytesIO()
-            frame.save(jpeg, "JPEG", quality=85)
-            http.put(host + "/api/frame", headers=headers[side], data=jpeg.getvalue(), timeout=3).raise_for_status()
-            workers[side].poll()
-            snapshot = http.get(host + "/api/preview/" + side, headers=desktop, timeout=3).json()
-            assert base64.b64decode(snapshot["jpeg"]) == jpeg.getvalue()
-            return snapshot
-
-        a = show("A", 24)
-        b = show("B", 500)
-        assert a["frame_id"] != b["frame_id"]
-        rows = page.locator("#detection-rows tr")
-        for side, snapshot, position in [("A", a, "left"), ("B", b, "right")]:
-            canvas = page.locator(f'[data-camera="{side}"] canvas')
+        with page.expect_response(lambda r: "/api/preview/A" in r.url and '"meters":true' in r.request.headers.get("x-depth-options","")):
+            page.locator("#depth-meters").check()
+        stamp = int(time.time() * 1000)
+        upload("B", right, stamp)
+        upload("A", left, stamp)
+        worker.poll()
+        snapshot = http.get(host + "/api/preview/A", headers=desktop, timeout=3).json()
+        assert snapshot["stereo_status"] == "ready"
+        depth_map = page.locator("#stereo-map")
+        camera = page.locator('[data-camera="A"] canvas')
+        for canvas in [camera, depth_map]:
             expect(canvas).to_have_attribute("data-frame-id", snapshot["frame_id"])
-            expect(rows.filter(has_text=f"Camera {side}")).to_contain_text(position)
-            expect(rows.filter(has_text=f"Camera {side}").get_by_role("cell", name="unknown", exact=True)).to_be_visible()
-            track_id = snapshot["objects"][0]["track_id"]
-            assert track_id.startswith(side + "-")
-            expect(rows.filter(has_text=f"Camera {side}")).to_contain_text("#" + track_id)
-            x1, y1, _, y2 = snapshot["objects"][0]["bbox"]
-            png = canvas.evaluate("c => c.toDataURL('image/png').split(',')[1]")
-            with Image.open(io.BytesIO(base64.b64decode(png))) as rendered:
-                assert rendered.getpixel((round(x1*640), round((y1+y2)*180)))[:3] == (140, 233, 255)
+            expect(canvas).to_be_visible()
+        expect(page.locator('[data-camera="B"]')).to_be_hidden()
+        expect(page.locator('#depth-scale')).to_contain_text('0.25 m')
+        bus = next(o for o in snapshot["objects"] if o["label"] == "bus")
+        assert abs(bus["depth_m"] - 2) < 0.08
+        bus_row = page.locator("#detection-rows tr").filter(has_text="bus")
+        expect(bus_row).to_contain_text(f'{bus["depth_m"]:.2f} m')
         if screenshots:
-            page.locator(".feed-grid").screenshot(path=str(screenshots / "dual.png"))
+            page.locator(".feed-grid").screenshot(path=str(screenshots / "stereo.png"))
         http.delete(host + "/api/frame", headers=headers["B"], timeout=3).raise_for_status()
-        updated = show("A", 500, second_person=True)
-        expect(page.locator('[data-camera="A"] canvas')).to_have_attribute("data-frame-id", updated["frame_id"])
-        a_rows = rows.filter(has_text="Camera A")
-        expect(a_rows.filter(has_text="right").get_by_role("cell", name="near", exact=True)).to_be_visible()
-        expect(a_rows.filter(has_text="left").get_by_role("cell", name="far", exact=True)).to_be_visible()
-        if screenshots:
-            page.locator("#detection-rows").screenshot(path=str(screenshots / "depth-rows.png"))
-        expect(page.locator('[data-camera="B"] canvas')).to_be_hidden()
-        expect(rows.filter(has_text="Camera B")).to_have_count(0)
+        expect(depth_map).to_be_hidden()
+        expect(bus_row).to_contain_text("—")
+        expect(camera).to_have_attribute("data-frame-id", snapshot["frame_id"])
+        upload("A", left, int(time.time() * 1000))
+        worker.poll()
+        updated = http.get(host + "/api/preview/A", headers=desktop, timeout=3).json()
+        assert updated["frame_id"] != snapshot["frame_id"]
+        expect(camera).to_have_attribute("data-frame-id", updated["frame_id"])
+        expect(page.locator("#stereo-caption")).to_contain_text("waiting for two")
 
 
 def exercise(page, host, model, screenshots):
@@ -148,7 +156,7 @@ def exercise(page, host, model, screenshots):
         expect(feed.locator(".feed-status")).to_have_text("Offline")
         if screenshots:
             feed.screenshot(path=str(screenshots / "offline.png"))
-        check_dual_views(page, host, desktop, model, person, screenshots)
+        check_dual_views(page, host, desktop, model, screenshots)
         page.get_by_role("button", name="Show sample feeds").click()
         expect(rows).to_have_count(4)
         expect(page.locator("#depth-heading")).to_be_hidden()
@@ -175,7 +183,7 @@ def main():
                 browser.close()
         finally:
             server.terminate()
-    print("Passed: dual overlays, per-camera rows, B disconnect with A updating, single-view regressions and Agent response.")
+    print("Passed: Camera A YOLO, aligned stereo map, B disconnect with A updating, and Agent response.")
 
 
 if __name__ == "__main__":

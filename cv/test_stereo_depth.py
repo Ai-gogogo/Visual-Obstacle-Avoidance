@@ -48,6 +48,18 @@ class StereoTests(unittest.TestCase):
         self.assertIsNone(object_depth(depth, [.3, .15, .7, .85]))
         self.assertTrue(np.isnan(depth[:, :10]).all())
 
+    def test_small_disparities_near_both_image_edges(self):
+        config = configuration()
+        depth = StereoDepth(config).compute(*plane(config, 2.0))
+        # Ground-truth disparity is 12 px. Both edge strips have real matches,
+        # even though a full search of 32 disparities does not fit there.
+        for edge in (depth[20:-20, 19:29], depth[20:-20, -16:-6]):
+            valid = edge[np.isfinite(edge)]
+            self.assertGreater(valid.size, .8 * edge.size)
+            self.assertLess(np.percentile(np.abs(valid - 2.0), 95), .08)
+        self.assertTrue(np.isnan(depth[:, :2]).all())
+        self.assertTrue(np.isnan(depth[:, -2:]).all())
+
     def test_rotated_rig_different_intrinsics_and_raw_a_boxes(self):
         config = configuration()
         config["rotation_A_to_B"] = cv2.Rodrigues(np.array([.01, .035, -.016]))[0].tolist()
@@ -111,11 +123,13 @@ class LiveStereoTests(unittest.TestCase):
         worker.road = RoadEdge(json.loads(DEFAULT_ROAD_CONFIG.read_text()), worker.stereo,
                                lambda image, confidence: (road_mask, ~road_mask))
 
-        def upload(phone, image, stamp):
-            headers = {"Content-Type": "image/jpeg"}
+        def upload(phone, image, stamp, lossless=False):
+            headers = {"Content-Type": "image/png" if lossless else "image/jpeg"}
             if stamp is not None:
                 headers.update({"X-Sample-Ms": str(stamp), "X-Clock-Error-Ms": "3"})
-            request("PUT", "/api/frame", phone, headers=headers, data=cv2.imencode(".jpg", image)[1].tobytes())
+            frame = cv2.imencode(".png" if lossless else ".jpg", image)[1].tobytes()
+            request("PUT", "/api/frame", phone, headers=headers, data=frame)
+            return frame
 
         def read():
             example = dict(label="chair", confidence=.9, position="center", bbox=[.3,.2,.7,.8])
@@ -127,11 +141,14 @@ class LiveStereoTests(unittest.TestCase):
         upload(b, right, now-180)
         upload(a, left, now)
         self.assertEqual(read()["stereo_status"], "waiting_for_pair")
-        upload(b, right, now)
+        upload(b, right, now, lossless=True)
         upload(b, right*0, now+160)  # The newer B frame is a worse match.
-        upload(a, left, now+5)
+        original = upload(a, left, now+5, lossless=True)
         measured = read()
+        self.assertEqual(base64.b64decode(measured["png"]), original)
+        self.assertNotIn("jpeg", measured)
         self.assertEqual(measured["stereo_status"], "ready")
+        self.assertGreater(measured["depth_valid_fraction"], .5)
         self.assertAlmostEqual(measured["objects"][0]["depth_m"], 2, delta=.05)
         png = np.frombuffer(base64.b64decode(measured["depth_preview"]), np.uint8)
         self.assertGreater(cv2.imdecode(png, cv2.IMREAD_GRAYSCALE).max(), 0)
@@ -145,6 +162,15 @@ class LiveStereoTests(unittest.TestCase):
         road_alerts = [alert for alert in alerts if alert.get("kind") == "road_edge"]
         self.assertEqual(len(road_alerts), 1)
         self.assertEqual(road_alerts[0]["risk"], "urgent")
+        ready_preview = request("GET", "/api/preview/A", desk)
+        request("DELETE", "/api/frame", b)
+        cleared = request("GET", "/api/preview/A", desk, headers={"If-None-Match": ready_preview.headers["ETag"]})
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(cleared.json()["frame_id"], ready_preview.json()["frame_id"])
+        self.assertEqual(cleared.json()["stereo_status"], "waiting_for_pair")
+        self.assertNotIn("depth_preview", cleared.json())
+        self.assertNotIn("depth_valid_fraction", cleared.json())
+        self.assertNotIn("depth_m", cleared.json()["objects"][0])
         upload(a, left, None)
         old_phone = read()
         self.assertNotIn("depth_m", old_phone["objects"][0])
@@ -153,9 +179,47 @@ class LiveStereoTests(unittest.TestCase):
         self.assertNotIn("distance_m", old_phone["road_edge"])
         upload(a, left[:100], now)
         self.assertEqual(read()["stereo_status"], "size_mismatch")
-        pair("B")
+        b = pair("B")
         upload(a, left, now)
         self.assertEqual(read()["stereo_status"], "waiting_for_pair")
+
+        # A calibration solved in grid units needs a measured scale even with meters enabled.
+        worker.stereo.square_units = True
+        for tick, (meters, width, expected) in enumerate([(True,0,None),(True,125,.05),(False,125,None)]):
+            prefs = dict(spatial=True,temporal=True,meters=meters,fiveMm=width)
+            request("GET", "/api/preview/A", desk, headers={"X-Depth-Options":json.dumps(prefs)})
+            stamp = int(time.time()*1000)+tick
+            upload(b, right, stamp)
+            upload(a, left, stamp)
+            snap = read()
+            self.assertEqual(snap["stereo_status"],"ready")
+            self.assertEqual(snap["depth_options"],prefs)
+            if width == 0:
+                self.assertEqual(snap["road_edge"]["level"], "visual")
+                self.assertNotIn("distance_m", snap["road_edge"])
+            else:
+                # Road warnings use meters independently of the display toggle.
+                self.assertAlmostEqual(snap["road_edge"]["distance_m"], 2*width/5000, delta=.002)
+            if expected is None:
+                self.assertNotIn("depth_m",snap["objects"][0])
+                self.assertNotIn("center_m",snap)
+            else:
+                self.assertAlmostEqual(snap["objects"][0]["depth_m"],expected,delta=.002)
+                self.assertAlmostEqual(snap["center_m"],expected,delta=.002)
+
+        get = http.get
+
+        def time_out_partner(url, **kwargs):
+            if url.endswith("/stereo-partner"):
+                raise requests.Timeout("Simulated unavailable stereo partner")
+            return get(url, **kwargs)
+
+        upload(a, left, now)
+        with patch.object(http, "get", side_effect=time_out_partner):
+            unavailable = read()
+        self.assertEqual(unavailable["stereo_status"], "unavailable")
+        self.assertEqual(unavailable["objects"][0]["label"], "chair")
+        self.assertNotIn("depth_preview", unavailable)
 
 
 if __name__ == "__main__":

@@ -1,21 +1,34 @@
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { existsSync, mkdirSync } = require('node:fs');
+const { createInterface } = require('node:readline');
 const path = require('node:path');
 const {embedLocally,semanticMatches} = require('./semantic-memory.cjs');
 const {PLAN_FORMAT,routineStatement,routineObservation,parsePlan,planStep} = require('./routines.cjs');
 
 const MAX_FRAME_AGE = 5000;
+const PREVIEW_MAX_ANALYSIS_LAG_MS = 750;
 const cn = text => /[\u3400-\u9fff]/u.test(text);
 const clean = text => typeof text === 'string' ? text.trim().slice(0, 200) : '';
 const fresh = stamp => stamp && Date.now() - stamp <= MAX_FRAME_AGE;
 const normal = name => name.normalize('NFKC').trim().toLowerCase();
 
-function localWorker(mode, data) {
+function currentDetection(slot) {
+  const detection = slot?.detection;
+  if (!fresh(detection?.timestamp_ms)) return null;
+  if (slot.frame && slot.frame !== detection.frame &&
+      Date.now()-detection.timestamp_ms > PREVIEW_MAX_ANALYSIS_LAG_MS) return null;
+  return detection;
+}
+
+function localPython() {
   const envPython = path.join(__dirname,'.venv',...(process.platform === 'win32' ? ['Scripts','python.exe'] : ['bin','python']));
-  const python = process.env.VISIONASSIST_PYTHON || (existsSync(envPython) ? envPython : 'python');
+  return process.env.VISIONASSIST_PYTHON || (existsSync(envPython) ? envPython : 'python');
+}
+
+function localWorker(mode, data) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(python, ['-X', 'utf8', path.join(__dirname, 'agent_worker.py'), mode],
+    const proc = spawn(localPython(), ['-X', 'utf8', path.join(__dirname, 'agent_worker.py'), mode],
       { windowsHide:true, timeout:mode === 'stt' ? 55000 : 15000 });
     let output = '';
     proc.stderr.resume();
@@ -30,26 +43,137 @@ function localWorker(mode, data) {
   });
 }
 
-async function ollama(messages, image, format) {
-  const model = image ? process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b' :
+function createSpeechWorker(mode, resultField, timeoutMs) {
+  let child, pending, idle;
+  const failure = () => new Error('Local speech worker failed.');
+
+  function close(error = failure()) {
+    clearTimeout(idle);
+    const process = child;
+    child = undefined;
+    process?.stdin.end();
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+      pending = undefined;
+    }
+  }
+
+  function start() {
+    const process = spawn(localPython(),['-X','utf8',path.join(__dirname,'agent_worker.py'),mode],
+      {windowsHide:true});
+    child = process;
+    process.stderr.resume();
+    const failed = () => { if (child === process) close(); };
+    process.on('error',failed);
+    process.on('close',failed);
+    process.stdin.on('error',failed);
+    createInterface({input:process.stdout}).on('line',line => {
+      if (child !== process || !pending) return;
+      let result;
+      try { result = JSON.parse(line); } catch { return failed(); }
+      if (!result || typeof result[resultField] !== 'string') return failed();
+      const reply = pending;
+      pending = undefined;
+      clearTimeout(reply.timeout);
+      idle = setTimeout(close,120_000);
+      idle.unref();
+      reply.resolve(result);
+    });
+    return process;
+  }
+
+  return {
+    close,
+    request(data) {
+      // The Agent admits one request per speech worker at a time.
+      clearTimeout(idle);
+      const process = child || start();
+      return new Promise((resolve,reject) => {
+        const timeout = setTimeout(() => {
+          close();
+          process.kill();
+        },timeoutMs);
+        pending = {resolve,reject,timeout};
+        process.stdin.write(JSON.stringify(data)+'\n');
+      });
+    }
+  };
+}
+
+function configuredModel(image) {
+  return image ? process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b' :
     process.env.VISIONASSIST_CHAT_MODEL || 'qwen3:4b-instruct-2507-q4_K_M';
+}
+
+const modelKey = name => name.split('/').at(-1).includes(':') ? name : name+':latest';
+
+async function loadedModels() {
+  try {
+    const response = await fetch('http://127.0.0.1:11434/api/ps',{signal:AbortSignal.timeout(900)});
+    if (!response.ok) return null;
+    const {models} = await response.json();
+    if (!Array.isArray(models)) return null;
+    return models.flatMap(({name,size,size_vram:vram}) => {
+      if (typeof name !== 'string' || !Number.isFinite(size) || !Number.isFinite(vram) || size <= 0 || vram < 0) return [];
+      const device = vram === 0 ? 'cpu' : vram >= size ? 'gpu' : 'mixed';
+      return [{name,device,gpu_percent:Math.min(100,Math.round(100*vram/size))}];
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function ollama(messages, image, format, onPlacement) {
+  const model = configuredModel(image);
   if (/cloud/i.test(model)) throw new Error('Choose a local Ollama model.');
   const input = messages.map(message => ({...message}));
   if (image) input.at(-1).images = (Array.isArray(image) ? image : [image]).map(frame => frame.toString('base64'));
-  const response = await fetch('http://127.0.0.1:11434/api/chat', {
+  const request = fetch('http://127.0.0.1:11434/api/chat', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({model, messages:input, stream:false, think:false, format,
       keep_alive:image ? 0 : '2m', options:{num_ctx:4096,num_predict:format ? 450 : 140}}),
     signal:AbortSignal.timeout(55000)
   });
-  if (!response.ok) throw new Error('Ollama could not run the requested local model.');
-  const {message} = await response.json();
-  if (!clean(message?.content)) throw new Error('Ollama returned no answer.');
-  return message.content.trim();
+  let sampling = false;
+  let active = true;
+  async function sample() {
+    if (sampling) return;
+    sampling = true;
+    const models = await loadedModels();
+    const placement = models?.find(entry => modelKey(entry.name) === modelKey(model));
+    if (active && placement) onPlacement({...placement,observed_ms:Date.now()});
+    sampling = false;
+  }
+  const timer = onPlacement && setInterval(sample,350);
+  timer?.unref();
+  try {
+    const response = await request;
+    if (!response.ok) throw new Error('Ollama could not run the requested local model.');
+    const {message} = await response.json();
+    if (!clean(message?.content)) throw new Error('Ollama returned no answer.');
+    return message.content.trim();
+  } finally {
+    active = false;
+    clearInterval(timer);
+  }
 }
 
 function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now } = {}) {
+  const transcriber = worker === localWorker ? createSpeechWorker('stt-session','text',55_000) : null;
+  const alertSpeaker = worker === localWorker ? createSpeechWorker('tts-session','audio',15_000) : null;
   let db;
+  let lastPlacement;
+  const recordPlacement = placement => { lastPlacement = placement; };
+  async function modelRuntime() {
+    const models = await loadedModels();
+    const names = [modelKey(configuredModel(false)),modelKey(configuredModel(true))];
+    return {
+      reachable:models !== null,
+      loaded:models?.filter(entry => names.includes(modelKey(entry.name))) ?? [],
+      last_observed:lastPlacement ?? null
+    };
+  }
   const busy = new Set();
   function database() {
     if (db) return db;
@@ -60,8 +184,12 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     db.exec('PRAGMA foreign_keys=ON');
     db.exec("CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY, kind TEXT, name TEXT, normalized TEXT, label TEXT, last_seen TEXT, UNIQUE(kind, normalized));" +
       "CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY, owner INTEGER REFERENCES memory(id) ON DELETE CASCADE, feature TEXT);" +
+      "CREATE TABLE IF NOT EXISTS observation (owner INTEGER REFERENCES memory(id) ON DELETE CASCADE, time TEXT, camera TEXT, position TEXT, PRIMARY KEY(owner,time,camera));" +
+      "CREATE TABLE IF NOT EXISTS preference (id INTEGER PRIMARY KEY CHECK(id=1), concise INTEGER NOT NULL, reminder INTEGER REFERENCES memory(id) ON DELETE SET NULL);" +
       "CREATE TABLE IF NOT EXISTS embedding (owner INTEGER PRIMARY KEY REFERENCES memory(id) ON DELETE CASCADE, model TEXT NOT NULL, vector TEXT NOT NULL);" +
       "CREATE TABLE IF NOT EXISTS agent_preferences (id INTEGER PRIMARY KEY CHECK(id=1), concise INTEGER NOT NULL, habit INTEGER REFERENCES memory(id) ON DELETE SET NULL, interval_minutes INTEGER NOT NULL, last_reminder INTEGER);");
+    db.exec("INSERT OR IGNORE INTO agent_preferences (id,concise,habit,interval_minutes) " +
+      "SELECT id,concise,reminder,0 FROM preference");
     return db;
   }
 
@@ -71,7 +199,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   const failure = (status, message) => Object.assign(new Error(message), {status, publicMessage:message});
   const output = (text, source = 'memory', extra = {}) => ({reply_text:text, source, confirmation:null, ...extra});
   const copyFrame = slot => fresh(slot?.stamp) && slot.frame;
-  const detections = slot => fresh(slot?.detection?.timestamp_ms) ? slot.detection : null;
+  const detections = currentDetection;
 
   function preferences() {
     const row = database().prepare('SELECT concise,habit,interval_minutes FROM agent_preferences WHERE id=1').get();
@@ -135,7 +263,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     ];
     let steps;
     try {
-      steps = parsePlan(await runResource('model', () => generate(messages,null,PLAN_FORMAT)));
+      steps = parsePlan(await runResource('model', () => generate(messages,null,PLAN_FORMAT,recordPlacement)));
     } catch (error) {
       if (error.publicMessage) throw error;
       return output(isChinese ? '暂时无法生成任务步骤。请检查本机 Ollama。' :
@@ -186,6 +314,22 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       'Got it. This report is used to suggest habits within this conversation.', 'assistant');
   }
 
+  function rename(kind, id, name) {
+    name = clean(name);
+    if (!name) throw failure(400, 'Enter a name.');
+    const existing = find(kind, name);
+    if (existing && existing.id !== id) throw failure(409, 'A memory already uses that name.');
+    return database().prepare('UPDATE memory SET name=?, normalized=? WHERE kind=? AND id=?')
+      .run(name, normal(name), kind, id).changes > 0;
+  }
+
+  function observationHistory(id) {
+    const item = database().prepare("SELECT last_seen FROM memory WHERE kind='item' AND id=?").get(id);
+    if (!item) return null;
+    const entries = database().prepare('SELECT time,camera,position FROM observation WHERE owner=? ORDER BY time DESC LIMIT 20').all(id);
+    return entries.length ? entries : item.last_seen ? [JSON.parse(item.last_seen)] : [];
+  }
+
   async function runResource(kind, operation) {
     if (busy.has(kind)) {
       throw failure(429, 'The local assistant is busy. Try again shortly.');
@@ -217,8 +361,12 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   function stage(session, data, isChinese) {
     const pending = {...data, id:randomUUID(), until:Date.now()+60_000};
     session.pending = pending;
-    const summary = data.kind === 'person'
+    const summary = data.observation
+      ? (isChinese ? '请确认这是你的物品：' : 'Confirm this is your item: ') + data.target
+      : data.kind === 'person'
       ? (isChinese ? '确认已获本人同意，并登记' : 'Confirm the person consented and enroll ') + data.name
+      : data.kind === 'item'
+      ? (isChinese ? '确认登记相机 ' + data.camera + ' 中的物品：' : 'Confirm the item in Camera ' + data.camera + ': ') + data.name
       : data.suggestion
         ? (isChinese ? '要把这条日常习惯存下来吗？' : 'Save this as a routine? ') + data.name
         : (isChinese ? '保存：' : 'Save: ') + data.name;
@@ -233,6 +381,13 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     if (!accepted) {
       delete session.pending;
       return output(isChinese ? '已取消。' : 'Cancelled.');
+    }
+    if (pending.observation) {
+      const item = find('item',pending.name);
+      if (item?.id !== pending.itemId) throw failure(409, 'This item was changed or removed.');
+      saveObservation(item.id,pending.observation);
+      delete session.pending;
+      return output(isChinese ? '已记录这次出现。' : 'Observation saved.', 'history', {observation:pending.observation});
     }
     const store = database();
     store.exec('BEGIN IMMEDIATE');
@@ -282,13 +437,15 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     }
     const scene = detections(slot);
     if (!scene) return output(isChinese ? '当前没有可用的 YOLO 检测。' : 'There are no recent YOLO detections.', 'unavailable');
-    const objects = scene.objects.filter(object => object.label !== 'person' && object.confidence >= 0.5);
+    const isDrinkContainer = /水杯|杯子|水瓶|\b(?:cup|mug|tumbler|bottle)\b/iu.test(name);
+    const objects = scene.objects.filter(object => object.label !== 'person' && object.confidence >= 0.5 &&
+      (!isDrinkContainer || ['cup','bottle','mug','tumbler'].includes(object.label)));
     const centered = objects.filter(object => object.position === 'center');
     const target = objects.length === 1 ? objects[0] : centered.length === 1 ? centered[0] : null;
     if (!target) return output(isChinese ? '请把要登记的物品单独放在画面中央。' : 'Center one item to register it.', 'unavailable');
     const [feature] = await itemFeatures(scene, [target]);
     if (!feature) return output(isChinese ? '物品太小，请靠近一些。' : 'The item is too small. Move the camera closer.', 'unavailable');
-    return stage(session, {kind,name,label:target.label,feature}, isChinese);
+    return stage(session, {kind,name,label:target.label,feature,camera:side}, isChinese);
   }
 
   async function identify(session, side, isChinese) {
@@ -312,34 +469,54 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return output(isChinese ? '我无法确认这个人的身份。' : 'I could not confirm who this is.', 'camera');
   }
 
+  function saveObservation(id, observed) {
+    const store = database();
+    store.prepare('INSERT OR IGNORE INTO observation VALUES(?,?,?,?)').run(id, observed.time, observed.camera, observed.position);
+    store.prepare("UPDATE memory SET last_seen=? WHERE id=? AND (last_seen IS NULL OR json_extract(last_seen,'$.time') <= ?)")
+      .run(JSON.stringify(observed), id, observed.time);
+  }
+
   async function locate(session, side, item, isChinese) {
-    const scene = detections(session.slots[side]);
+    const slot = session.slots[side];
+    const scene = detections(slot);
     const objects = scene?.objects.filter(object => object.label === item.label && object.confidence >= 0.5) || [];
     if (objects.length) {
       const features = await itemFeatures(scene, objects);
       const options = records('item').filter(row => row.label === item.label);
-      const matches = features.flatMap((feature,index) => {
+      const candidates = features.flatMap((feature,index) => {
         if (!feature) return [];
         const [best,second] = rank(feature, options);
-        return best?.row.id === item.id && best.score >= 0.92 && (!second || best.score-second.score >= 0.06)
-          ? [{score:best.score,object:objects[index]}] : [];
+        if (best?.row.id !== item.id || best.score < 0.86) return [];
+        return [{confident:best.score >= 0.92 && (!second || best.score-second.score >= 0.06),
+          position:objects[index].position}];
       });
-      if (matches.length === 1 && fresh(scene.timestamp_ms)) {
-        const {position} = matches[0].object;
+      if (candidates.length === 1 && session.slots[side] === slot && fresh(scene.timestamp_ms) && find('item', item.name)?.id === item.id) {
+        const {position,confident} = candidates[0];
         const observed = {time:new Date(scene.timestamp_ms).toISOString(),camera:scene.camera_id,position};
-        database().prepare('UPDATE memory SET last_seen=? WHERE id=?').run(JSON.stringify(observed),item.id);
         const positionText = {left:'左侧',center:'中央',right:'右侧'}[position];
+        if (!confident) {
+          const target = isChinese ? item.name + '（相机 ' + side + '，' + positionText + '）' :
+            item.name + ' (Camera ' + side + ', ' + position + ')';
+          return stage(session,{name:item.name,target,itemId:item.id,observation:observed},isChinese);
+        }
+        saveObservation(item.id,observed);
         return output(isChinese ? '相机 ' + side + ' 画面' + positionText + '可能是你的' + item.name + '。' :
           'Your ' + item.name + ' may be in Camera ' + side + ', on the ' + position + ' of the frame.', 'camera', {observation:observed});
       }
     }
+    return lastSeen(item, isChinese);
+  }
+
+  function lastSeen(item, isChinese, historyOnly = false) {
     const last = item.last_seen && JSON.parse(item.last_seen);
-    const prefix = isChinese ? '当前无法确认' + item.name + '。' : 'I cannot confirm where your ' + item.name + ' is now.';
-    if (!last) return output(prefix,'unavailable');
+    const prefix = historyOnly ? '' : isChinese ? '当前无法确认' + item.name + '。' :
+      'I cannot confirm where your ' + item.name + ' is now.';
+    if (!last) return output(prefix || (isChinese ? '还没有这件物品的观察记录。' : 'There are no saved observations for this item.'), 'unavailable');
     const time = new Date(last.time).toLocaleString(isChinese ? 'zh-CN' : 'en-US');
-    return output(prefix + (isChinese ? ' 上次可能在相机 ' + last.camera + ' 画面' +
-      {left:'左侧',center:'中央',right:'右侧'}[last.position] + '看到，时间是' + time + '。' :
-      ' Last possible match was in Camera ' + last.camera + ', ' + last.position + ', at ' + time + '.'), 'history', {observation:last});
+    const description = isChinese
+      ? '上次可能在相机 ' + last.camera + ' 画面' + {left:'左侧',center:'中央',right:'右侧'}[last.position] + '看到' + item.name + '，时间是' + time + '。'
+      : 'Last possible match for ' + item.name + ' was in Camera ' + last.camera + ', ' + last.position + ', at ' + time + '.';
+    return output([prefix,description].filter(Boolean).join(' '), 'history', {observation:last});
   }
 
   async function chat(session, input) {
@@ -349,6 +526,11 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     const side = input.camera_id === 'B' ? 'B' : 'A';
     const twoCameras = input.camera_id === 'both';
     const oneCamera = () => output(isChinese ? '请先选定相机 A 或 B。' : 'Select Camera A or B first.', 'unavailable');
+    const itemCamera = () => {
+      if (!twoCameras) return side;
+      const live = ['A','B'].filter(id => detections(session.slots[id]));
+      return live.length === 1 ? live[0] : null;
+    };
     if (/^([确確][认認](?:保存)?|取消|yes|confirm|cancel|no)[.!。！]?$/iu.test(text) && session.pending) {
       return confirm(session, session.pending.id, /^(?:[确確][认認]|yes|confirm)/iu.test(text), isChinese);
     }
@@ -365,9 +547,17 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       const [name,relationship] = person[1].split(/[,，]/u,2).map(clean);
       return enroll(session,side,'person',name,isChinese,relationship);
     }
-    const item = /^(?:register item\s+|登记物品[：:\s]*)(.+)$/iu.exec(text) ||
-      /^(?:这个|这只|这把|这一)(.+?)是我的[。.!！]?$/u.exec(text);
-    if (item) return twoCameras ? oneCamera() : enroll(session,side,'item',clean(item[1]),isChinese);
+    const itemText = text.replace(/^(?:请)?[记記]住[，,:：\s]*/u,'');
+    const item = /^(?:register item\s+|登记物品[：:\s]*)(.+)$/iu.exec(itemText) ||
+      /^(?:这个|这只|这把|这一)([^，,。.!！?？]+?)是我的[。.!！]?$/u.exec(itemText) ||
+      /^这是我的([^，,。.!！?？]+?)(?:[，,。]\s*(?:以后|下次)(?:再)?(?:帮我|提醒我)找(?:它)?)?[。.!！]?$/u.exec(itemText);
+    if (item) {
+      const camera = itemCamera();
+      if (!camera && !['A','B'].some(id => detections(session.slots[id]))) return output(isChinese
+        ? '请把物品对准相机，等画面出现检测结果后再登记。'
+        : 'Point a camera at the item and wait for detections before registering it.', 'unavailable');
+      return camera ? enroll(session,camera,'item',clean(item[1]),isChinese) : oneCamera();
+    }
     if (!input.mode) {
       const task = /^(?:plan(?: a task)?(?:[：:\s]+|$)|(?:帮我)?(?:制定|规划|規劃)(?:一个|一個)?(?:任务)?计划[：:\s]*|一步步教我[：:\s]*)(.*)$/iu.exec(text);
       if (task) return startPlan(session,clean(task[1]),isChinese);
@@ -394,20 +584,31 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       const people = records('person').map(row => row.label ? row.name+' · '+row.label : row.name);
       return output(people.length ? people.join(isChinese ? '；' : '. ') : isChinese ? '还没有登记亲友。' : 'No people are enrolled.');
     }
-    if (/where|哪儿|哪里|在哪|找(?:一下|找)?/iu.test(text)) {
+    const historyOnly = /上次|最后一次|last seen|last (?:see|saw)/iu.test(text);
+    if (historyOnly || /where|哪儿|哪里|在哪|找(?:一下|找)?/iu.test(text)) {
       const name = normal(text);
       const matches = records('item').filter(row => {
         const itemName = normal(row.name);
         return cn(itemName) ? name.includes(itemName) : name.split(/[^\p{L}\p{N}]+/u).join(' ').includes(' ' + itemName + ' ') ||
           (' ' + name.replace(/[?？.!]+$/u,'') + ' ').includes(' ' + itemName + ' ');
       });
-      if (matches.length === 1) return twoCameras ? oneCamera() : locate(session,side,matches[0],isChinese);
+      if (matches.length === 1) {
+        if (historyOnly) return lastSeen(matches[0],isChinese,true);
+        const camera = itemCamera();
+        if (camera) return locate(session,camera,matches[0],isChinese);
+        if (!['A','B'].some(id => detections(session.slots[id]))) return lastSeen(matches[0],isChinese);
+        return oneCamera();
+      }
       if (matches.length > 1) return output(isChinese ? '你是在找哪一件物品？' : 'Which registered item are you looking for?');
       if (/\bmy\b|我的/iu.test(text)) return output(isChinese ? '没有找到这个名称的登记物品。' : 'No registered item matches that name.');
     }
     if (/习惯|習慣|出[门門]前|what should i remember|habits|before (?:going out|i leave)/iu.test(text)) {
       const habits = records('habit').map(row => row.name);
       return output(habits.length ? habits.join(isChinese ? '；' : '. ') : isChinese ? '还没有保存习惯。' : 'No habits are saved yet.');
+    }
+    if (/\b(?:is it safe to (?:walk|cross)|which way should i (?:walk|go)|can i (?:walk|cross))\b|可以(?:往|走|过马路)|(?:往哪|怎么走|能通行|能过马路)/iu.test(text)) {
+      return output(isChinese ? '我无法判断是否可以通行。你可以问我画面里检测到了什么。' :
+        'I cannot determine whether it is safe to proceed. You can ask what was detected in the frame.', 'unavailable');
     }
     const slot = session.slots[side];
     const depthQuestion = /(?:哪个|哪些|哪一个|谁|什么东西)(?:物体|东西|人)?(?:看起来|离我|距离我)?(?:比较|更|最|较)?(?:近|远)|\b(?:which|what)(?: object| objects| one| person)? (?:is|are|looks?|seems?) (?:the )?(?:closer|closest|nearer|nearest|farther|furthest|farthest|further)\b/iu;
@@ -447,10 +648,10 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     if (wantsImage && !frame) return output(isChinese ? '相机当前没有画面。' : 'The camera has no recent frame.', 'unavailable');
     const concise = preferences().concise;
     const persona = 'Your product identity is VisionAssist, an on-device visual and memory assistant for people with low vision. ' +
-      (concise ? 'Use one or two short sentences. ' : 'Use up to four short sentences when helpful. ') +
       'Speak calmly and naturally. Reply in the user’s language; use simplified Chinese for Chinese replies. ' +
       'Introduce yourself as VisionAssist. Only discuss the underlying model if explicitly asked about the technology. Avoid emoji and boilerplate.';
-    const system = {role:'system',content:persona + (frame
+    const length = preferences().concise ? 'Use one or two short sentences. ' : 'Give up to four short sentences when helpful. ';
+    const system = {role:'system',content:persona + length + (frame
       ? ' Use only the attached image for visual facts. State what is unclear. Never identify people or provide walking directions.'
       : ' Use recent messages to follow the conversation. You have no camera or saved memory access in this turn. Never invent observations, identities, distances, saved data or walking directions.')};
     const history = frame ? [] : session.dialog || [];
@@ -458,11 +659,11 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       ? '第一张是相机 A，第二张是相机 B。只比较可见内容，分开注明相机，不推测身份或行走方向。请用简体中文' +
         (concise ? '简短作答：' : '用最多四句话作答：')
       : 'The first image is Camera A and the second image is Camera B. Label each and compare only visible details. ' +
-        'Do not infer identity or walking directions. ' + (concise ? 'Answer briefly: ' : 'Answer in up to four short sentences: ');
+        'Never identify people or provide walking directions. ' + (concise ? 'Answer briefly: ' : 'Answer in up to four short sentences: ');
     const message = {role:'user',content:Array.isArray(frame) ? cameraPrompt + text : text};
     const messages = Array.isArray(frame) ? [message] : [system,...history,message];
     let reply;
-    try { reply = await runResource('model', () => generate(messages,frame)); }
+    try { reply = await runResource('model', () => generate(messages,frame,undefined,recordPlacement)); }
     catch (error) {
       if (error.publicMessage) throw error;
       throw failure(503, 'Local Ollama model unavailable. Check that Ollama is running and the model is installed.');
@@ -471,13 +672,15 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return output(reply,frame ? 'image' : 'llm');
   }
 
-  return { chat, enroll, confirm, records, preferences, savePreferences, cameraReminder, close:() => db?.close(),
+  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory, modelRuntime,
+    close() { transcriber?.close(); alertSpeaker?.close(); db?.close(); },
     remove(kind,id) { return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0; },
     async synthesize(text, priority) {
       if (typeof text !== 'string' || !text.trim() || text.length > 650) throw failure(400, 'Give a short reply to speak.');
       try {
+        const payload = {text,language:cn(text) ? 'zh' : 'en'};
         const {audio} = await runResource(priority ? 'alert-tts' : 'tts',
-          () => worker('tts',{text,language:cn(text) ? 'zh' : 'en'}));
+          () => priority && alertSpeaker ? alertSpeaker.request(payload) : worker('tts',payload));
         return Buffer.from(audio,'base64');
       } catch (error) {
         if (error.publicMessage) throw error;
@@ -490,7 +693,8 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     },
     async transcribe(bytes, language) {
       try {
-        return await runResource('speech', () => worker('stt',{audio:bytes.toString('base64'),language}));
+        const payload = {audio:bytes.toString('base64'),language};
+        return await runResource('speech', () => transcriber ? transcriber.request(payload) : worker('stt',payload));
       } catch (error) {
         if (error.publicMessage) throw error;
         throw failure(503, 'Local transcription unavailable. Check faster-whisper and its downloaded model.');
@@ -499,4 +703,4 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   };
 }
 
-module.exports = {createAgent,MAX_FRAME_AGE};
+module.exports = {createAgent,currentDetection,MAX_FRAME_AGE,PREVIEW_MAX_ANALYSIS_LAG_MS};

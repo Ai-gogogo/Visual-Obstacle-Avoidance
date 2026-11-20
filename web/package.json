@@ -1,0 +1,29 @@
+{
+  "name": "visionassist-web",
+  "version": "1.0.0",
+  "description": "VisionAssist desktop and phone interfaces",
+  "scripts": {
+    "test": "node --test pairing.test.cjs calibration-quality.test.cjs calibration-video.test.cjs camera-reconnect.test.cjs ../llm/agent.test.cjs ../llm/road-alerts.test.cjs",
+    "dev": "node server.cjs --dev",
+    "build": "next build",
+    "start": "node server.cjs",
+    "typecheck": "tsc --noEmit",
+    "test:frontend": "node --test frontend.test.cjs"
+  },
+  "type": "module",
+  "dependencies": {
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "private": true
+}

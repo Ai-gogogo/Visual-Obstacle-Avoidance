@@ -1,11 +1,11 @@
-
-"""Detect on Camera A and use Camera B for optional stereo depth."""
+"""Detect on Camera A and use a time-matched B frame for calibrated stereo depth."""
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 import csv
 import io
+import os
 import sys
 from functools import partial
 from itertools import count
@@ -17,6 +17,7 @@ import numpy as np
 import requests
 from PIL import Image, ImageOps
 
+from depth_filters import spatial_depth, StaticMedian
 from detect_image import DEFAULT_WEIGHTS, detect
 from item_features import item_features
 from obstacles import is_obstacle_candidate
@@ -31,10 +32,18 @@ class CameraWorker:
     def __init__(
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
-        item_encoder=None, road=None, corridor=None
+        item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False,
+        inference_device=None, half=False
     ):
         self.side = side
         self.stereo = stereo
+        self.original_stereo = stereo
+        self.low_stereo = None
+        self.rtc_low_stereo = None
+        self.usb_resolution = None
+        self.allow_webrtc_stereo = allow_webrtc_stereo
+        self.rtc_reference = None
+        self.verified_rtc_pair = None
         self.road = road
         self.corridor = corridor
         self.intrusions = {}
@@ -43,6 +52,11 @@ class CameraWorker:
         self.model = model
         self.infer = infer
         self.http = session
+        self.runtime_headers = {
+            "X-CV-Camera": side,
+            "X-CV-Device": inference_device,
+            "X-CV-Precision": "fp16" if half else "fp32",
+        } if inference_device else None
 
         # Optional SigLIP2 encoder; None keeps HSV.
         self.item_encoder = item_encoder
@@ -50,11 +64,13 @@ class CameraWorker:
         self.etags = {}
         self.trackers = {}
         self.risk_assessments = {}
-        self.pending = {}
+        self.temporal = {}
+        self.pending = {}  # Preserve the exact payload when a POST acknowledgment is lost.
         self.ids = count(1)
 
     def poll(self):
-        sources = self.http.get(self.api + "/sources", timeout=3)
+        options = {"headers": self.runtime_headers} if self.runtime_headers else {}
+        sources = self.http.get(self.api + "/sources", timeout=3, **options)
         sources.raise_for_status()
         active = {
             s["source_id"]: s.get("frame_id")
@@ -63,7 +79,7 @@ class CameraWorker:
         }
         for cache in (
             self.etags, self.trackers,
-            self.risk_assessments, self.intrusions, self.pending
+            self.risk_assessments, self.intrusions, self.pending, self.temporal
         ):
             for source in cache.keys() - active.keys():
                 del cache[source]
@@ -87,6 +103,17 @@ class CameraWorker:
             return
 
         frame.raise_for_status()
+        resolution = frame.headers.get("X-USB-Resolution")
+        rtc_low = frame.headers.get("X-CV-Transport") == "webrtc" and frame.headers.get("X-RTC-Profile") == "portrait-low"
+        if rtc_low and self.rtc_low_stereo is not None:
+            self.stereo = self.rtc_low_stereo
+        elif (resolution == "480x640" or rtc_low) and self.original_stereo and self.original_stereo.size == (1080, 1920):
+            if self.low_stereo is None:
+                self.low_stereo = self.original_stereo.for_usb_low_output()
+            self.stereo = self.low_stereo
+        else:
+            self.stereo = self.original_stereo
+        self.usb_resolution = resolution
         etag = frame.headers["ETag"]
         pending = self.pending.get(source)
 
@@ -117,7 +144,10 @@ class CameraWorker:
             depth = None
             if self.side == "A":
                 if self.stereo is not None:
-                    payload["stereo"], depth = self.measure_depth(params, payload, image)
+                    if frame.headers.get("X-CV-Transport") == "webrtc" and not self.allow_webrtc_stereo and not (rtc_low and (self.rtc_reference is not None or self.rtc_low_stereo is not None)):
+                        payload["stereo"] = {"status": "transport_unvalidated"}
+                    else:
+                        payload["stereo"], depth = self.measure_depth(params, payload, image)
                 if self.road is not None:
                     payload["road_edge"] = self.road(image, depth)
 
@@ -137,10 +167,12 @@ class CameraWorker:
                 weak = tracker.preview_continuations(candidates, stamp, {obj["track_id"] for obj in objects})
                 if weak:
                     payload["preview_objects"] = weak
-            right_stream = payload.get("stereo", {}).pop("partner_stream", None)
+            stereo_result = payload.get("stereo", {})
+            right_stream = stereo_result.pop("partner_stream", None)
+            meter_scale = stereo_result.pop("meter_scale", None)
             capture_ms = frame.headers.get("X-CV-Sample-Ms")
             if self.corridor and depth is not None and stream and right_stream and capture_ms:
-                pair = stream, right_stream
+                pair = stream, right_stream, meter_scale
                 if source not in self.intrusions or self.intrusions[source][0] != pair:
                     self.intrusions[source] = pair, IntrusionPredictor(self.stereo.camera_a, self.corridor)
                 self.intrusions[source][1].update(np.asarray(image.convert("L")), depth, objects, int(capture_ms))
@@ -182,14 +214,6 @@ class CameraWorker:
                     if feature:
                         obj["item_feature"] = feature
 
-                        print(
-                            f"[SigLIP2] {obj['label']} "
-                            f"version={feature['version']} "
-                            f"dim={len(feature['vector'])} "
-                            f"norm={np.linalg.norm(feature['vector']):.4f}",
-                            flush=True
-                        )
-
             if stamp is not None:
                 payload.update(
                     schema_version=1,
@@ -213,7 +237,8 @@ class CameraWorker:
                     source,
                     etag.strip('"'),
                     int(result.headers["X-CV-Accepted-Ms"]),
-                    int(result.headers["X-CV-Latency-Ms"])
+                    int(result.headers["X-CV-Latency-Ms"]),
+                    result.headers.get("X-CV-Capture-Latency-Ms", "")
                 )
 
         self.etags[source] = etag
@@ -228,34 +253,73 @@ class CameraWorker:
             "frame_id": payload["frame_id"],
             "max_skew_ms": self.stereo.skew_ms
         }
-        partner = self.http.get(
-            self.api + "/stereo-partner",
-            params=query,
-            timeout=3
-        )
-        if partner.status_code in (204, 404):
-            return {"status": "waiting_for_pair"}, None
+        try:
+            partner = self.http.get(self.api + "/stereo-partner", params=query, timeout=.25)
+            if partner.status_code in (204, 404):
+                return {"status": "waiting_for_pair"}, None
+            partner.raise_for_status()
+        except requests.RequestException:
+            return {"status": "unavailable"}, None
 
-        partner.raise_for_status()
+        if self.usb_resolution and partner.headers.get("X-USB-Resolution") != self.usb_resolution:
+            return {"status": "size_mismatch"}, None
         right = cv2.imdecode(
             np.frombuffer(partner.content, np.uint8),
             cv2.IMREAD_GRAYSCALE
         )
         if right is None or right.shape != self.stereo.size[::-1]:
             return {"status": "size_mismatch"}, None
-
-        depth = self.stereo.compute(
-            np.asarray(image.convert("L")), right
-        )
-        for obj in payload["objects"]:
-            z = object_depth(depth, obj["bbox"])
-            if z is not None:
-                obj["depth_m"] = z
-
-        if not np.isfinite(depth).any():
+        gray = np.asarray(image.convert("L"))
+        if self.rtc_low_stereo is not None and self.stereo is self.rtc_low_stereo:
+            if partner.headers.get("X-RTC-Profile") != "portrait-low":
+                return {"status": "transport_unvalidated"}, None
+        elif partner.headers.get("X-RTC-Profile") == "portrait-low" and not self.allow_webrtc_stereo:
+            from rtc_geometry import same_view
+            pair = (params["source_id"], partner.headers.get("X-Depth-Rig"))
+            if self.verified_rtc_pair != pair:
+                if not pair[1] or self.rtc_reference is None or not all(
+                    same_view(reference, view) for reference, view in zip(self.rtc_reference, (gray, right))
+                ):
+                    return {"status": "transport_unvalidated"}, None
+                self.verified_rtc_pair = pair
+        low_crop = partner.headers.get("X-Depth-Low") == "1" and self.stereo.size == (1080, 1920)
+        if low_crop:
+            if self.low_stereo is None:
+                self.low_stereo = self.stereo.for_usb_low_output()
+            small = [cv2.resize(view[240:-240], (480, 640), interpolation=cv2.INTER_AREA)
+                     for view in (gray, right)]
+            result = self.low_stereo.compute(*small)
+            depth = np.full(gray.shape, np.nan, dtype=np.float32)
+            depth[240:-240] = cv2.resize(result, (1080, 1440), interpolation=cv2.INTER_NEAREST)
+        else:
+            depth = self.stereo.compute(gray, right)
+        options = partner.headers
+        source = params["source_id"]
+        meters = options.get("X-Depth-Meters", "1") == "1"
+        if self.stereo.square_units:
+            five_mm = float(options.get("X-Depth-Five-Mm", 0))
+            scale_m = five_mm / 5000 if np.isfinite(five_mm) and five_mm > 0 else None
+        else:
+            scale_m = 1.
+        if scale_m is not None:
+            for obj in payload["objects"]:
+                z = object_depth(depth, obj["bbox"])
+                if z is not None:
+                    obj["depth_m"] = z * scale_m
+        display = depth
+        spatial = options.get("X-Depth-Spatial") == "1"
+        if spatial:
+            display = spatial_depth(depth, gray)
+        if options.get("X-Depth-Temporal") == "1":
+            key = (options.get("X-Depth-Rig"), spatial, low_crop)
+            display = self.temporal.setdefault(source, StaticMedian()).apply(
+                key, int(options["X-Depth-Stamp"]), gray, display)
+        else:
+            self.temporal.pop(source, None)
+        valid_fraction = np.count_nonzero(np.isfinite(depth)) / depth.size
+        if not valid_fraction:
             return {"status": "no_matches"}, None
-
-        preview = self.stereo.preview(depth)
+        preview = self.stereo.preview(display)
         scale = min(1, 240 / max(preview.shape))
         thumb = cv2.resize(
             preview, None,
@@ -265,13 +329,21 @@ class CameraWorker:
         ok, png = cv2.imencode(".png", thumb)
         if not ok:
             raise RuntimeError("Cannot encode depth preview")
-
-        return {
-            "status": "ready",
-            "partner_id": partner.headers["X-Partner-Id"],
-            "partner_stream": partner.headers.get("X-Partner-Stream"),
-            "preview": base64.b64encode(png).decode("ascii")
-        }, depth
+        result = {"status": "ready", "partner_id": options["X-Partner-Id"],
+                  "preview": base64.b64encode(png).decode("ascii")}
+        result.update(valid_fraction=valid_fraction, partner_stream=options.get("X-Partner-Stream"),
+                      meter_scale=scale_m)
+        if meters and scale_m is not None:
+            result["range_m"] = [self.stereo.min_m*scale_m, self.stereo.max_m*scale_m]
+            # Report only original observations. Filters never create a metric reading.
+            point = depth[depth.shape[0]//2, depth.shape[1]//2]
+            if np.isfinite(point):
+                result["center_m"] = float(point)*scale_m
+        # Road and crossing warnings use unfiltered metric depth regardless of display settings.
+        metric_depth = None
+        if scale_m is not None:
+            metric_depth = depth if scale_m == 1 else depth * scale_m
+        return result, metric_depth
 
 
 CameraAWorker = CameraWorker
@@ -320,35 +392,13 @@ def resolve_device(requested):
     )
 
 
-def inference_options(parser):
-    parser.add_argument(
-        "--device",
-        default="auto",
-        help="auto, cpu, cuda, or cuda:N"
-    )
-    parser.add_argument(
-        "--imgsz",
-        type=int,
-        default=640,
-        help="YOLO input size, a multiple of 32"
-    )
-    parser.add_argument(
-        "--half",
-        action="store_true",
-        help="Opt in to FP16 on CUDA"
-    )
-    parser.add_argument(
-        "--cpu-threads",
-        type=int,
-        default=1,
-        help="PyTorch intra-op threads per CPU inference"
-    )
-    parser.add_argument(
-        "--poll-ms",
-        type=int,
-        default=50,
-        help="Milliseconds between discovery polls"
-    )
+def inference_options(parser, *, default_cpu_threads=1):
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
+    parser.add_argument("--imgsz", type=int, default=640, help="YOLO input size, a multiple of 32")
+    parser.add_argument("--half", action="store_true", help="Opt in to FP16 on CUDA")
+    parser.add_argument("--cpu-threads", type=int, default=default_cpu_threads,
+                        help="PyTorch intra-op threads per CPU inference")
+    parser.add_argument("--poll-ms", type=int, default=50, help="Milliseconds between discovery polls")
 
 
 def main():
@@ -360,16 +410,14 @@ def main():
     )
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--dual-yolo", action="store_true",
-                        help="Also run independent YOLO on Camera B")
-    parser.add_argument(
-        "--stereo-config", type=Path, default=DEFAULT_CONFIG
-    )
-    parser.add_argument(
-        "--metrics",
-        type=Path,
-        help="New CSV file for accepted frames from both cameras"
-    )
-
+                        help="Also run independent YOLO on B (legacy dual-camera benchmark)")
+    parser.add_argument("--stereo-config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--usb-low-config", type=Path, help="Measured 480 × 640 calibration for this USB rig")
+    parser.add_argument("--rtc-reference", type=Path, help="Static 480 × 640 USB landmarks from the calibrated rig")
+    parser.add_argument("--rtc-low-config", type=Path, help="Measured 480 × 640 WebRTC calibration")
+    parser.add_argument("--allow-webrtc-stereo", action="store_true",
+                        help="Enable metric depth from verified WebRTC rig geometry")
+    parser.add_argument("--metrics", type=Path, help="New CSV file for accepted frames from both cameras")
     # New option. HSV stays the default.
     parser.add_argument(
         "--item-encoder",
@@ -380,11 +428,19 @@ def main():
 
     parser.add_argument("--road-alerts", action="store_true", help="Enable sidewalk-to-road warnings on Camera A")
     parser.add_argument("--road-config", type=Path, default=DEFAULT_ROAD_CONFIG)
-    inference_options(parser)
+    inference_options(parser, default_cpu_threads=None)
     args = parser.parse_args()
-
+    if args.cpu_threads is None:
+        args.cpu_threads = 1 if args.dual_yolo else min(4, os.cpu_count() or 1)
     try:
         stereo = StereoDepth.load(args.stereo_config)
+        low_stereo = StereoDepth.load(args.usb_low_config) if args.usb_low_config else None
+        rtc_low_stereo = StereoDepth.load(args.rtc_low_config) if args.rtc_low_config else None
+        if args.rtc_low_config and (not rtc_low_stereo or rtc_low_stereo.size != (480, 640)):
+            raise ValueError("WebRTC portrait-low requires an enabled 480 × 640 calibration")
+        if args.usb_low_config and (not low_stereo or low_stereo.size != (480, 640)
+                                    or not stereo or stereo.size != (1080, 1920)):
+            raise ValueError("USB profiles require enabled 1080 × 1920 and 480 × 640 calibrations")
     except (
         KeyError, OSError, ValueError,
         TypeError, cv2.error
@@ -436,23 +492,11 @@ def main():
         from siglip_features import SigLIPExtractor
         item_encoder = SigLIPExtractor()
 
-    options = dict(
-        device=torch.device(device),
-        imgsz=args.imgsz,
-        half=args.half,
-        confidence=.25
-    )
-
+    options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half, confidence=.25)
     sides = "AB" if args.dual_yolo else "A"
     if device == "cpu" or not args.dual_yolo:
-        predictors = [
-            partial(
-                detect,
-                YOLO(str(args.weights), task="detect"),
-                **options
-            )
-            for _ in sides
-        ]
+        # Independent predictors let both camera threads use the CPU concurrently.
+        predictors = [partial(detect, YOLO(str(args.weights), task="detect"), **options) for _ in sides]
     else:
         predictor = partial(
             detect,
@@ -480,7 +524,7 @@ def main():
             writer = csv.writer(output)
             writer.writerow([
                 "camera", "source_id", "frame_id",
-                "accepted_ms", "latency_ms"
+                "accepted_ms", "latency_ms", "capture_latency_ms"
             ])
             output.flush()
             lock = Lock()
@@ -501,11 +545,19 @@ def main():
                 infer=infer,
                 item_encoder=item_encoder,
                 road=road if side == "A" else None,
-                corridor=corridor if side == "A" else None
+                corridor=corridor if side == "A" else None,
+                allow_webrtc_stereo=args.allow_webrtc_stereo,
+                inference_device=device,
+                half=args.half
             )
             for side, infer in zip(sides, predictors)
         ]
 
+        workers[0].low_stereo = low_stereo
+        workers[0].rtc_low_stereo = rtc_low_stereo
+        if args.rtc_reference:
+            with np.load(args.rtc_reference, allow_pickle=False) as ref:
+                workers[0].rtc_reference = [(ref[s+"xy"],ref[s+"desc"]) for s in "AB"]
         with ThreadPoolExecutor(max_workers=len(workers)) as pool:
             print(
                 f"YOLO loaded for {sides} "

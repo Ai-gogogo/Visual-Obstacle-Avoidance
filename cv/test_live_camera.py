@@ -230,7 +230,7 @@ class LiveCameraTests(unittest.TestCase):
 
     def test_dual_cli_keeps_frames_and_answers_separate_after_b_disconnects(self):
         process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("live_camera.py")),
-                                    "--dual-yolo", "--server", self.base])
+                                    "--server", self.base, "--dual-yolo"])
         self.addCleanup(process.wait, 5)
         self.addCleanup(process.terminate)
         phones = {side: self.pair(side) for side in "AB"}
@@ -341,6 +341,8 @@ class LiveCameraTests(unittest.TestCase):
             for side, frame in [('B',right), ('A',left)]:
                 self.request("PUT", "/api/frame", phones[side], data=phone_jpeg(frame),
                              headers={"Content-Type":"image/jpeg","X-Sample-Ms":str(stamp),"X-Clock-Error-Ms":"2"})
+            self.request("GET", "/api/preview/A", self.desk,
+                         headers={"X-Depth-Options": json.dumps({"meters": False})})
             self.worker.poll()
             snapshot = self.request("GET", "/api/preview/A", self.desk).json()
             predictions.extend(o for o in snapshot["objects"] if o.get("intrusion"))
@@ -350,6 +352,7 @@ class LiveCameraTests(unittest.TestCase):
                 break
             time.sleep(.18)
         self.assertTrue(predictions)
+        self.assertNotIn("depth_m", predictions[-1])  # Hidden readings still support crossing alerts.
         self.assertEqual(len(warnings), 1)
         self.assertEqual(warnings[0]["track_id"], predictions[-1]["track_id"])
         self.assertEqual(warnings[0]["from_side"], "right")
@@ -369,6 +372,7 @@ class LiveCameraTests(unittest.TestCase):
         process = subprocess.Popen([sys.executable, str(script), "--server", self.base])
         self.addCleanup(process.wait, 5)
         self.addCleanup(process.terminate)
+        self.upload(self.pair("B"), self.bus)
         phone = self.pair("A")
         for image, expected in [(self.bus, "bus (center)"), (self.blank, "No confident objects")]:
             deadline = time.monotonic() + 30
@@ -381,3 +385,4 @@ class LiveCameraTests(unittest.TestCase):
                     break
             else:
                 self.fail(f"Agent did not report {expected!r}; last reply: {reply}")
+        self.assertEqual(self.scene("B")["source"], "unavailable")
