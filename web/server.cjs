@@ -19,6 +19,7 @@ const files = {
 const TTL = 4 * 60 * 60 * 1000;
 const CODE_TTL = 5 * 60 * 1000;
 const FRESH = 5000;
+const PREVIEW_MAX_ANALYSIS_LAG_MS = 750;
 const key = () => randomBytes(24).toString('hex');
 
 function respond(res, status, payload) {
@@ -141,13 +142,17 @@ function createServer(options = {}) {
       if (method === 'GET' && action === 'preview') {
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
-        const detection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
+        const recentDetection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
+        const analysisDelayed = recentDetection && slot.frame !== recentDetection.frame &&
+          now - recentDetection.timestamp_ms > PREVIEW_MAX_ANALYSIS_LAG_MS;
+        const detection = analysisDelayed ? null : recentDetection;
         const partner = detection?.stereoPartner;
         const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
         const frame = detection?.frame ?? slot.frame;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
         // A raw preview can acquire boxes without the camera uploading a new JPEG.
-        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + (lostPartner ? '-unpaired' : '') + '"';
+        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id +
+          (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
         const objects = detection?.objects.map(({item_feature, ...object}) => {
@@ -158,6 +163,7 @@ function createServer(options = {}) {
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
           jpeg:frame.toString('base64'), objects,
+          ...(analysisDelayed ? {analysis_delayed:true} : {}),
           ...(detection?.stereoStatus ? {stereo_status:lostPartner ? 'waiting_for_pair' : detection.stereoStatus} : {}),
           ...(!lostPartner && detection?.depthPreview ? {depth_preview:detection.depthPreview, depth_range_m:detection.depthRange} : {})
         });
