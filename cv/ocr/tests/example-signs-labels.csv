@@ -1,0 +1,6 @@
+clip_id,interval_start_s,interval_end_s,sign_id,exact_text,bbox_or_polygon,destination,direction
+synthetic,0,2,book,BOOK DROP,,,
+synthetic,0,2,staff,STAFF ONLY,,,
+synthetic,0,2,exit,EXIT,,,
+synthetic,0,2,men,Men's Restroom Turn Left,,Men's Restroom,left
+synthetic,0,2,women,Women's Restroom Turn Right,,Women's Restroom,right

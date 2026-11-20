@@ -1,0 +1,29 @@
+{"image_size": [640, 220], "frames": [
+    {"time_seconds": 0, "detections": [
+        {"text": "BOOK DROP", "confidence": 0.97, "polygon": [[20, 25], [180, 25], [180, 50], [20, 50]]},
+        {"text": "STAFF ONLY", "confidence": 0.97, "polygon": [[280, 25], [440, 25], [440, 50], [280, 50]]},
+        {"text": "EXIT", "confidence": 0.97, "polygon": [[510, 25], [580, 25], [580, 50], [510, 50]]},
+        {"text": "Men's Restroom", "confidence": 0.97, "polygon": [[20, 110], [180, 110], [180, 135], [20, 135]]},
+        {"text": "Turn Left", "confidence": 0.97, "polygon": [[50, 140], [150, 140], [150, 165], [50, 165]]},
+        {"text": "Women's Restroom", "confidence": 0.97, "polygon": [[280, 110], [440, 110], [440, 135], [280, 135]]},
+        {"text": "Turn Right", "confidence": 0.97, "polygon": [[310, 140], [410, 140], [410, 165], [310, 165]]}
+    ]},
+    {"time_seconds": 1, "detections": [
+        {"text": "BOOK DROP", "confidence": 0.97, "polygon": [[20, 25], [180, 25], [180, 50], [20, 50]]},
+        {"text": "STAFF ONLY", "confidence": 0.97, "polygon": [[280, 25], [440, 25], [440, 50], [280, 50]]},
+        {"text": "EXIT", "confidence": 0.97, "polygon": [[510, 25], [580, 25], [580, 50], [510, 50]]},
+        {"text": "Men's Restroom", "confidence": 0.97, "polygon": [[20, 110], [180, 110], [180, 135], [20, 135]]},
+        {"text": "Turn Left", "confidence": 0.97, "polygon": [[50, 140], [150, 140], [150, 165], [50, 165]]},
+        {"text": "Women's Restroom", "confidence": 0.97, "polygon": [[280, 110], [440, 110], [440, 135], [280, 135]]},
+        {"text": "Turn Right", "confidence": 0.97, "polygon": [[310, 140], [410, 140], [410, 165], [310, 165]]}
+    ]},
+    {"time_seconds": 2, "detections": [
+        {"text": "BOOK DROP", "confidence": 0.97, "polygon": [[20, 25], [180, 25], [180, 50], [20, 50]]},
+        {"text": "STAFF ONLY", "confidence": 0.97, "polygon": [[280, 25], [440, 25], [440, 50], [280, 50]]},
+        {"text": "EXIT", "confidence": 0.97, "polygon": [[510, 25], [580, 25], [580, 50], [510, 50]]},
+        {"text": "Men's Restroom", "confidence": 0.97, "polygon": [[20, 110], [180, 110], [180, 135], [20, 135]]},
+        {"text": "Turn Left", "confidence": 0.97, "polygon": [[50, 140], [150, 140], [150, 165], [50, 165]]},
+        {"text": "Women's Restroom", "confidence": 0.97, "polygon": [[280, 110], [440, 110], [440, 135], [280, 135]]},
+        {"text": "Turn Right", "confidence": 0.97, "polygon": [[310, 140], [410, 140], [410, 165], [310, 165]]}
+    ]}
+]}
