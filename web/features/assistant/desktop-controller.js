@@ -1,4 +1,5 @@
 import { connectAlerts } from "../alerts/alerts-controller";
+import { connectModelCompute } from "./model-compute";
 import { connectConversation } from "./conversation-controller";
 import { createScope } from "../../shared/scope";
 import { createAccessibility } from "../../shared/accessibility";
@@ -56,6 +57,8 @@ export function mountDesktop(root, voicePresentation) {
   let confirmation;
   let deferredReply;
   let warningActive = false;
+  let warningAudioEnabled = false;
+  let latestWarning;
 
   function setVoiceState(title, prompt, label) {
     voicePresentation.publish({title, prompt, label, stopLabel:speech ? 'Stop playback' : pendingTurn ? 'Cancel request' : 'Stop playback',
@@ -137,7 +140,7 @@ export function mountDesktop(root, voicePresentation) {
     if (message) $('#voice-message').textContent = message;
   }
 
-  async function speakLocal(text, warning = false, turn) {
+  async function speakLocal(text, warning = false, turn, event) {
     if (!warning && warningActive) {
       deferredReply = {text,turn};
       return;
@@ -159,10 +162,28 @@ export function mountDesktop(root, voicePresentation) {
         JSON.stringify({text:text.slice(0,650),priority:warning}),'application/json',output.controller.signal);
       const audio = await result.blob();
       if (speech !== output) return;
+      if (event && Date.now() >= event.deadline) {
+        $('#warning-audio-status').textContent = 'The alert expired before speech was ready.';
+        finish();
+        return;
+      }
       output.url = URL.createObjectURL(audio);
       output.audio = new Audio(output.url);
       output.audio.onended = () => finish();
       output.audio.onerror = () => finish('Local playback failed. The text is still available.');
+      if (warning) output.audio.addEventListener('playing',() => {
+        if (speech !== output) return;
+        if (event && Date.now() >= event.deadline) {
+          $('#warning-audio-status').textContent = 'The alert expired before speech was ready.';
+          finish();
+          return;
+        }
+        if (event) renderWarningTiming(event,Date.now());
+        else {
+          warningAudioEnabled = true;
+          $('#warning-audio').textContent = 'Test warning audio';
+        }
+      },{once:true});
       await output.audio.play();
       if (turn && speech === output) {
         turn.audioMs = Math.round(performance.now()-turn.startedAt);
@@ -171,9 +192,38 @@ export function mountDesktop(root, voicePresentation) {
       if (!warning && speech === output) setVoiceState('Speaking',
         voiceSession ? 'Listening resumes after the reply' : 'Playing reply. Tap to stop playback.',label);
     } catch (error) {
+      if (warning && speech === output) {
+        $('#warning-audio-status').textContent = error.name === 'NotAllowedError'
+          ? 'Browser blocked warning audio. Select Enable warning audio to try again.' :
+          'Warning audio unavailable. Alerts remain visible.';
+        if (error.name === 'NotAllowedError') {
+          warningAudioEnabled = false;
+          $('#warning-audio').textContent = 'Enable warning audio';
+        }
+      }
       finish(error.name === 'NotAllowedError' ? 'Playback was blocked by the browser. Use Read aloud to enable audio.' : error.message);
     }
   }
+
+  function renderWarningTiming(event, started) {
+    if (event !== latestWarning || !Number.isFinite(event.judged_ms)) return;
+    const timing = $('#warning-timing');
+    const capture = Number.isFinite(event.capture_ms);
+    const origin = capture ? event.capture_ms : event.stamp;
+    const source = capture ? 'Estimated capture' : 'Server receipt';
+    const uncertainty = capture ? ' (±'+event.capture_error_ms+' ms)' : '';
+    timing.hidden = false;
+    timing.textContent = source + ' to judgment ' + Math.max(0,event.judged_ms-origin) + ' ms' + uncertainty +
+      ' · judgment to dashboard ' + Math.max(0,event.received-event.judged_ms) + ' ms' +
+      (started ? ' · ' + source.toLowerCase() + ' to speech start '+Math.max(0,started-origin)+' ms' : '');
+  }
+
+  listen($('#warning-audio'),'click',() => {
+    if (speech) return;
+    $('#warning-audio-status').textContent = '';
+    const chinese = transcriptionLanguage() === 'zh';
+    void speakLocal(chinese ? '语音提醒已就绪。' : 'Warning audio is ready.',true);
+  });
 
   function readAnswer() {
     const last = latestReply();
@@ -621,14 +671,22 @@ export function mountDesktop(root, voicePresentation) {
       button.disabled = false;
     }
   });
+  connectModelCompute({$, scope, agentRequest});
   connectAlerts({$, scope, agentRequest, transcriptionLanguage, isAssist:() => currentPage === 'assist',
     isConversationBusy:segment => Boolean(pendingTurn || speech || reviewing || confirmation ||
       (segment === 'chunks' ? voiceSession?.segment?.chunks.length : voiceSession?.segment?.onset)),
-    speakWarning(text) {
+    speakWarning(text,warning,canSpeak) {
+      const received = Date.now();
+      const event = latestWarning = {...warning,received,
+        deadline:Math.min(warning.expires ?? Infinity,warning.judged_ms+1800,
+          (warning.capture_ms ?? warning.stamp)+2500)};
+      renderWarningTiming(event);
+      if (!canSpeak || !warningAudioEnabled || received >= event.deadline) return;
+      $('#warning-audio-status').textContent = '';
       pauseListening();
       clearTimeout(recoveryTimer);
       releaseSpeech();
-      speakLocal(text,true);
+      void speakLocal(text,true,undefined,event);
     },
     speakReminder:speakLocal
   });

@@ -10,6 +10,9 @@ export function MonitorPanel() {
           <p>Compare both camera feeds and depth aligned to Camera A.</p>
         </div>
         <div className="toolbar">
+          <button className="quiet" id="warning-audio" type="button" aria-describedby="warning-audio-status">
+            Enable warning audio
+          </button>
           <button
             className="quiet"
             id="pixel-preview"

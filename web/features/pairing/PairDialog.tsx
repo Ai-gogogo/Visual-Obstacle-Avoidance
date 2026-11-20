@@ -12,8 +12,26 @@ export function PairDialog() {
       <h2 id="pair-title" tabIndex={-1} data-initial-focus>
         Pair a phone
       </h2>
-      <section id="usb-controls" hidden aria-labelledby="usb-title">
-        <h3 id="usb-title">USB cameras</h3>
+      <details id="wifi-pairing">
+      <summary>Wi-Fi · WebRTC</summary>
+      <p>Scan each camera’s code in Safari on the same Wi-Fi. Use Camera A on the left and Camera B on the right.</p>
+      <p id="phone-address" className="address" hidden></p>
+      <div className="pair-options">
+        <button type="button" className="primary" data-pair="A">
+          Code for Camera A
+        </button>
+        <button type="button" className="primary" data-pair="B">
+          Code for Camera B
+        </button>
+      </div>
+      <div id="pair-result" role="status"></div>
+      <button type="button" className="quiet" id="copy-code" hidden>
+        Copy pairing code
+      </button>
+      <p id="copy-status" role="status"></p>
+      </details>
+      <details id="usb-controls" hidden>
+        <summary>USB cameras</summary>
         <p>Plug both iPhones into this Mac and open WiredCamera on each phone.</p>
         <div className="pair-options">
           <label>Camera A · left <select id="usb-A" /></label>
@@ -31,24 +49,8 @@ export function PairDialog() {
           <button type="button" className="quiet" id="usb-refresh">Refresh devices</button>
           <button type="button" className="quiet" id="usb-disconnect" hidden>Disconnect USB</button>
         </div>
-      </section>
-      <details id="wifi-pairing">
-      <summary>Wi-Fi pairing</summary>
-      <p id="phone-address" className="address" hidden></p>
-      <div className="pair-options">
-        <button type="button" className="primary" data-pair="A">
-          Code for Camera A
-        </button>
-        <button type="button" className="primary" data-pair="B">
-          Code for Camera B
-        </button>
-      </div>
-      <div id="pair-result" role="status"></div>
-      <button type="button" className="quiet" id="copy-code" hidden>
-        Copy pairing code
-      </button>
-      <p id="copy-status" role="status"></p>
       </details>
+
     </dialog>
   );
 }

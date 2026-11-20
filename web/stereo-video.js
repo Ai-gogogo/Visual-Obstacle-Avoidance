@@ -163,7 +163,7 @@ export function connectStereoVideo({$, scope, session}) {
         run.etag = response.headers.get('ETag');
         if (!run.seenPartners.has(pair.partner)) {
           if (pair.types[0] !== pair.types[1]) throw new Error('Choose the same upload quality on both phones.');
-          run.original = pair.types[0] === 'image/png';
+          run.original = pair.types[0] === 'image/png' || pair.fullSize === true;
           const images = await Promise.all(pair.images.map(async (pixels,i) => {
             const image = new Image();
             image.src = 'data:'+pair.types[i]+';base64,'+pixels;

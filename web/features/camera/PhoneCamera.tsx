@@ -111,19 +111,20 @@ export function PhoneCamera() {
                 if (invalid) setCamera({ phase: "idle" });
               }}
             />
-            <label htmlFor="camera-quality">Upload quality</label>
+            <label htmlFor="camera-quality">Camera mode</label>
             <select
               id="camera-quality"
               name="quality"
-              defaultValue="jpeg"
+              defaultValue="webrtc"
               aria-describedby="camera-quality-note"
             >
               <option value="jpeg">Standard · JPEG, up to 640 px</option>
+              <option value="webrtc">480 × 640 · WebRTC</option>
+              <option value="webrtc-hd">1080 × 1920 · WebRTC</option>
               <option value="png">Original pixels · lossless PNG</option>
             </select>
             <p id="camera-quality-note">
-              For stereo, choose the same mode on both phones and calibrate at
-              that size.
+              For stereo, keep both phones upright and choose the same resolution and rear lens.
             </p>
             <Button
               variant="primary"

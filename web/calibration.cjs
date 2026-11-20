@@ -19,6 +19,7 @@ function stereoPartner(A,B,now) {
   if (!A.sample || now-A.stamp >= 5000) return null;
   let best, limit = 65;
   for (const frame of B.history || []) {
+    if ((frame.transport ?? 'image') !== (A.rtcID ? 'webrtc' : 'image') || frame.quality !== A.rtcQuality) continue;
     const skew = Math.abs(A.sample.ms-frame.sample.ms)+A.sample.error+frame.sample.error;
     if (now-frame.stamp < 5000 && skew <= limit) {
       best = frame;

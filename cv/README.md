@@ -337,3 +337,16 @@ Camera A 用 Cityscapes SegFormer-B0 分割车行道和人行道，寻找从脚�
 调整 [road_config.json](road_config.json) 中的 `corridor_width_m`（通道总宽）和 `pitch_down_deg`（正数表示下俯）。`intrusion.enabled` 控制此功能，`horizon_s` 默认为 2，`max_forward_m` 默认为 6，`max_turn_deg_s` 默认为 35。修改后重启 worker。双目参数和时钟配对要求与上文的绝对深度功能一致。
 
 封闭场地实测可以覆盖手机转动而物体静止、人员平行于通道行走，以及人员从通道两侧横穿这三种情况。记录告警相对实际入道的提前量，以及漏报和误报。急转弯、移动背景占满视野、严重遮挡、稀疏深度和目标突然变向会影响预测。此处的时间是按短时速度估计的入道时间，碰撞还取决于使用者之后的路线和速度。
+
+## 同机位对比 JPEG 与 WebRTC
+
+两台手机先选择原图 PNG 完成标定。保持机位、镜头、倍率、方向、棋盘位置和光线固定。使用同一份启用的标定文件，分别用 **Standard · JPEG** 和 **Low latency · WebRTC** 配对两台相机。从根目录运行：
+
+```sh
+python cv/compare_stereo_transport.py --server http://127.0.0.1:8786 --mode jpeg --stereo-config PATH
+python cv/compare_stereo_transport.py --server http://127.0.0.1:8786 --mode webrtc --stereo-config PATH
+```
+
+把 `--server` 换成当前 CV worker 使用的本地地址。WebRTC 等两台手机均显示 **Stereo timing ready** 后再测。脚本用同一批已配对图像报告配对率、配对时差上界 P95、校正后的棋盘角点纵向误差和全图深度有效比例，尺寸不符的帧单独计数。静止棋盘用于检查几何，建议另用运动的可见计时器或闪烁光源核对两部手机的时间估算；浏览器相机管线偏差需要实测。配对门槛取标定配置与 65 ms 的较小值，比较时计入两路时钟估算误差。
+
+CV 默认对 A 路的最新帧运行 YOLO。WebRTC 和 JPEG 帧各自配对。双目几何通过对照后，以 `--stereo-config PATH --allow-webrtc-stereo` 启动 CV；JPEG/PNG 的既有深度路径照常使用标定文件。

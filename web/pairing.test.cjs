@@ -3,6 +3,45 @@ const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const {createServer} = require('./server.cjs');
 
+test('runtime shows reported YOLO devices and distinguishes model residency from idle', async t => {
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const originalFetch = globalThis.fetch;
+  const chat = process.env.VISIONASSIST_CHAT_MODEL || 'qwen3:4b-instruct-2507-q4_K_M';
+  const vision = process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b';
+  let models = [
+    {name:chat,size:100,size_vram:100},
+    {name:vision,size:200,size_vram:50},
+    {name:'unrelated:latest',size:100,size_vram:0}
+  ];
+  t.mock.method(globalThis,'fetch',(url,options) => url === 'http://127.0.0.1:11434/api/ps'
+    ? Promise.resolve(Response.json({models})) : originalFetch(url,options));
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:'+server.address().port;
+  const runtime = '/api/agent/runtime';
+  assert.equal((await fetch(base+runtime)).status,401);
+  const {token} = await (await fetch(base+'/api/session',{method:'POST'})).json();
+  const readRuntime = async () => (await fetch(base+runtime,{headers:{Authorization:'Bearer '+token}})).json();
+  const pulse = (camera,device,precision) => fetch(base+'/api/cv/sources',{headers:{
+    'X-CV-Camera':camera,'X-CV-Device':device,'X-CV-Precision':precision
+  }});
+  await pulse('A','cuda:0','fp16');
+  await pulse('B','cpu','fp32');
+  const first = await readRuntime();
+  assert.deepEqual(first.yolo.map(({device}) => device),['cuda:0','cpu']);
+  assert.deepEqual(first.agent.loaded.map(({device,gpu_percent}) => [device,gpu_percent]),[['gpu',100],['mixed',25]]);
+  models = [{name:chat,size:100,size_vram:0}];
+  assert.equal((await readRuntime()).agent.loaded[0].device,'cpu');
+  t.mock.timers.tick(5100);
+  models = [];
+  const idle = await readRuntime();
+  assert.deepEqual(idle.yolo,[]);
+  assert.equal(idle.agent.reachable,true);
+  assert.deepEqual(idle.agent.loaded,[]);
+});
+
 test('desktop and two phones pair independently and stale frames are withheld', async t => {
   t.mock.timers.enable({apis:['Date'], now:Date.now()});
   const server = createServer();
@@ -91,4 +130,53 @@ test('desktop and two phones pair independently and stale frames are withheld', 
   assert.equal((await call('/api/frame/A','GET',desk)).status,204);
   t.mock.timers.tick(5100);
   assert.equal((await call('/api/frame/B','GET',desk,undefined,{'If-None-Match':'"unknown"'})).status,204);
+});
+
+test('weak same-frame boxes are visual only and fresh hazards wake the waiting dashboard', async t => {
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const call = (path, method, token, body, extra = {}, signal) => fetch(base+path,{
+    method,body,headers:{...(token ? {Authorization:'Bearer '+token} : {}),...extra},signal
+  });
+  const json = {'Content-Type':'application/json'};
+  const {token:desk} = await (await call('/api/session','POST')).json();
+  const {code} = await (await call('/api/pair/A','POST',desk)).json();
+  const {token:phone} = await (await call('/api/join','POST',undefined,JSON.stringify({code}),json)).json();
+  await call('/api/agent/alerts','GET',desk);
+  const jpeg = Buffer.from([255,216,42,255,217]);
+  const box = {label:'chair',bbox:[.2,.2,.6,.8],position:'center',track_id:'A-1',risk:'urgent'};
+  async function upload() {
+    const sample = Date.now()-40;
+    assert.equal((await call('/api/frame','PUT',phone,jpeg,{
+      'Content-Type':'image/jpeg','X-Sample-Ms':sample,'X-Clock-Error-Ms':4
+    })).status,204);
+    const {sources:[source]} = await (await call('/api/cv/sources')).json();
+    const query = '?camera_id=A&source_id='+source.source_id;
+    const frame = await call('/api/cv/frame'+query);
+    return {sample,query,frame_id:frame.headers.get('etag').slice(1,-1)};
+  }
+  async function publish(input, objects, preview_objects = []) {
+    const response = await call('/api/cv/detections'+input.query,'POST',undefined,
+      JSON.stringify({frame_id:input.frame_id,objects,preview_objects}),json);
+    assert.equal(response.status,204);
+    return response;
+  }
+  const weak = await upload();
+  await publish(weak,[],[{...box,confidence:.32}]);
+  const preview = await (await call('/api/preview/A','GET',desk)).json();
+  assert.equal(preview.frame_id,weak.frame_id);
+  assert.equal(preview.preview_objects[0].track_id,'A-1');
+  assert.deepEqual(preview.objects,[]);
+  assert.equal((await (await call('/api/agent/alerts','GET',desk)).json()).alerts.length,0);
+  const pending = call('/api/agent/alerts?wait=1&after=0','GET',desk,undefined,{},AbortSignal.timeout(850));
+  const strong = await upload();
+  const result = await publish(strong,[{...box,confidence:.78}]);
+  assert.ok(result.headers.has('x-cv-capture-latency-ms'));
+  const {alerts:[alert]} = await (await pending).json();
+  assert.equal(alert.capture_ms,strong.sample);
+  assert.equal(alert.capture_error_ms,4);
+  assert.ok(alert.judged_ms >= alert.capture_ms);
 });

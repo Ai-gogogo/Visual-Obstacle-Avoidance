@@ -72,14 +72,15 @@ def export_conversation(payload):
     return {"document": base64.b64encode(result.getvalue()).decode("ascii")}
 
 
-def synthesize(payload):
+@lru_cache(maxsize=2)
+def speech_voice(language):
     from onnxruntime import InferenceSession, SessionOptions
     from piper import PiperConfig, PiperVoice
 
     voice_path = {
         "zh": "zh/zh_CN/huayan/medium/zh_CN-huayan-medium.onnx",
         "en": "en/en_US/lessac/medium/en_US-lessac-medium.onnx",
-    }[payload["language"]]
+    }[language]
     model_path = MODELS / "piper" / voice_path
     with model_path.with_suffix(".onnx.json").open(encoding="utf-8") as config_file:
         config = PiperConfig.from_dict(json.load(config_file))
@@ -87,7 +88,11 @@ def synthesize(payload):
     options = SessionOptions()
     options.intra_op_num_threads = 2
     session = InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
-    voice = PiperVoice(session=session, config=config)
+    return PiperVoice(session=session, config=config)
+
+
+def synthesize(payload):
+    voice = speech_voice(payload["language"])
     audio = io.BytesIO()
     with wave.open(audio, "wb") as wav:
         voice.synthesize_wav(payload["text"], wav)
@@ -137,10 +142,12 @@ def main(mode, payload):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "stt-session":
+    mode = sys.argv[1]
+    if mode in ("stt-session", "tts-session"):
+        work = transcribe if mode == "stt-session" else synthesize
         for line in sys.stdin:
             try:
-                result = transcribe(json.loads(line))
+                result = work(json.loads(line))
             except Exception:
                 result = {"error": True}
             print(json.dumps(result, ensure_ascii=False), flush=True)

@@ -1,7 +1,7 @@
 export function connectUsbControls({$,scope,session,dialog,onPaired}) {
   const local = ['localhost','127.0.0.1','[::1]'].includes(location.hostname);
   $('#usb-controls').hidden = !local;
-  $('#wifi-pairing').open = !local;
+  $('#wifi-pairing').open = true;
   if (!local) return () => {};
   const sides = ['A','B'];
   const selects = sides.map(side => $('#usb-'+side));

@@ -109,6 +109,7 @@ export function createPerceptionView($, signal) {
       waiting_for_a:'Waiting for a processed Camera A frame.',
       uncalibrated:'Load the calibration for this phone pair to measure depth.',
       size_mismatch:'Depth unavailable · check both phones’ image dimensions against calibration.',
+      transport_unvalidated:'Validate this rig in WebRTC mode before enabling depth.',
       waiting_for_pair:'Depth waiting for two time-matched camera frames.',
       unavailable:'Depth processing is unavailable. Camera A is still detecting objects.',
       no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
@@ -168,11 +169,13 @@ export function createPerceptionView($, signal) {
     ctx.font = '600 ' + fontSize + 'px system-ui';
     ctx.lineWidth = Math.max(2, width / 240);
     ctx.textBaseline = 'top';
-    for (const object of snapshot.objects ?? []) {
+    for (const object of [...(snapshot.objects ?? []), ...(snapshot.preview_objects ?? [])]) {
       const {bbox:[x1,y1,x2,y2], confidence, position} = object;
       const x = x1 * width, y = y1 * height;
       ctx.strokeStyle = '#8ce9ff';
+      ctx.setLineDash(object.weak ? [5,3] : []);
       ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
+      ctx.setLineDash([]);
       let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
         ($('#depth-meters').checked && Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
       if (object.intrusion && object.intrusion.expires > Date.now()) {

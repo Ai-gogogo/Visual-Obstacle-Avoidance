@@ -20,7 +20,11 @@
 
 本地服务用低频 JPEG 帧预览。Agent 的 YOLO 问答和个人物品识别依赖 CV 程序通过本机接口提交同帧检测。Qwen 单帧问答和亲友识别可以读取已经配对的相机帧。Judge view 的样例照片和距离为演示数据。
 
-手机配对页的 **Upload quality** 提供两种选择。Standard 以 JPEG 上传，长边最多 640 px。Original pixels 向浏览器请求 1920 × 1080，并以浏览器实际给出的宽高上传无损 PNG，目标约每秒一对。手机画面会显示采集和上传尺寸。A、B 都选同一模式、保持相同方向。桌面录像使用完整上传尺寸并编码为 WebM；视频本身仍有压缩。更换上传尺寸或镜头后，按新配置重新标定。
+## 双手机 WebRTC
+
+在 Mac 上安装 `cv/rtc-requirements.txt` 中的依赖，启动网页服务时把 `VISIONASSIST_RTC_PYTHON` 设为该 Python 解释器的绝对路径。在 **Pair a phone → Wi-Fi · WebRTC** 分别为 A、B 生成二维码，两台 iPhone 在同一局域网内用 Safari 打开 HTTPS 相机页。保持机位与竖屏方向，Rice 对应 A，Jia 对应 B。默认档位是 **480 × 640 · WebRTC**，也可选 **1080 × 1920 · WebRTC**。接收端校验解码尺寸，分析快照保留相同像素尺寸。网络需允许两台手机与 Mac 的媒体流量。USB 配对保留在同一弹窗。
+
+480 × 640 USB 标定可以在实拍几何一致时复用。给 CV worker 传入 `--rtc-reference` 和已有的高、低标定，Mac 会在有时间匹配的 A/B 帧后比较两侧静止场景特征。参考文件可用 `python cv/rtc_geometry.py 已标定的低像素双目录像.webm reference.npz` 从原录像生成。保持左右顺序及相同背景。若背景已更换或特征不足，应另用固定棋盘对照验证。手动确认机位、镜头、裁切与标定一致后，才使用 `--allow-webrtc-stereo`。查看实收尺寸、解码 FPS 以及同步状态可用手机相机页。
 
 ## 验证接口
 

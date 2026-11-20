@@ -5,6 +5,7 @@ const { join } = require('node:path');
 const { readFileSync } = require('node:fs');
 const { createAgentRoutes, DETECTION_SCHEMA_VERSION } = require('../llm/agent-routes.cjs');
 const {PREVIEW_MAX_ANALYSIS_LAG_MS} = require('../llm/agent.cjs');
+const {createRtcBridge} = require('./rtc-bridge.cjs');
 
 const qrcode = require('./vendor/qrcode-generator-2.0.4/qrcode.cjs');
 
@@ -50,10 +51,36 @@ function createServer(options = {}) {
   const attempts = new Map();
   const assistant = createAgentRoutes(options.agent, sessions, read, respond);
   const usb = require("./usb-cameras.cjs").usbCameras({sessions, phones, key, read, respond});
+  const rtc = options.rtc ?? (options.rtcPython && createRtcBridge(options.rtcPython));
+
+  function resetSource(session, side) {
+    const slot = session.slots[side];
+    if (slot.rtcID) rtc.drop(slot.rtcID);
+    session.alerts = session.alerts.filter(alert => alert.kind !== 'path_intrusion');
+    return session.slots[side] = {phone:slot.phone, streamID:key(), stamp:0};
+  }
+
+  function rememberRight(slot) {
+    if (!slot.sample) return;
+    slot.history ||= [];
+    slot.history.push({id:slot.etag.slice(1,-1),frame:slot.frame,frameType:slot.frameType,
+      stamp:slot.stamp,sample:slot.sample,transport:slot.rtcID ? 'webrtc' : 'image',quality:slot.rtcQuality});
+    const limit = slot.rtcID ? 16 : slot.frameType === 'image/png' ? 3 : 6;
+    slot.history.splice(0, Math.max(0,slot.history.length-limit));
+  }
+
+  async function readOffer(req) {
+    const offer = JSON.parse((await read(req,65536)).toString());
+    if (offer?.type !== 'offer' || typeof offer.sdp !== 'string' || !offer.sdp.startsWith('v=0')) {
+      throw Object.assign(new Error('Invalid video offer.'),{status:400, publicMessage:'Invalid video offer.'});
+    }
+    return {type:'offer',sdp:offer.sdp};
+  }
   const handler = async (req, res) => {
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
-    const route = new URL(req.url, 'http://localhost').pathname;
+    const url = new URL(req.url, 'http://localhost');
+    const route = url.pathname;
     const method = req.method;
     const now = Date.now();
     if (!route.startsWith('/api/')) {
@@ -75,7 +102,10 @@ function createServer(options = {}) {
       }
       for (const [id, session] of sessions) {
         if (session.until > now) continue;
-        for (const slot of Object.values(session.slots)) phones.delete(slot.phone);
+        for (const slot of Object.values(session.slots)) {
+          phones.delete(slot.phone);
+          if (slot.rtcID) rtc.drop(slot.rtcID);
+        }
         sessions.delete(id);
       }
       for (const [code, entry] of codes) if (entry.until <= now) codes.delete(code);
@@ -97,7 +127,8 @@ function createServer(options = {}) {
       if (route === '/api/calibration/video-check') {
         if (!sessions.has(token)) return respond(res,401,{error:'Camera session ended.'});
         if (method !== 'POST') return respond(res,405,{error:'Use POST.'});
-        const original = req.headers['x-frame-format'] === 'png';
+        const activeA = sessions.get(token).slots.A;
+        const original = req.headers['x-frame-format'] === 'png' || activeA.rtcQuality === 'portrait-full';
         const maxFrames = original ? 1 : 4;
         const maxLength = original ? 16*1024*1024 : 470000;
         const {mode,pairs} = JSON.parse(await read(req,maxFrames*2*maxLength+1024));
@@ -120,7 +151,7 @@ function createServer(options = {}) {
           const partner = require('./calibration.cjs').stereoPartner(A,B,now);
           if (!partner || req.headers['if-none-match'] === A.etag) return res.writeHead(204).end();
           res.setHeader('ETag',A.etag);
-          return respond(res,200,{rig:[A.streamID,B.streamID].join('/'),partner:partner.id,sampleMs:A.sample.ms,types:[A.frameType,partner.frameType],
+          return respond(res,200,{rig:[A.streamID,B.streamID].join('/'),partner:partner.id,sampleMs:A.sample.ms,types:[A.frameType,partner.frameType],fullSize:A.rtcQuality === "portrait-full",
             images:[A.frame,partner.frame].map(frame=>frame.toString('base64'))});
         }
         if (route.endsWith('/video')) {
@@ -198,15 +229,120 @@ function createServer(options = {}) {
         if (expectedSourceID !== undefined && expectedSourceID !== session.sourceID)
           return respond(res,409,{error:'Generate both camera codes in the same dashboard tab.'});
         codes.delete(code);
-        const slot = session.slots[entry.slot];
+        const slot = resetSource(session,entry.slot);
         phones.delete(slot.phone);
         const phone = key();
         session.slots[entry.slot] = {phone, streamID:key(), stamp:0};
-        session.alerts = session.alerts.filter(alert => alert.kind !== 'path_intrusion');
         phones.set(phone, {session:entry.session, slot:entry.slot});
         attempts.delete(ip);
         res.setHeader('X-Server-Ms', Date.now());
-        return respond(res, 200, {token:phone,slot:entry.slot,sourceID:session.sourceID});
+        return respond(res, 200, {token:phone,slot:entry.slot,sourceID:session.sourceID,webrtc:Boolean(rtc?.ready)});
+      }
+      if (['/api/webrtc/offer','/api/webrtc/status','/api/webrtc/clock'].includes(route)) {
+        const entry = phones.get(token);
+        const session = entry && sessions.get(entry.session);
+        if (!session) return respond(res,401,{error:'Camera session ended. Pair again.'});
+        const side = entry.slot;
+        const original = session.slots[side];
+        if (route.endsWith('/clock')) {
+          if (!original.rtcID) return respond(res,409,{error:'Start WebRTC before synchronizing clocks.'});
+          if (method === 'GET') return respond(res,200,{server_ms:Date.now()});
+          if (method !== 'POST') return respond(res,405,{error:'Method unavailable.'});
+          const {server_ms:server, sent_ms:sent, received_ms:received} = JSON.parse((await read(req,512)).toString());
+          if (session.slots[side] !== original) return respond(res,409,{error:'Camera connection changed.'});
+          const updated = Date.now();
+          if (![server,sent,received].every(Number.isSafeInteger) || server > updated || updated-server > 2500 ||
+              received < sent || received-sent > 100 || Math.abs(server-(sent+received)/2) > 86_400_000) {
+            return respond(res,422,{error:'Clock sample unavailable.'});
+          }
+          const clock = {offset:server-(sent+received)/2,error:Math.ceil((received-sent)/2)+2,at:updated};
+          const previous = original.rtcClock;
+          if (!previous || updated-previous.at > 10000 || clock.error <= previous.error ||
+              Math.abs(clock.offset-previous.offset) > clock.error+previous.error) original.rtcClock = clock;
+          return res.writeHead(204).end();
+        }
+        if (route.endsWith('/status') && method === 'GET') {
+          return respond(res,200,{available:Boolean(rtc?.ready),receiving:Boolean(original.rtcID && original.frame),
+            ...original.rtcStats});
+        }
+        if (route.endsWith('/offer') && method === 'DELETE') {
+          if (original.rtcID) resetSource(session,side);
+          return res.writeHead(204).end();
+        }
+        if (route.endsWith('/status') || method !== 'POST') return respond(res,405,{error:'Method unavailable.'});
+        if (!rtc?.ready) return respond(res,503,{error:'WebRTC is unavailable.'});
+        const quality = url.searchParams.get('quality') ?? 'standard';
+        if (!['standard','hd','portrait-low','portrait-full'].includes(quality)) return respond(res,400,{error:'Unknown WebRTC quality.'});
+        const offer = await readOffer(req);
+        if (session.slots[side] !== original) return respond(res,409,{error:'Camera connection changed.'});
+        const slot = resetSource(session,side);
+        slot.rtcQuality = quality;
+        const id = slot.rtcID = key();
+        const answer = await rtc.offer(id,{...offer,quality},{
+          frame(event) {
+            if (session.slots[side] !== slot) return;
+            const frame = Buffer.from(event.jpeg,'base64');
+            if (!frame.length || frame.length > (quality === "portrait-full" ? 4*1024*1024 : 600000)) return;
+            slot.frame = frame;
+            slot.frameType = 'image/jpeg';
+            slot.stamp = Date.now();
+            slot.etag = '"' + key() + '"';
+            const clock = slot.rtcClock;
+            const [captureMs, rtpError] = event.capture ?? [];
+            const corrected = Math.round(captureMs + (clock?.offset ?? 0));
+            const uncertainty = (clock?.error ?? 0) + rtpError + 1;
+            slot.sample = clock && slot.stamp-clock.at <= 18000 && Number.isSafeInteger(captureMs) &&
+              Number.isSafeInteger(rtpError) && rtpError >= 0 && uncertainty <= 32 &&
+              corrected >= slot.stamp-750 && corrected <= slot.stamp+uncertainty
+              ? {ms:corrected,error:uncertainty} : null;
+            if (side === 'B') rememberRight(slot);
+            slot.rtcStats = {decoded_fps:event.fps, decoded_frames:event.decoded_frames,
+              width:event.width,height:event.height,
+              receiver_bridge_ms:Math.max(0,slot.stamp-event.decoded_at),
+              capture_timing_available:Boolean(slot.sample)};
+          },
+          closed() {
+            if (session.slots[side] === slot) resetSource(session,side);
+          }
+        });
+        if (session.slots[side] !== slot || !answer) {
+          if (session.slots[side] === slot) resetSource(session,side);
+          return respond(res,503,{error:'WebRTC connection could not be established.'});
+        }
+        return respond(res,200,answer);
+      }
+      const rtcView = /^\/api\/webrtc\/view\/([AB])$/.exec(route);
+      if (rtcView) {
+        const session = sessions.get(token);
+        if (!session) return respond(res,401,{error:'Dashboard session ended.'});
+        if (method !== 'POST' && method !== 'DELETE') return respond(res,405,{error:'Method unavailable.'});
+        const side = rtcView[1];
+        const slot = session.slots[side];
+        const viewer = url.searchParams.get('viewer');
+        if (!viewer || !/^[a-f0-9-]{36}$/.test(viewer)) return respond(res,400,{error:'Invalid viewer.'});
+        if (method === 'DELETE') {
+          if (slot.rtcID && slot.viewer === viewer) {
+            slot.viewer = undefined;
+            await rtc.closeView(slot.rtcID,viewer);
+          }
+          return res.writeHead(204).end();
+        }
+        if (!slot.rtcID || !slot.frame || now-slot.stamp > FRESH) {
+          return respond(res,404,{error:'Pair a WebRTC camera first.'});
+        }
+        const offer = await readOffer(req);
+        if (session.slots[side] !== slot || slot.viewOffer) {
+          return respond(res,409,{error:'Camera connection changed.'});
+        }
+        slot.viewOffer = true;
+        slot.viewer = viewer;
+        const answer = await rtc.view(slot.rtcID,viewer,offer).finally(() => { slot.viewOffer = false; });
+        if (answer && session.slots[side] === slot && slot.viewer === viewer) return respond(res,200,answer);
+        if (session.slots[side] === slot && slot.viewer === viewer) {
+          slot.viewer = undefined;
+          await rtc.closeView(slot.rtcID,viewer);
+        }
+        return respond(res,503,{error:'Live video is unavailable.'});
       }
       if (route === '/api/frame' && ['PUT','DELETE'].includes(method)) {
         const entry = phones.get(token);
@@ -214,8 +350,8 @@ function createServer(options = {}) {
         if (!session) return respond(res, 401, {error:'Camera session ended. Pair again.'});
         const slot = session.slots[entry.slot];
         if (method === 'DELETE') {
+          resetSource(session,entry.slot);
           session.slots[entry.slot] = {};
-          session.alerts = session.alerts.filter(alert => alert.kind !== 'path_intrusion');
           phones.delete(token);
           return res.writeHead(204).end();
         }
@@ -223,6 +359,7 @@ function createServer(options = {}) {
         if (type !== 'image/jpeg' && type !== 'image/png') return respond(res, 400, {error:'Expected a JPEG or PNG frame.'});
         const frame = await read(req, type === 'image/png' ? 12 * 1024 * 1024 : 350_000);
         if (session.slots[entry.slot] !== slot) return respond(res, 401, {error:'Camera was replaced. Pair again.'});
+        if (slot.rtcID) return respond(res,409,{error:'Close WebRTC before uploading images.'});
         if (type === 'image/png') {
           if (frame.length < 45 || !frame.subarray(0,8).equals(PNG_SIGNATURE) ||
               frame.readUInt32BE(8) !== 13 || frame.toString('ascii',12,16) !== 'IHDR' ||
@@ -245,11 +382,7 @@ function createServer(options = {}) {
         slot.sample = Number.isSafeInteger(sample) && Math.abs(slot.stamp-sample) < FRESH &&
           Number.isSafeInteger(uncertainty) && uncertainty >= 0 && uncertainty <= 250
           ? {ms:sample, error:uncertainty} : null;
-        if (entry.slot === 'B' && slot.sample) {
-          slot.history ||= [];
-          slot.history.push({id:slot.etag.slice(1,-1), frame, frameType:type, stamp:slot.stamp, sample:slot.sample});
-          slot.history.splice(0, Math.max(0,slot.history.length - (type === 'image/png' ? 3 : 6)));
-        }
+        if (entry.slot === 'B') rememberRight(slot);
         res.setHeader('X-Server-Ms', slot.stamp);
         return res.writeHead(204).end();
       }
@@ -269,8 +402,8 @@ function createServer(options = {}) {
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
         const recentDetection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
-        const analysisDelayed = recentDetection && slot.frame !== recentDetection.frame &&
-          now - recentDetection.timestamp_ms > PREVIEW_MAX_ANALYSIS_LAG_MS;
+        const expires = (recentDetection?.capture_ms ?? recentDetection?.timestamp_ms) + PREVIEW_MAX_ANALYSIS_LAG_MS;
+        const analysisDelayed = recentDetection && now >= expires;
         const detection = analysisDelayed ? null : recentDetection;
         const partner = detection?.stereoPartner;
         const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
@@ -296,6 +429,8 @@ function createServer(options = {}) {
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           depth_rig:[session.slots.A.streamID,session.slots.B.streamID].join("/"),
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
+          ...(detection ? {analysis_expires_ms:expires, preview_objects:detection.previewObjects} : {}),
+          ...(slot.rtcStats ? {webrtc:slot.rtcStats} : {}),
           ...(format === 'image/png' ? {png:frame.toString('base64')} : {jpeg:frame.toString('base64')}), objects,
           ...(detection?.road_edge && (!lostPartner || detection.road_edge.distance_m === undefined) ? {road_edge:detection.road_edge} : {}),
           ...(analysisDelayed ? {analysis_delayed:true} : {}),
@@ -331,6 +466,7 @@ function createServer(options = {}) {
   const server = options.tls ? https.createServer(options.tls, handler) : http.createServer(handler);
   server.once('close', assistant.close);
   server.once('close', usb.close);
+  if (rtc) server.once('close', () => rtc.close());
   return server;
 }
 
@@ -350,7 +486,13 @@ async function main(args) {
   const next = require('next');
   const app = next({dev, dir:__dirname, hostname:host, port});
   await app.prepare();
-  const server = createServer({tls,phoneOrigin,frontend:app.getRequestHandler()});
+  const rtcPython = process.env.VISIONASSIST_RTC_PYTHON;
+  const rtc = rtcPython && createRtcBridge(rtcPython);
+  if (rtc) {
+    await rtc.waitForStartup();
+    if (!rtc.ready) console.warn('WebRTC receiver unavailable. Camera uploads will use JPEG.');
+  }
+  const server = createServer({tls,phoneOrigin,frontend:app.getRequestHandler(),rtc});
   server.listen(port, host, () => {
     const actualPort = server.address().port;
     console.log(tls ? 'Use the HTTPS hostname covered by your certificate, on port ' + actualPort + ', for both entries.'
