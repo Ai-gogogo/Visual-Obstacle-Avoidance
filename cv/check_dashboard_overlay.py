@@ -49,6 +49,8 @@ def check_dual_views(page, host, desktop, model, screenshots):
             http.put(host + "/api/frame", headers={**headers[side], **timing},
                      data=cv2.imencode(".jpg", image)[1].tobytes(), timeout=3).raise_for_status()
 
+        with page.expect_response(lambda r: "/api/preview/A" in r.url and '"meters":true' in r.request.headers.get("x-depth-options","")):
+            page.locator("#depth-meters").check()
         stamp = int(time.time() * 1000)
         upload("B", right, stamp)
         upload("A", left, stamp)

@@ -62,9 +62,9 @@ function createAgentRoutes(options, sessions, read, respond) {
       slot.cvFrames ||= new Map();
       for (const [id, item] of slot.cvFrames) if (!recent(item)) slot.cvFrames.delete(id);
       const id = slot.etag.slice(1,-1);
-      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,stamp:slot.stamp,sample:slot.sample});
-      while (slot.cvFrames.size > 8) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
-      return res.writeHead(200,{'Content-Type':'image/jpeg',ETag:slot.etag,
+      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,frameType:slot.frameType,stamp:slot.stamp,sample:slot.sample});
+      while (slot.cvFrames.size > (slot.frameType === 'image/png' ? 3 : 8)) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
+      return res.writeHead(200,{'Content-Type':slot.frameType,ETag:slot.etag,
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
     if (route === '/api/cv/stereo-partner' && req.method === 'GET' && camera === 'A') {
@@ -83,8 +83,17 @@ function createAgentRoutes(options, sessions, read, respond) {
         }
       }
       if (!best) return res.writeHead(204).end();
-      left.partner = {id:best.id, stream:right.streamID, stamp:best.stamp};
-      return res.writeHead(200,{'Content-Type':'image/jpeg', 'X-Partner-Id':best.id}).end(best.frame);
+      const opt = session.depthOptions;
+      if (opt) {
+        res.setHeader('X-Depth-Spatial',Number(opt.spatial));
+        res.setHeader('X-Depth-Temporal',Number(opt.temporal));
+        res.setHeader('X-Depth-Meters',Number(opt.meters));
+        res.setHeader('X-Depth-Five-Mm',opt.fiveMm);
+        res.setHeader('X-Depth-Rig',slot.streamID+'/'+right.streamID);
+        res.setHeader('X-Depth-Stamp',left.stamp);
+      }
+      left.partner = {depthOptions:opt, id:best.id, stream:right.streamID, stamp:best.stamp};
+      return res.writeHead(200,{'Content-Type':best.frameType, 'X-Partner-Id':best.id}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
     return error(res,404,'Unknown CV route.');
@@ -109,7 +118,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (slot.detection?.frame_id === payload.frame_id) return res.writeHead(204).end();
       slot.detection = {
         schema_version:DETECTION_SCHEMA_VERSION, camera_id:camera, frame_id:payload.frame_id,
-        timestamp_ms:captured.stamp, objects, frame:captured.frame
+        timestamp_ms:captured.stamp, objects, frame:captured.frame, frameType:captured.frameType
       };
       const partner = captured.partner;
       if (camera === 'A' && payload.stereo) {
@@ -126,6 +135,8 @@ function createAgentRoutes(options, sessions, read, respond) {
         if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
           slot.detection.stereoPartner = partner;
           slot.detection.depthPreview = preview;
+          const center = payload.stereo.center_m;
+          if (Number.isFinite(center) && center>0) slot.detection.centerM = center;
           const range = payload.stereo.range_m;
           if (Array.isArray(range) && range.length === 2 && range.every(Number.isFinite) &&
               range[0] > 0 && range[0] < range[1]) slot.detection.depthRange = range;

@@ -17,6 +17,7 @@ import numpy as np
 import requests
 from PIL import Image, ImageOps
 
+from depth_filters import spatial_depth, StaticMedian
 from detect_image import DEFAULT_WEIGHTS, detect
 from item_features import item_features
 from obstacles import is_obstacle_candidate
@@ -37,6 +38,7 @@ class CameraWorker:
         self.etags = {}
         self.trackers = {}
         self.risk_assessments = {}
+        self.temporal = {}
         self.pending = {}  # Preserve the exact payload when a POST acknowledgment is lost.
         self.ids = count(1)
 
@@ -45,7 +47,7 @@ class CameraWorker:
         sources.raise_for_status()
         active = {s["source_id"]: s.get("frame_id") for s in sources.json()["sources"]
                   if s["camera_id"] == self.side}
-        for cache in (self.etags, self.trackers, self.risk_assessments, self.pending):
+        for cache in (self.etags, self.trackers, self.risk_assessments, self.pending, self.temporal):
             for source in cache.keys() - active.keys():
                 del cache[source]
         for source, frame_id in active.items():
@@ -128,22 +130,49 @@ class CameraWorker:
         right = cv2.imdecode(np.frombuffer(partner.content, np.uint8), cv2.IMREAD_GRAYSCALE)
         if right is None or right.shape != self.stereo.size[::-1]:
             return {"status": "size_mismatch"}
-        depth = self.stereo.compute(np.asarray(image.convert("L")), right)
-        for obj in payload["objects"]:
-            z = object_depth(depth, obj["bbox"])
-            if z is not None:
-                obj["depth_m"] = z
+        gray = np.asarray(image.convert("L"))
+        depth = self.stereo.compute(gray, right)
+        options = partner.headers
+        source = params["source_id"]
+        meters = options.get("X-Depth-Meters", "1") == "1"
+        if self.stereo.square_units:
+            five_mm = float(options.get("X-Depth-Five-Mm", 0))
+            scale_m = five_mm / 5000 if np.isfinite(five_mm) and five_mm > 0 else None
+        else:
+            scale_m = 1.
+        metric = meters and scale_m is not None
+        if metric:
+            for obj in payload["objects"]:
+                z = object_depth(depth, obj["bbox"])
+                if z is not None:
+                    obj["depth_m"] = z * scale_m
+        display = depth
+        spatial = options.get("X-Depth-Spatial") == "1"
+        if spatial:
+            display = spatial_depth(depth, gray)
+        if options.get("X-Depth-Temporal") == "1":
+            key = (options.get("X-Depth-Rig"), spatial)
+            display = self.temporal.setdefault(source, StaticMedian()).apply(
+                key, int(options["X-Depth-Stamp"]), gray, display)
+        else:
+            self.temporal.pop(source, None)
         if not np.isfinite(depth).any():
             return {"status": "no_matches"}
-        preview = self.stereo.preview(depth)
+        preview = self.stereo.preview(display)
         scale = min(1, 240 / max(preview.shape))
         thumb = cv2.resize(preview, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
         ok, png = cv2.imencode(".png", thumb)
         if not ok:
             raise RuntimeError("Cannot encode depth preview")
-        return {"status": "ready", "partner_id": partner.headers["X-Partner-Id"],
-                "preview": base64.b64encode(png).decode("ascii"),
-                "range_m": [self.stereo.min_m, self.stereo.max_m]}
+        result = {"status": "ready", "partner_id": options["X-Partner-Id"],
+                  "preview": base64.b64encode(png).decode("ascii")}
+        if metric:
+            result["range_m"] = [self.stereo.min_m*scale_m, self.stereo.max_m*scale_m]
+            # Report only original observations. Filters never create a metric reading.
+            point = depth[depth.shape[0]//2, depth.shape[1]//2]
+            if np.isfinite(point):
+                result["center_m"] = float(point)*scale_m
+        return result
 
 
 # Existing single-camera callers can keep their original constructor.

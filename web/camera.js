@@ -4,14 +4,29 @@ const video = document.querySelector('#local-camera');
 const codeField = document.querySelector('#code');
 const status = document.querySelector('#phone-status');
 const connect = document.querySelector('#connect');
+const quality = document.querySelector('#camera-quality');
 const canvas = document.createElement('canvas');
 const context = canvas.getContext('2d');
 const lensStatus = document.querySelector('#lens-status');
+const invitation = new URLSearchParams(location.hash.slice(1));
+const pairingCode = invitation.get('code');
+if (/^\d{6}$/.test(pairingCode || '')) {
+  codeField.value = pairingCode;
+  const side = invitation.get('side');
+  if (side === 'A' || side === 'B') {
+    document.querySelector('.phone-card h1').textContent = 'Pair Camera '+side;
+    document.querySelector('.phone-card > p').textContent = 'Tap Connect camera to use this phone.';
+  }
+  history.replaceState(null,'',location.pathname + location.search);
+}
 let stream;
 let token;
 let timer;
 let run = 0;
 let clock;
+let lensDescription = '';
+let originalPixels = false;
+let retryDelayMs = 500;
 
 // Estimate server time on the phone's monotonic clock. Retain the lowest RTT
 // sample for one minute, and account for uncertainty when pairing the views.
@@ -27,6 +42,7 @@ function updateClock(response, sent, received) {
 function stop(message = '') {
   run += 1;
   clock = undefined;
+  retryDelayMs = 500;
   clearTimeout(timer);
   const previousToken = token;
   token = undefined;
@@ -50,31 +66,69 @@ function nextFrame(currentRun) {
   }
 }
 
+function retryFrame(currentRun, message) {
+  if (run !== currentRun) return;
+  lensStatus.textContent = message+' Retrying automatically…';
+  // Capture a new frame after the delay so stale images cannot enter a stereo pair.
+  timer = setTimeout(() => nextFrame(currentRun),retryDelayMs);
+  retryDelayMs = Math.min(5000,retryDelayMs * 2);
+}
+
 async function upload(currentRun, sampleTime) {
   if (run !== currentRun) return;
   try {
     if (video.videoWidth && video.readyState >= 2) {
-      const scale = Math.min(1,640/Math.max(video.videoWidth,video.videoHeight));
-      canvas.width = Math.max(1,Math.round(video.videoWidth*scale));
-      canvas.height = Math.max(1,Math.round(video.videoHeight*scale));
+      const scale = originalPixels ? 1 : Math.min(1,640/Math.max(video.videoWidth,video.videoHeight));
+      const width = Math.max(1,Math.round(video.videoWidth*scale));
+      const height = Math.max(1,Math.round(video.videoHeight*scale));
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      const details = lensDescription + ' · ' + video.videoWidth + ' × ' + video.videoHeight +
+        ' px camera · ' + width + ' × ' + height + ' px ' + (originalPixels ? 'lossless PNG' : 'JPEG upload');
+      if (lensStatus.textContent !== details) lensStatus.textContent = details;
       context.drawImage(video,0,0,canvas.width,canvas.height);
       const timing = {};
       if (clock && Number.isFinite(sampleTime)) {
         timing['X-Sample-Ms'] = String(Math.round(sampleTime + clock.offset));
         timing['X-Clock-Error-Ms'] = String(clock.error + Math.ceil(Math.abs(sampleTime-clock.at) * .0001));
       }
-      const jpeg = await new Promise(resolve => canvas.toBlob(resolve,'image/jpeg',.7));
+      const type = originalPixels ? 'image/png' : 'image/jpeg';
+      const frame = await new Promise(resolve => canvas.toBlob(resolve,type,originalPixels ? undefined : .7));
       if (run !== currentRun) return;
-      if (!jpeg) throw new Error('Unable to read the camera frame.');
+      if (!frame || frame.type !== type) throw new Error('Unable to encode the camera frame.');
+      if (originalPixels && frame.size > 12 * 1024 * 1024) throw new Error('PNG exceeds 12 MiB. Reconnect using Standard mode.');
       const sent = performance.now();
-      const response = await fetch('/api/frame', {method:'PUT', headers:{Authorization:'Bearer '+token,'Content-Type':'image/jpeg', ...timing}, body:jpeg, signal:AbortSignal.timeout(4500)});
+      let response;
+      try {
+        response = await fetch('/api/frame', {method:'PUT', headers:{Authorization:'Bearer '+token,'Content-Type':type, ...timing}, body:frame, signal:AbortSignal.timeout(4500)});
+      } catch {
+        return retryFrame(currentRun,'Frame upload interrupted.');
+      }
       if (run !== currentRun) return;
-      updateClock(response, sent, performance.now());
-      if (!response.ok) throw new Error('Camera connection ended. Enter a new code to reconnect.');
+      if (response.status === 408 || response.status === 429 || response.status >= 500)
+        return retryFrame(currentRun,'Frame upload temporarily unavailable.');
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error || 'Camera connection ended. Enter a new code to reconnect.');
+      }
+      if (originalPixels && (!clock || sent-clock.at > 60000)) {
+        // Use a small clock request to avoid timing the entire PNG upload.
+        const start = performance.now();
+        let reply;
+        try {
+          reply = await fetch('/camera',{cache:'no-store',signal:AbortSignal.timeout(2500)});
+        } catch {
+          return retryFrame(currentRun,'Camera clock check interrupted.');
+        }
+        if (!reply.ok) return retryFrame(currentRun,'Camera clock check unavailable.');
+        if (run !== currentRun) return;
+        updateClock(reply,start,performance.now());
+      } else if (!originalPixels) updateClock(response, sent, performance.now());
+      retryDelayMs = 500;
     }
     if (run === currentRun) {
       // Aim both phones at the same server-clock tick, then take the next video frame.
-      const period = 220;
+      const period = originalPixels ? 1000 : 220;
       const delay = clock && video.requestVideoFrameCallback
         ? period - ((performance.now()+clock.offset) % period) : period;
       timer = setTimeout(() => nextFrame(currentRun),delay);
@@ -86,7 +140,8 @@ async function upload(currentRun, sampleTime) {
 
 // An ultrawide physical lens can report 1× relative to itself.
 async function openWideCamera(devices) {
-  const open = video => devices.getUserMedia({video,audio:false});
+  const resolution = originalPixels ? {width:{ideal:1920},height:{ideal:1080}} : {};
+  const open = video => devices.getUserMedia({video:{...resolution,...video},audio:false});
   const rear = {facingMode:{ideal:'environment'}};
   const ultra = label => /ultra[ -]?wide|超广角|超廣角/i.test(label) &&
     !/front|user.facing|前置/i.test(label);
@@ -133,6 +188,7 @@ form.addEventListener('submit', async event => {
   }
   if (connect.disabled) return;
   const currentRun = ++run;
+  originalPixels = quality.value === 'png';
   connect.disabled = true;
   status.textContent = 'Allow camera access to connect.';
   try {
@@ -154,6 +210,7 @@ form.addEventListener('submit', async event => {
     video.srcObject = stream;
     video.hidden = false;
     card.hidden = true;
+    lensDescription = description;
     lensStatus.textContent = description;
     lensStatus.hidden = false;
     await video.play();

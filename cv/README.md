@@ -222,24 +222,52 @@ worker processed the frame and found no objects.
 
 只有卷尺时，可以通过下面的工具估计其余参数。先按上文 Setup 安装依赖，启动 Web 服务，用同一个 Dashboard 配对两台手机并保持上传。实机通过 HTTPS 连接。若使用相机专用的 HTTPS 反向代理，它须转发上传请求头 `X-Sample-Ms`、`X-Clock-Error-Ms` 和响应头 `X-Server-Ms`；缺少这些时间信息时只能等待配对帧。命令里的 `--server` 与 worker 一样指向服务器本机地址。采集标定数据可以在 YOLO 启动前完成。
 
-1. 打印平整棋盘格，量出**单个方格边长**。例如 10×7 个方格有 **9×6 个内角点**。固定两台手机，每次同时看见完整棋盘。采集约 15–25 个姿态，改变棋盘的倾角、方向、距离和在画面中的位置，按回车采集时保持棋盘静止。
-2. 运行下面的采集和求解命令。把示例的内角点数和 `25` 毫米换成实物的值。求解会输出重投影 RMS（像素）、基线（米），并将参数写入指定文件。基线应与实测镜头间距相符。RMS 明显超过约 1 像素时，检查棋盘尺寸、镜头设置、图像清晰度和姿态覆盖。
-
-
-For manual capture from Chrome, pair both cameras and open **Stereo calibration**.
-Hold the 10 × 7 square checkerboard still until both views show green corners.
-Press **Capture Stereo Pair** or Space for each new pose. Pairs are stored under
-`.visionassist/calibration/<batch>/` in the project. Pass that batch directory to
-`solve --pairs` below. Re-pairing a camera starts a new batch. The desktop server
-uses the CV virtual environment or the interpreter set in `VISIONASSIST_CV_PYTHON`.
+1. 固定两台手机，在 Chrome 打开 **Stereo calibration**。以普通 10 × 7 格棋盘为例，量好单格边长，确认 A、B 预览中都出现完整绿点。点击 **Record Stereo Video**，移动棋盘并在不同姿势停稳，结束后点击 **Stop Recording → Upload Recording**。
+2. 将下面的 `single.webm` 和单格边长替换为实际录像和实测值。求解输出重投影 RMS（像素）和基线（米）。用尺量的镜头间距核对基线。桌面服务使用 CV 环境或 `VISIONASSIST_CV_PYTHON` 指定的 Python。
 
 ```sh
-python cv/calibrate_stereo.py capture --server https://localhost:8765 --pairs /tmp/rig-pairs
-python cv/calibrate_stereo.py solve --pairs /tmp/rig-pairs --corners 9 6 --square-mm 25 --output cv/stereo_config.json
+python cv/calibrate_stereo.py solve --video single.webm --square-mm 14.6 --output cv/stereo_config.json
 python cv/live_camera.py --server https://localhost:8765
 ```
 
 打开 Dashboard 的 live 模式查看 A 的深度图和 **Forward depth (A)** 列。程序用浏览器视频帧时间和通过 HTTP 估计的服务器时钟配对，优先使用可用的捕获时间，否则使用呈现时间。需要支持 `requestVideoFrameCallback` 的浏览器。手机之间没有硬件快门同步，曝光和呈现之间的差异、运动、反光、低纹理或遮挡都可能增加误差。先用带纹理的静止平面在卷尺量好的几个前向距离验证，例如从 A 镜头沿光轴放在 1、2、3 米处，记录每处误差和缺测比例，再评估移动场景。缺少匹配的 B 帧时，A 的 YOLO 检测继续运行。
+
+### 单面和三面怎样对照
+
+固定 A 在左、B 在右，全程保持两台设备、镜头和分辨率不变。在 Chrome 的 **Stereo calibration → Calibration target** 选目标。单面用现有 10 × 7 格普通棋盘。三面用菜单内 PDF 的 front、right、top 三张带编号的 ChArUco 棋盘，各占一面。三面预览仅标出左右相机能按编号配对的角点。每个有效姿势至少包含两个共同可见的面，每面至少有六个不共线分布的共同角点。整组要覆盖三个面。
+
+用 **Record Stereo Video → Stop Recording → Upload Recording** 保存到本机，保存后的路径含有模式名。录像没有固定时限，达到姿势目标后点 Stop Recording。单段编码数据累计到 60 MiB 时会停录，给最后一块数据留出空间。若最终文件超过服务器的 64 MiB 上传上限，点 Download full WebM 保存整段。录制时会在后台检查刚写到录像画布的 A/B 原图。`Valid pairs` 是在已检查的同步画面对中，两路都满足当前棋盘识别条件的数量。`Distinct steady poses` 在连续识别且角点稳定至少 0.3 秒后计数，重复姿势只算一次。等待检测的画面对显示为 Checking；过载或检测失败显示为 Unchecked。停止后会继续查完已排队的帧。建议每个姿势停约 2 秒，覆盖中央、边缘、不同距离和倾角。单段标定建议达到 20 个不同稳定姿势和 60 对有效画面；三面模式还需覆盖所有面。另录的留出验算视频建议 8–10 个不同的新姿势。在线计数基于编码前的画面，离线求解按视频时间戳约每 0.3 秒取样、检测和去重，低帧率视频逐帧检查。
+
+三面纸盒按直角建模，选硬、平整的三个相邻面。用新图覆盖原正面棋盘。正面和右面的印刷上边朝盒顶，顶面的印刷上边朝盒背，各图边缘与盒棱平行。复制 `cv/box-layout.example.json` 后，逐面填写横向五格的实测毫米数，并核对竖向五格相同。另量下面两段间距，均从**黑白格外沿**量到盒棱，单位为毫米。
+
+| 纸面 | horizontal_gap_mm | vertical_gap_mm |
+| --- | --- | --- |
+| front 正面 | 格子右沿到右棱 | 格子上沿到顶棱 |
+| right 右面 | 格子左沿到前棱 | 格子上沿到顶棱 |
+| top 顶面 | 格子右沿到右棱 | 格子下沿到前棱 |
+
+在仓库根目录运行下面的命令，将录像路径和量好的 JSON 换成实际文件。单面的 `14.6` mm 是本次实测五格 73.0 mm 除以五。也可用 `--pairs` 代替 `--video` 读取保存的照片批次。默认将米制配置放在输入文件或批次旁边，并在文件名中保留模式。
+
+```sh
+python cv/calibrate_stereo.py solve --mode single --video single.webm --square-mm 14.6
+python cv/calibrate_stereo.py solve --mode three --video three.webm --layout measured-box.json
+python cv/calibrate_stereo.py compare --video held-out.webm --configs single-single-config.json three-three-config.json
+```
+
+`held-out.webm` 是固定同一机位后另录的普通单面棋盘（可在贴三面图前录），含多个新姿势。比较命令在同一批留出角点上报告两套配置的上下偏差中位数和 P95。杯身高度另用同一段桌面录像和留出的桌面纸验证。
+
+### 深度图边缘复核（2026-11-20）
+
+SGBM 在计算代价时延伸搜索边界，再检查每个左右匹配的 5 × 5 窗口是否都在真实有效像素内。左右一致性、纹理和距离筛选继续生效。边缘遮挡、反光和无纹理处仍可能缺测。
+
+对照基线为 `f54a96e` 的匹配算法。使用 `36ad570e/relative-preview.json`，在相同录像、相同帧上计算原始有效像素占整幅图的比例，关闭 WLS 和时间滤波。
+
+| 录像 | 抽样 | 原覆盖率均值 | 新覆盖率均值 |
+| --- | --- | ---: | ---: |
+| 棋盘 36ad570e | 归档 held-corners.csv 中的 18 帧 | 6.53% | 10.55% |
+| 纸杯 d8be72ae | 第 25 至 375 帧，每 25 帧取一对，共 15 帧 | 2.56% | 4.98% |
+
+在 18 帧留出的棋盘角点处，将可用深度转换为校正后的水平视差，与独立检测到的左右角点横坐标差核对。旧版 528 个可用角点中有 396 个误差 ≤2 px，新版 553 个中有 418 个。26 个从无测量变为有测量的角点中，22 个在 2 px 内。纸杯录像复用原桌面掩码、拟合随机种子与留区阈值，仍为 0/15 帧通过。该结果仅支持边缘可用范围改善。
 
 ### 导出逐像素深度图
 
@@ -250,3 +278,31 @@ python cv/stereo_depth.py path/to/A.jpg path/to/B.jpg --config cv/stereo_config.
 ```
 
 `depth_m.npy` 保存与 A 图像同尺寸的 float32 米制深度，缺测像素为 NaN。`depth_preview.png` 适合目视查看。Dashboard 为节约带宽显示缩略图，物体读数使用全分辨率深度图。
+
+## 车行道与人行道语义分割
+
+移植自 `cv` 分支的 `d064052`。在 CV 虚拟环境安装本目录 requirements，然后从仓库根目录下载、核验权重：
+
+```sh
+mkdir -p cv/models
+curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-512-1024/resolve/18b12204d4c787afb8df24e49efc36a20d9f16d0/onnx/model.onnx -o cv/models/road-segformer-b0.onnx
+echo 'ffd5ceb33f7c7a969bc69d3ad7ab06017de15c42085e7ed10be8ed8d23b10fec  cv/models/road-segformer-b0.onnx' | shasum -a 256 -c -
+python -m unittest discover -s cv -p test_road_edge.py -v
+```
+
+在能导入 `cv/` 下模块的 Python 进程中，加载一次模型，然后对 Camera A 的 RGB 帧调用：
+
+```python
+from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
+
+estimator = RoadEdge.load(DEFAULT_ROAD_CONFIG, stereo=None)
+road, sidewalk = estimator.segment(image.convert("RGB"), estimator.confidence)
+```
+
+两个布尔掩膜与输入图像同尺寸。现有实时深度预览独立运行。若使用路沿距离估计，传入的双目深度必须以米为单位；以棋盘格为单位的实验配置只用于相对深度预览。
+
+### 可选深度滤波与米数
+
+Chrome 实时深度图提供三个独立开关，初始均关闭。Edge-aware filter 在逆深度图上以左图灰度引导加权最小二乘平滑，仅插补至少有三个相容邻点的小孔。Temporal median 使用同一对摄像头近期的三帧，在局部亮度和深度均稳定时取中值。滤波影响预览；距离只取原始有效双目观测。黑色表示当前仍未知。
+
+Show meters 显示相对于 Camera A 光轴的前向距离。若标定 JSON 带有 `"units":"checker_squares_only"`，在页面输入同一张棋盘连续五格的**实测总毫米数**，转换系数为该数除以 5000。未量格长时保持空白。公制标定直接使用米。对准中心圆圈可读该点的距离；目标框内的距离沿用项目的可靠深度聚合。没有足够观测时显示未知。输入的尺度适用于当前页面会话；更换镜头、机位或标定后请重新核对。

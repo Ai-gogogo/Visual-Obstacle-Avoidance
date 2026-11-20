@@ -47,6 +47,18 @@ class StereoTests(unittest.TestCase):
         self.assertIsNone(object_depth(depth, [.3, .15, .7, .85]))
         self.assertTrue(np.isnan(depth[:, :10]).all())
 
+    def test_small_disparities_near_both_image_edges(self):
+        config = configuration()
+        depth = StereoDepth(config).compute(*plane(config, 2.0))
+        # Ground-truth disparity is 12 px. Both edge strips have real matches,
+        # even though a full search of 32 disparities does not fit there.
+        for edge in (depth[20:-20, 19:29], depth[20:-20, -16:-6]):
+            valid = edge[np.isfinite(edge)]
+            self.assertGreater(valid.size, .8 * edge.size)
+            self.assertLess(np.percentile(np.abs(valid - 2.0), 95), .08)
+        self.assertTrue(np.isnan(depth[:, :2]).all())
+        self.assertTrue(np.isnan(depth[:, -2:]).all())
+
     def test_rotated_rig_different_intrinsics_and_raw_a_boxes(self):
         config = configuration()
         config["rotation_A_to_B"] = cv2.Rodrigues(np.array([.01, .035, -.016]))[0].tolist()
@@ -145,9 +157,27 @@ class LiveStereoTests(unittest.TestCase):
         self.assertNotIn("depth_preview", old_phone)
         upload(a, left[:100], now)
         self.assertEqual(read()["stereo_status"], "size_mismatch")
-        pair("B")
+        b = pair("B")
         upload(a, left, now)
         self.assertEqual(read()["stereo_status"], "waiting_for_pair")
+
+        # A calibration solved in grid units needs a measured scale even with meters enabled.
+        worker.stereo.square_units = True
+        for tick, (meters, width, expected) in enumerate([(True,0,None),(True,125,.05),(False,125,None)]):
+            prefs = dict(spatial=True,temporal=True,meters=meters,fiveMm=width)
+            request("GET", "/api/preview/A", desk, headers={"X-Depth-Options":json.dumps(prefs)})
+            stamp = int(time.time()*1000)+tick
+            upload(b, right, stamp)
+            upload(a, left, stamp)
+            snap = read()
+            self.assertEqual(snap["stereo_status"],"ready")
+            self.assertEqual(snap["depth_options"],prefs)
+            if expected is None:
+                self.assertNotIn("depth_m",snap["objects"][0])
+                self.assertNotIn("center_m",snap)
+            else:
+                self.assertAlmostEqual(snap["objects"][0]["depth_m"],expected,delta=.002)
+                self.assertAlmostEqual(snap["center_m"],expected,delta=.002)
 
         get = http.get
 

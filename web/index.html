@@ -6,6 +6,8 @@
   <title>VisionAssist</title>
   <link rel="stylesheet" href="ui.css">
   <script src="desktop.js" defer></script>
+  <script src="calibration-quality.js" defer></script>
+  <script src="stereo-video.js" defer></script>
   <script src="calibration.js" defer></script>
 </head>
 <body>
@@ -37,8 +39,19 @@
           <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
         </article>
         <article class="feed" id="stereo-view" hidden>
-          <header><h2>Stereo depth map</h2></header>
-          <div class="frame"><canvas id="stereo-map" class="live-frame" role="img" aria-label="Stereo depth aligned to Camera A" hidden></canvas><p id="stereo-caption" class="no-feed"></p></div>
+          <header><h2>Stereo depth map</h2><label>Palette <select id="depth-palette">
+            <option value="turbo" selected>Turbo</option><option value="gray">Grayscale</option><option value="viridis">Viridis</option>
+          </select></label></header>
+          <div class="frame"><canvas id="stereo-map" class="live-frame" role="img" aria-label="Stereo depth aligned to Camera A" hidden></canvas><span id="depth-reticle" aria-hidden="true" hidden></span><p id="stereo-caption" class="no-feed"></p></div>
+          <div class="depth-controls">
+            <label><input type="checkbox" id="depth-spatial"> Edge-aware filter (WLS)</label>
+            <label><input type="checkbox" id="depth-temporal"> Temporal median</label>
+            <label><input type="checkbox" id="depth-meters"> Show meters</label>
+            <label id="depth-length-label" hidden>Width of 5 printed squares (mm)
+              <input type="number" id="depth-five-mm" min="0" step="any" inputmode="decimal">
+            </label>
+            <span id="depth-reading" role="status"></span>
+          </div>
           <footer>Camera A + B <span id="depth-scale"></span></footer>
         </article>
       </div>
@@ -109,20 +122,37 @@
   <dialog id="pair-dialog" aria-labelledby="pair-title">
     <form method="dialog"><button class="quiet dialog-close" aria-label="Close pairing dialog">Close</button></form>
     <h2 id="pair-title">Pair a phone</h2>
-    <p>Open the camera site on the phone and enter the code for the camera slot you want.</p>
-    <p id="phone-address" class="address"></p>
+    <p>Choose a camera, then scan its QR code with the phone.</p>
+    <p id="phone-address" class="address" hidden></p>
     <div class="pair-options">
-      <button type="button" class="primary" data-pair="A">Code for Camera A</button>
-      <button type="button" class="primary" data-pair="B">Code for Camera B</button>
+      <button type="button" class="primary" data-pair="A">Pair Camera A</button>
+      <button type="button" class="primary" data-pair="B">Pair Camera B</button>
     </div>
     <div id="pair-result" role="status"></div>
   </dialog>
 <dialog id="calibration-dialog" aria-labelledby="cal-title">
     <h2 id="cal-title" tabindex="-1" autofocus>Stereo calibration</h2>
-    <p>Keep both cameras fixed. Hold the board still, then capture with the button or Space.</p>
+    <label for="cal-mode">Calibration target</label>
+    <select id="cal-mode">
+      <option value="single">Single face · ordinary checkerboard</option>
+      <option value="three">Three faces · coded box</option>
+    </select>
+    <p id="cal-target-tip">Show the complete 10 × 7 checkerboard to both cameras.</p>
+    <p id="cal-box-print" hidden><a href="/box-targets.pdf" target="_blank" rel="noopener">Print the three coded faces (PDF)</a></p>
+    <p>Keep both cameras fixed. During recording, hold each board pose steady for about two seconds.</p>
     <div class="feed-grid"><div>Camera A<canvas aria-label="Camera A checkerboard"></canvas></div><div>Camera B<canvas aria-label="Camera B checkerboard"></canvas></div></div>
-    <p id="cal-status" role="status"></p><p id="cal-count"></p>
-    <button class="primary" id="cal-save" disabled>Capture Stereo Pair</button>
+    <p id="cal-status" role="status"></p>
+    <button class="primary" id="cal-record">Record Stereo Video</button>
+    <button class="primary" id="cal-upload" hidden>Upload Recording</button>
+    <a id="cal-download" download hidden>Download full WebM</a>
+    <button class="quiet" id="cal-discard" hidden>Discard &amp; Retake</button>
+    <div id="cal-saved" hidden>
+      <label for="cal-takes">Saved recordings in this session</label>
+      <select id="cal-takes"></select>
+      <button class="quiet" id="cal-delete">Delete selected recording</button>
+    </div>
+    <p id="video-quality" hidden></p>
+    <p id="video-status" role="status"></p>
     <button class="quiet" id="cal-close">Close</button>
   </dialog>
 </body>

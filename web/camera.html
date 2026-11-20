@@ -16,6 +16,12 @@
       <form id="phone-form">
         <label for="code">Pairing code</label>
         <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="000 000" maxlength="8" required aria-describedby="phone-status">
+        <label for="camera-quality">Upload quality</label>
+        <select id="camera-quality" aria-describedby="camera-quality-note">
+          <option value="jpeg">Standard · JPEG, up to 640 px</option>
+          <option value="png">Original pixels · lossless PNG</option>
+        </select>
+        <p id="camera-quality-note">For stereo, choose the same mode on both phones and calibrate at that size.</p>
         <button class="primary" id="connect">Connect camera</button>
       </form>
       <p id="phone-status" role="status"></p>

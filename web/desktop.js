@@ -56,7 +56,7 @@ function trackedLabel(object) {
 
 function renderDetections() {
   const stereo = !sampleMode && !$('#stereo-view').hidden;
-  $('#metric-heading').hidden = !stereo;
+  $('#metric-heading').hidden = !stereo || !$('#depth-meters').checked;
   const list = sampleMode ? sample : feeds.flatMap(feed =>
     (feed.objects ?? []).map(object => ({...object, camera:feed.side})));
   const waiting = !sampleMode && feeds.every(feed => feed.objects == null);
@@ -65,7 +65,7 @@ function renderDetections() {
     const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
     const cells = [trackedLabel(object), 'Camera ' + object.camera, value, object.position];
     if (!sampleMode) cells.push(object.relative_depth ?? 'unknown');
-    if (stereo) cells.push(Number.isFinite(object.depth_m) ? object.depth_m.toFixed(2) + ' m' : '—');
+    if (stereo && $('#depth-meters').checked) cells.push(Number.isFinite(object.depth_m) ? object.depth_m.toFixed(2) + ' m' : '—');
     for (const text of cells) {
       const cell = document.createElement('td');
       cell.textContent = text;
@@ -84,7 +84,33 @@ function renderDetections() {
     'No objects detected in the processed views.';
 }
 
+// The worker encodes finite depths as 32 (far) through 255 (near); zero is unknown.
+function depthColors(stops) {
+  const colors = stops.split(' ').map(hex => [0,2,4].map(i => parseInt(hex.slice(i,i+2),16)));
+  const lut = new Uint8ClampedArray(256*3);
+  for (let gray=1; gray<=255; gray++) {
+    const t = Math.max(0,(gray-32)/223)*(colors.length-1);
+    const lo = Math.floor(t), hi = Math.min(lo+1,colors.length-1);
+    for (let c=0;c<3;c++) lut[gray*3+c] = colors[lo][c]+(colors[hi][c]-colors[lo][c])*(t-lo);
+  }
+  return lut;
+}
+const depthPalettes = {
+  turbo:depthColors('30123b 4040a2 466be3 4294ff 28bceb 18ddc2 32f298 6dfe62 a4fc3c cbed34 ecd13a fdae35 fb8122 ec530f d23105 ac1701 7a0403'),
+  viridis:depthColors('440154 48186a 472d7b 424086 3b528b 33638d 2c728e 26828e 21918c 1f9f88 27ad81 3dbc74 5cc863 81d34d aadc32 d5e21a fde725')
+};
+function depthOptions() {
+  return {spatial:$('#depth-spatial').checked, temporal:$('#depth-temporal').checked,
+    meters:$('#depth-meters').checked, fiveMm:Math.max(0,$('#depth-five-mm').valueAsNumber || 0)};
+}
+
+let lastDepthFrame;
+$('#depth-palette').addEventListener('change',() => {
+  if (lastDepthFrame) showDepth(lastDepthFrame.snapshot,lastDepthFrame.preview);
+});
+
 function showDepth(snapshot, preview) {
+  lastDepthFrame = preview ? {snapshot,preview} : null;
   const status = snapshot?.stereo_status ?? (snapshot?.objects ? 'uncalibrated' : 'waiting_for_a');
   const messages = {
     waiting_for_a:'Waiting for a processed Camera A frame.',
@@ -99,17 +125,45 @@ function showDepth(snapshot, preview) {
   canvas.hidden = !preview;
   $('#stereo-caption').hidden = Boolean(preview);
   const [near, far] = snapshot?.depth_range_m ?? [];
+  const palette = $('#depth-palette').value;
+  const [nearColor,farColor] = {gray:['bright','dark'],turbo:['red','purple'],viridis:['yellow','purple']}[palette];
+  const opt = depthOptions();
+  $('#depth-length-label').hidden = !opt.meters;
+  $('#depth-reading').textContent = !opt.meters ? '' : near
+    ? (Number.isFinite(snapshot.center_m) ? 'Center: '+snapshot.center_m.toFixed(2)+' m' : 'Center: no reliable depth')
+    : opt.fiveMm ? 'Waiting for measured depth…' : 'For checkerboard calibration, enter the measured width of five squares.';
+  $('#depth-reticle').hidden = !(opt.meters && near && preview);
+  const range = opt.meters && near ? ' ('+near+' m to '+far+' m)' : '';
   $('#depth-scale').textContent = preview
-    ? (near ? 'Bright ' + near + ' m · dark ' + far + ' m' : 'Near is bright, far is dark') + ' · black is unknown'
-    : '';
+    ? 'Near: '+nearColor+' · far: '+farColor+range+' · black is unknown' : '';
   if (preview) {
-    canvas.width = preview.naturalWidth;
-    canvas.height = preview.naturalHeight;
-    canvas.getContext('2d').drawImage(preview, 0, 0);
+    if (canvas.width !== preview.naturalWidth) canvas.width = preview.naturalWidth;
+    if (canvas.height !== preview.naturalHeight) canvas.height = preview.naturalHeight;
+    const ctx = canvas.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(preview,0,0);
+    const lut = depthPalettes[palette];
+    if (lut) {
+      const frame = ctx.getImageData(0,0,canvas.width,canvas.height);
+      for (let i=0;i<frame.data.length;i+=4) {
+        const index = frame.data[i]*3;
+        frame.data[i] = lut[index];
+        frame.data[i+1] = lut[index+1];
+        frame.data[i+2] = lut[index+2];
+      }
+      ctx.putImageData(frame,0,0);
+    }
     canvas.dataset.frameId = snapshot.frame_id;
   } else {
     delete canvas.dataset.frameId;
   }
+}
+
+for (const id of ['depth-spatial','depth-temporal','depth-meters','depth-five-mm']) {
+  $('#'+id).addEventListener('change',() => {
+    $('#depth-length-label').hidden = !$('#depth-meters').checked;
+    refreshPolling();
+    renderDetections();
+  });
 }
 
 function paintCamera(canvas, image, snapshot) {
@@ -127,7 +181,7 @@ function paintCamera(canvas, image, snapshot) {
     ctx.strokeStyle = '#8ce9ff';
     ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
     const caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
-      (Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
+      ($('#depth-meters').checked && Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
     const labelWidth = Math.min(width, Math.ceil(ctx.measureText(caption).width) + 8);
     const left = Math.min(x, width-labelWidth);
     const top = Math.max(0, y-fontSize-6);
@@ -182,6 +236,7 @@ async function readFrame(feed, version) {
   if (!token) return;
   try {
     const headers = {Authorization:'Bearer '+token};
+    if (feed.side === 'A') headers['X-Depth-Options'] = JSON.stringify(depthOptions());
     if (feed.etag) headers['If-None-Match'] = feed.etag;
     const path = '/api/preview/' + feed.side;
     const response = await fetch(path, {headers, signal:AbortSignal.timeout(3000)});
@@ -196,11 +251,16 @@ async function readFrame(feed, version) {
       throw new Error('Preview camera does not match the requested feed.');
     }
     const image = new Image();
-    image.src = 'data:image/jpeg;base64,' + snapshot.jpeg;
+    image.src = snapshot.png ? 'data:image/png;base64,' + snapshot.png : 'data:image/jpeg;base64,' + snapshot.jpeg;
     const depth = snapshot.depth_preview ? new Image() : null;
     if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
     await Promise.all([image.decode(), depth?.decode()]);
     if (version !== pollVersion) return;
+    if (snapshot.depth_options && JSON.stringify(snapshot.depth_options) !== JSON.stringify(depthOptions())) {
+      delete snapshot.depth_range_m;
+      delete snapshot.center_m;
+      for (const obj of snapshot.objects || []) delete obj.depth_m;
+    }
     paintCamera(feed.node.querySelector('canvas'), image, snapshot);
     feed.etag = response.headers.get('etag');
     feed.objects = snapshot.objects;
@@ -919,9 +979,7 @@ async function pollAlerts() {
 const dialog = $('#pair-dialog');
 const pairButtons = [...document.querySelectorAll('[data-pair]')];
 $('#pair').addEventListener('click', () => {
-  $('#phone-address').textContent = location.protocol === 'file:'
-    ? 'Start the local server to enable pairing. See README.md.'
-    : new URL('/camera',location.href).href;
+  $('#phone-address').hidden = true;
   $('#pair-result').textContent = '';
   dialog.showModal();
 });
@@ -929,7 +987,8 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
   const version = ++pairingVersion;
   const result = $('#pair-result');
   pairButtons.forEach(control => { control.disabled = true; });
-  result.textContent = 'Generating code…';
+  $('#phone-address').hidden = true;
+  result.textContent = 'Generating pairing code…';
   try {
     if (location.protocol === 'file:') throw new Error('Start the local server before generating a pairing code.');
     const side = button.dataset.pair;
@@ -945,6 +1004,18 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
     code.className = 'pair-code';
     code.textContent = codeResponse.code.replace(/^(...)/,'$1 ');
     result.replaceChildren('Camera '+side+' · expires in five minutes',code);
+    const address = $('#phone-address');
+    if (codeResponse.qrImage) {
+      const qr = document.createElement('img');
+      qr.className = 'pair-qr';
+      qr.alt = 'Scan to pair Camera '+side;
+      qr.src = codeResponse.qrImage;
+      result.prepend(qr);
+      address.textContent = 'Manual entry: '+codeResponse.cameraUrl;
+    } else {
+      address.textContent = 'Enter this code on the phone’s camera page. For QR pairing, configure the phone HTTPS address.';
+    }
+    address.hidden = false;
     if (sampleMode) renderMode(false);
     else refreshPolling();
   } catch (error) {

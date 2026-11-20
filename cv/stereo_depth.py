@@ -34,6 +34,7 @@ class StereoDepth:
         return cls(config) if config["enabled"] else None
 
     def __init__(self, config):
+        self.square_units = config.get("units") == "checker_squares_only"
         width, height = config["image_size_px"]
         count = config["num_disparities"]
         if (type(width) is not int or type(height) is not int or min(width, height) < 16
@@ -46,6 +47,7 @@ class StereoDepth:
         if not (0 < self.min_m < self.max_m and baseline > 0 and type(self.skew_ms) is int and 0 < self.skew_ms <= 250):
             raise ValueError("Check metric range, positive baseline and max_pair_skew_ms (1–250)")
         ka, da = camera_parameters(config["camera_A"])
+        self.camera_a = ka, da
         kb, db = camera_parameters(config["camera_B"])
         rotation = array(config["rotation_A_to_B"], (3, 3), "rotation_A_to_B")
         direction = array(config["translation_direction_A_to_B"], (3,), "translation_direction_A_to_B")
@@ -67,11 +69,16 @@ class StereoDepth:
         self.z_scale = (ra[0, 2] * (x-pa[0, 2]) / pa[0, 0] + ra[1, 2] * (y-pa[1, 2]) / pa[1, 1] + ra[2, 2])
         self.cols = x
         self.rows = np.arange(height)[:, None]
-        self.roi = np.zeros((height, width), bool)
-        rx, ry, rw, rh = cv2.getValidDisparityROI(roi_a, roi_b, 0, count, 5)
-        self.roi[ry:ry+rh, rx:rx+rw] = True
-        if not self.roi.any():
+        # A 5 x 5 matching window must be entirely inside each rectified camera.
+        # Bounds include a two-pixel margin around its center in each image.
+        self.window_bounds = [(x+2, y+2, x+w-3, y+h-3) for x, y, w, h in (roi_a, roi_b)]
+        for xmin, ymin, xmax, ymax in self.window_bounds:
+            if xmin > xmax or ymin > ymax:
+                raise ValueError("Calibration leaves no valid matching window")
+        (ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1) = self.window_bounds
+        if max(ay0, by0) > min(ay1, by1) or ax1 <= bx0 or ax0 - bx1 >= count:
             raise ValueError("Calibration leaves no shared disparity region")
+        self.left_support = (x >= ax0) & (x <= ax1) & (y >= max(ay0, by0)) & (y <= min(ay1, by1))
         self.num_disparities = count
         self.matchers = [cv2.StereoSGBM_create(minDisparity=start, numDisparities=count,
                          blockSize=5, P1=8*25, P2=32*25, uniquenessRatio=12,
@@ -83,13 +90,27 @@ class StereoDepth:
         if any(image.shape != self.size[::-1] or image.dtype != np.uint8 for image in (left, right)):
             raise ValueError(f"Both grayscale inputs must match calibrated size {self.size}")
         a, b = [cv2.remap(image, *maps, cv2.INTER_LINEAR) for image, maps in zip((left, right), self.maps)]
-        disp = self.matchers[0].compute(a, b).astype(np.float32) / 16
-        reverse = self.matchers[1].compute(b, a).astype(np.float32) / 16
-        bx = np.rint(self.cols - disp).astype(np.int32)
+        # SGBM skips an entire disparity range at its search border. Extend that
+        # border for the cost computation, then reject matches touching padding.
+        n = self.num_disparities
+        def match_disparity(matcher, first, second, pad_left, pad_right):
+            first = cv2.copyMakeBorder(first, 0, 0, pad_left, pad_right, cv2.BORDER_REPLICATE)
+            second = cv2.copyMakeBorder(second, 0, 0, pad_left, pad_right, cv2.BORDER_REPLICATE)
+            values = matcher.compute(first, second)[:, pad_left:pad_left+self.size[0]]
+            return values.astype(np.float32) / 16
+
+        disp = match_disparity(self.matchers[0], a, b, n, 0)
+        reverse = match_disparity(self.matchers[1], b, a, 0, n)
+        right_x = self.cols - disp
+        bx = np.rint(right_x).astype(np.int32)
         match = reverse[self.rows, bx.clip(0, self.size[0]-1)]
+        ax0, _, ax1, _ = self.window_bounds[0]
+        bx0, _, bx1, _ = self.window_bounds[1]
+        support = (self.left_support & (right_x >= bx0) & (right_x <= bx1)
+                   & (bx - match >= ax0) & (bx - match <= ax1))
         gray = a.astype(np.float32)
         variance = cv2.blur(gray*gray, (5, 5)) - cv2.blur(gray, (5, 5))**2
-        valid = (self.roi & (disp > 0) & (bx >= 0) & (bx < self.size[0]) & (match < 0)
+        valid = (support & (disp > 0) & (match < 0)
                  & (match > -self.num_disparities) & (np.abs(disp + match) <= 1) & (variance > 9))
         z = np.full(disp.shape, np.nan, np.float32)
         np.divide(self.fb * self.z_scale, disp, out=z, where=valid)
