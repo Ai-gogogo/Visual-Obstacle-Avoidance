@@ -4,6 +4,7 @@ const { randomBytes, randomInt } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { createAgentRoutes, DETECTION_SCHEMA_VERSION } = require('../llm/agent-routes.cjs');
+const {PREVIEW_MAX_ANALYSIS_LAG_MS} = require('../llm/agent.cjs');
 
 const files = {
   '/': ['index.html','text/html; charset=utf-8'],
@@ -20,7 +21,8 @@ const files = {
 const TTL = 4 * 60 * 60 * 1000;
 const CODE_TTL = 5 * 60 * 1000;
 const FRESH = 5000;
-const PREVIEW_MAX_ANALYSIS_LAG_MS = 750;
+const PNG_SIGNATURE = Buffer.from([137,80,78,71,13,10,26,10]);
+const PNG_END = Buffer.from([0,0,0,0,73,69,78,68,174,66,96,130]);
 const key = () => randomBytes(24).toString('hex');
 
 function respond(res, status, payload) {
@@ -56,6 +58,7 @@ function createServer(options = {}) {
       const [filename, type] = files[route];
       try {
         const content = readFileSync(join(__dirname,filename));
+        if (filename === 'camera.html') res.setHeader('X-Server-Ms', Date.now());
         res.writeHead(200, {'Content-Type':type});
         return res.end(content);
       } catch { return respond(res, 404, {error:'File not found.'}); }
@@ -126,12 +129,25 @@ function createServer(options = {}) {
           phones.delete(token);
           return res.writeHead(204).end();
         }
-        const frame = await read(req, 350_000);
+        const type = req.headers['content-type'];
+        if (type !== 'image/jpeg' && type !== 'image/png') return respond(res, 400, {error:'Expected a JPEG or PNG frame.'});
+        const frame = await read(req, type === 'image/png' ? 12 * 1024 * 1024 : 350_000);
         if (session.slots[entry.slot] !== slot) return respond(res, 401, {error:'Camera was replaced. Pair again.'});
-        if (req.headers['content-type'] !== 'image/jpeg' || frame.length < 4 || frame.readUInt16BE() !== 0xffd8 || frame.readUInt16BE(frame.length-2) !== 0xffd9) {
+        if (type === 'image/png') {
+          if (frame.length < 45 || !frame.subarray(0,8).equals(PNG_SIGNATURE) ||
+              frame.readUInt32BE(8) !== 13 || frame.toString('ascii',12,16) !== 'IHDR' ||
+              !frame.subarray(-12).equals(PNG_END)) {
+            return respond(res, 400, {error:'Expected a valid PNG frame.'});
+          }
+          const width = frame.readUInt32BE(16), height = frame.readUInt32BE(20);
+          if (!width || !height || Math.max(width,height) > 4096 || width*height > 3840*2160) {
+            return respond(res, 400, {error:'Original PNG is too large. Reconnect using Standard mode.'});
+          }
+        } else if (frame.length < 4 || frame.readUInt16BE() !== 0xffd8 || frame.readUInt16BE(frame.length-2) !== 0xffd9) {
           return respond(res, 400, {error:'Expected a JPEG frame.'});
         }
         slot.frame = frame;
+        slot.frameType = type;
         slot.stamp = Date.now();
         slot.etag = '"' + key() + '"';
         const sample = Number(req.headers['x-sample-ms']);
@@ -141,8 +157,8 @@ function createServer(options = {}) {
           ? {ms:sample, error:uncertainty} : null;
         if (entry.slot === 'B' && slot.sample) {
           slot.history ||= [];
-          slot.history.push({id:slot.etag.slice(1,-1), frame, stamp:slot.stamp, sample:slot.sample});
-          if (slot.history.length > 6) slot.history.shift();
+          slot.history.push({id:slot.etag.slice(1,-1), frame, frameType:type, stamp:slot.stamp, sample:slot.sample});
+          slot.history.splice(0, Math.max(0,slot.history.length - (type === 'image/png' ? 3 : 6)));
         }
         res.setHeader('X-Server-Ms', slot.stamp);
         return res.writeHead(204).end();
@@ -163,6 +179,7 @@ function createServer(options = {}) {
         const partner = detection?.stereoPartner;
         const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
         const frame = detection?.frame ?? slot.frame;
+        const format = detection?.frameType ?? slot.frameType;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
         // A raw preview can acquire boxes without the camera uploading a new JPEG.
         const activeForecasts = [];
@@ -182,11 +199,14 @@ function createServer(options = {}) {
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
-          jpeg:frame.toString('base64'), objects,
+          ...(format === 'image/png' ? {png:frame.toString('base64')} : {jpeg:frame.toString('base64')}), objects,
           ...(detection?.road_edge && (!lostPartner || detection.road_edge.distance_m === undefined) ? {road_edge:detection.road_edge} : {}),
           ...(analysisDelayed ? {analysis_delayed:true} : {}),
           ...(detection?.stereoStatus ? {stereo_status:lostPartner ? 'waiting_for_pair' : detection.stereoStatus} : {}),
-          ...(!lostPartner && detection?.depthPreview ? {depth_preview:detection.depthPreview, depth_range_m:detection.depthRange} : {})
+          ...(!lostPartner && detection?.depthPreview ? {
+            depth_preview:detection.depthPreview, depth_range_m:detection.depthRange,
+            depth_valid_fraction:detection.depthValidFraction
+          } : {})
         });
       }
       if (method === 'POST' && action === 'pair') {
@@ -202,7 +222,7 @@ function createServer(options = {}) {
           return res.writeHead(204).end();
         }
         if (req.headers['if-none-match'] === slot.etag) return res.writeHead(304).end();
-        return res.writeHead(200, {'Content-Type':'image/jpeg', ETag:slot.etag}).end(slot.frame);
+        return res.writeHead(200, {'Content-Type':slot.frameType, ETag:slot.etag}).end(slot.frame);
       }
       return respond(res, 405, {error:'Method unavailable.'});
     } catch (error) {
