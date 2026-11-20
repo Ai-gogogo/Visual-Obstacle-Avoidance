@@ -114,7 +114,10 @@ function paintCamera(canvas, image, snapshot) {
     const x = x1 * width, y = y1 * height;
     ctx.strokeStyle = '#8ce9ff';
     ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
-    const caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position;
+    let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position;
+    if (object.intrusion && object.intrusion.expires > Date.now()) {
+      caption += ' · may cross from '+object.intrusion.from_side+' (~'+object.intrusion.eta_s.toFixed(1)+' s)';
+    }
     const labelWidth = Math.min(width, Math.ceil(ctx.measureText(caption).width) + 8);
     const left = Math.min(x, width-labelWidth);
     const top = Math.max(0, y-fontSize-6);
@@ -122,6 +125,14 @@ function paintCamera(canvas, image, snapshot) {
     ctx.fillRect(left, top, labelWidth, fontSize+6);
     ctx.fillStyle = '#102031';
     ctx.fillText(caption, left+4, top+2, Math.max(1,labelWidth-8));
+  }
+  const edge = snapshot.road_edge;
+  if (edge?.point) {
+    const [u,v] = edge.point;
+    ctx.strokeStyle = '#ffd44c';
+    ctx.beginPath();
+    ctx.arc(u*width,v*height,Math.max(5,width/65),0,2*Math.PI);
+    ctx.stroke();
   }
   canvas.dataset.frameId = snapshot.frame_id;
 }
@@ -191,6 +202,11 @@ async function readFrame(feed, version) {
     feed.objects = snapshot.objects;
     if (feed.side === 'A') showDepth(snapshot);
     setFeed(feed,true);
+    if (snapshot.road_edge?.point) {
+      const meters = snapshot.road_edge.distance_m;
+      feed.node.querySelector('.feed-summary').textContent = Number.isFinite(meters)
+        ? 'Road edge ahead · '+meters.toFixed(1)+' m' : 'Possible road ahead · distance unavailable';
+    }
     renderDetections();
   } catch {
     if (version !== pollVersion) return;
@@ -841,6 +857,7 @@ async function loadPreferences() {
   form.querySelector('button').disabled = false;
 }
 
+let pendingRoadAlert;
 async function pollAlerts() {
   try {
     const allowReminder = currentPage === 'assist';
@@ -849,16 +866,25 @@ async function pollAlerts() {
     if (reminder && allowReminder) pendingReminder = {text:reminder,until:Date.now()+15_000};
     if (!allowReminder || pendingReminder?.until < Date.now()) pendingReminder = undefined;
     alertSequence = sequence;
-    const warning = alerts.findLast(alert => alert.risk === 'urgent') || alerts.at(-1);
+    const road = alerts.filter(alert => alert.kind === 'road_edge').at(-1);
+    if (road) pendingRoadAlert = road;
+    if (pendingRoadAlert && Date.now()-pendingRoadAlert.stamp >= 5000) pendingRoadAlert = undefined;
+    const intrusion = alerts.filter(alert => alert.kind === 'path_intrusion' && alert.expires > Date.now())
+      .sort((a,b) => a.expires-b.expires)[0];
+    const others = alerts.filter(alert => alert.kind !== 'road_edge' && alert.kind !== 'path_intrusion');
+    const warning = pendingRoadAlert?.risk === 'urgent' ? pendingRoadAlert :
+      others.findLast(alert => alert.risk === 'urgent') || intrusion || pendingRoadAlert || others.at(-1);
     if (warning && (Date.now() >= warningUntil ||
-        (warning.risk === 'urgent' && activeWarningRisk !== 'urgent'))) {
+        ((warning.risk === 'urgent' || warning.kind === 'path_intrusion') && activeWarningRisk !== 'urgent'))) {
       activeWarningRisk = warning.risk;
+      if (warning === pendingRoadAlert) pendingRoadAlert = undefined;
+      const text = transcriptionLanguage() === 'zh' && warning.text_zh ? warning.text_zh : warning.text;
       interruptTurn();
       warningUntil = Date.now()+3000;
-      $('#obstacle-alert').textContent = warning.text;
-      speakLocal(warning.text,true);
+      $('#obstacle-alert').textContent = text;
+      speakLocal(text,true);
       setTimeout(() => {
-        if ($('#obstacle-alert').textContent === warning.text && Date.now() >= warningUntil) $('#obstacle-alert').textContent = '';
+        if ($('#obstacle-alert').textContent === text && Date.now() >= warningUntil) $('#obstacle-alert').textContent = '';
       },3400);
     } else if (pendingReminder && currentPage === 'assist' && !pendingTurn &&
         !speech && !reviewing && !confirmation && !voiceSession?.segment?.onset && Date.now() >= warningUntil) {
@@ -870,7 +896,10 @@ async function pollAlerts() {
     }
   } catch (error) {
     if (error.status === 403 || location.protocol === 'file:') return;
-    if (error.status === 401) alertSequence = 0;
+    if (error.status === 401) {
+      alertSequence = 0;
+      pendingRoadAlert = undefined;
+    }
   }
   setTimeout(pollAlerts,450);
 }

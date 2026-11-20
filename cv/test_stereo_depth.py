@@ -11,6 +11,7 @@ import numpy as np
 import requests
 
 from live_camera import CameraWorker
+from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
 
 
@@ -106,6 +107,9 @@ class LiveStereoTests(unittest.TestCase):
         config = configuration()
         left, right = plane(config, 2)
         worker = CameraWorker(base, None, http, stereo=StereoDepth(config))
+        road_mask = np.indices(left.shape)[0] < 140
+        worker.road = RoadEdge(json.loads(DEFAULT_ROAD_CONFIG.read_text()), worker.stereo,
+                               lambda image, confidence: (road_mask, ~road_mask))
 
         def upload(phone, image, stamp):
             headers = {"Content-Type": "image/jpeg"}
@@ -131,10 +135,22 @@ class LiveStereoTests(unittest.TestCase):
         self.assertAlmostEqual(measured["objects"][0]["depth_m"], 2, delta=.05)
         png = np.frombuffer(base64.b64decode(measured["depth_preview"]), np.uint8)
         self.assertGreater(cv2.imdecode(png, cv2.IMREAD_GRAYSCALE).max(), 0)
+        self.assertEqual(measured["road_edge"]["level"], "urgent")
+        self.assertAlmostEqual(measured["road_edge"]["distance_m"], 2, delta=.05)
+        time.sleep(.01)
+        upload(a, left, now+8)
+        read()
+        worker.poll()  # An unchanged JPEG must not generate a second road alert.
+        alerts = request("GET", "/api/agent/alerts", desk).json()["alerts"]
+        road_alerts = [alert for alert in alerts if alert.get("kind") == "road_edge"]
+        self.assertEqual(len(road_alerts), 1)
+        self.assertEqual(road_alerts[0]["risk"], "urgent")
         upload(a, left, None)
         old_phone = read()
         self.assertNotIn("depth_m", old_phone["objects"][0])
         self.assertNotIn("depth_preview", old_phone)
+        self.assertEqual(old_phone["road_edge"]["level"], "visual")
+        self.assertNotIn("distance_m", old_phone["road_edge"])
         upload(a, left[:100], now)
         self.assertEqual(read()["stereo_status"], "size_mismatch")
         pair("B")

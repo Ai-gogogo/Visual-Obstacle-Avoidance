@@ -96,6 +96,7 @@ function createServer(options = {}) {
         phones.delete(slot.phone);
         const phone = key();
         session.slots[entry.slot] = {phone, streamID:key(), stamp:0};
+        session.alerts = session.alerts.filter(alert => alert.kind !== 'path_intrusion');
         phones.set(phone, {session:entry.session, slot:entry.slot});
         attempts.delete(ip);
         res.setHeader('X-Server-Ms', Date.now());
@@ -108,6 +109,7 @@ function createServer(options = {}) {
         const slot = session.slots[entry.slot];
         if (method === 'DELETE') {
           session.slots[entry.slot] = {};
+          session.alerts = session.alerts.filter(alert => alert.kind !== 'path_intrusion');
           phones.delete(token);
           return res.writeHead(204).end();
         }
@@ -145,14 +147,23 @@ function createServer(options = {}) {
         const frame = detection?.frame ?? slot.frame;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
         // A raw preview can acquire boxes without the camera uploading a new JPEG.
-        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + '"';
+        const activeForecasts = [];
+        const objects = detection?.objects.map(({item_feature, intrusion, ...object}, i) => {
+          if (intrusion && intrusion.expires > now && detection.partnerStream === session.slots.B.streamID) {
+            object.intrusion = intrusion;
+            activeForecasts.push(i);
+          }
+          return object;
+        }) ?? null;
+        const forecastTag = activeForecasts.length ? '-cross-' + activeForecasts.join('-') : '';
+        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + forecastTag + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
-        const objects = detection?.objects.map(({item_feature, ...object}) => object) ?? null;
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
           jpeg:frame.toString('base64'), objects,
+          ...(detection?.road_edge ? {road_edge:detection.road_edge} : {}),
           ...(detection?.stereoStatus ? {stereo_status:detection.stereoStatus} : {}),
           ...(detection?.depthPreview ? {depth_preview:detection.depthPreview} : {})
         });

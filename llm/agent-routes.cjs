@@ -1,9 +1,13 @@
 const {createAgent, MAX_FRAME_AGE} = require('./agent.cjs');
+const {acceptRoadEdge} = require('./road-alerts.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
 const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 const DETECTION_SCHEMA_VERSION = 1;
+const movingLabels = new Map(Object.entries({
+  person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
+}));
 
 
 function validItemFeature(feature) {
@@ -98,6 +102,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,stamp:slot.stamp,sample:slot.sample});
       while (slot.cvFrames.size > 8) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
       return res.writeHead(200,{'Content-Type':'image/jpeg',ETag:slot.etag,
+        ...(slot.sample ? {'X-CV-Sample-Ms':slot.sample.ms} : {}),
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
     if (route === '/api/cv/stereo-partner' && req.method === 'GET' && camera === 'A') {
@@ -117,7 +122,8 @@ function createAgentRoutes(options, sessions, read, respond) {
       }
       if (!best) return res.writeHead(204).end();
       left.partner = {id:best.id, stream:right.streamID, stamp:best.stamp};
-      return res.writeHead(200,{'Content-Type':'image/jpeg', 'X-Partner-Id':best.id}).end(best.frame);
+      return res.writeHead(200,{'Content-Type':'image/jpeg', 'X-Partner-Id':best.id,
+        'X-Partner-Stream':right.streamID}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
     return error(res,404,'Unknown CV route.');
@@ -149,11 +155,19 @@ function createAgentRoutes(options, sessions, read, respond) {
         slot.detection.stereoStatus = ['size_mismatch','no_matches'].includes(payload.stereo.status)
           ? payload.stereo.status : 'waiting_for_pair';
       }
-      if (camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
-          partner.stream === session.slots.B.streamID) {
+      const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
+          partner.stream === session.slots.B.streamID;
+      if (paired) {
         for (const [i, object] of objects.entries()) {
           const z = payload.objects[i].depth_m;
           if (Number.isFinite(z) && z > 0) object.depth_m = z;
+          const prediction = payload.objects[i].intrusion;
+          if (object.depth_m && object.track_id && movingLabels.has(object.label) && object.confidence >= .5 &&
+              ['left','right'].includes(prediction?.from_side) && Number.isFinite(prediction.eta_s) &&
+              prediction.eta_s > 0 && prediction.eta_s <= 3 && captured.sample) {
+            const expires = captured.sample.ms + Math.round(1000*prediction.eta_s) - captured.sample.error;
+            if (expires > Date.now()) object.intrusion = {from_side:prediction.from_side, eta_s:prediction.eta_s, expires};
+          }
         }
         const preview = payload.stereo.preview;
         if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
@@ -171,6 +185,21 @@ function createAgentRoutes(options, sessions, read, respond) {
         session.alertCooldown.set(id,now);
         session.alerts.push({id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,
           text:(obstacle.risk === 'urgent' ? 'Urgent. ' : 'Caution. ') + obstacle.label + ', Camera ' + camera + ', ' + obstacle.position + '.', stamp:captured.stamp});
+      }
+      if (camera === 'A') {
+        const warning = acceptRoadEdge(slot, payload.road_edge, captured.stamp, session.slots.B.streamID, paired);
+        if (warning) session.alerts.push({...warning,id:++session.alertSeq});
+        for (const obj of objects.filter(o => o.intrusion).sort((a,b) => a.intrusion.expires-b.intrusion.expires)) {
+          const side = obj.intrusion.from_side;
+          const id = ['intrusion',slot.streamID,partner.stream,obj.track_id,side].join(':');
+          if (session.alertCooldown.has(id)) continue;
+          session.alertCooldown.set(id,now);
+          session.alerts.push({kind:'path_intrusion', id:++session.alertSeq, camera_id:'A', risk:'caution',
+            stamp:captured.stamp, expires:obj.intrusion.expires, track_id:obj.track_id, from_side:side,
+            text:'Caution. A '+obj.label+' may cross your path from the '+side+'.',
+            text_zh:(side === 'left' ? '左侧' : '右侧')+movingLabels.get(obj.label)+'可能横穿前方，请小心。'});
+        }
+        if (paired) slot.detection.partnerStream = partner.stream;
       }
       session.alerts = session.alerts.slice(-20);
       // Measured on one clock, from server receipt of the JPEG to acceptance of CV results.
@@ -197,7 +226,14 @@ function createAgentRoutes(options, sessions, read, respond) {
       const after = Number(requestURL.searchParams.get('after') || 0);
       const remindersEnabled = requestURL.searchParams.get('reminders') === '1';
       const reminder = remindersEnabled ? agent.cameraReminder(session) : null;
-      return respond(res,200,{sequence:session.alertSeq, alerts:session.alerts.filter(alert => alert.id > after && recent(alert)), reminder});
+      const active = session.alerts.filter(alert => {
+        if (alert.id <= after || !recent(alert)) return false;
+        if (alert.kind !== 'path_intrusion') return true;
+        const scene = session.slots.A.detection;
+        return alert.expires > Date.now() && scene?.partnerStream === session.slots.B.streamID &&
+          scene?.objects.some(obj => obj.track_id === alert.track_id && obj.intrusion?.from_side === alert.from_side);
+      });
+      return respond(res,200,{sequence:session.alertSeq, alerts:active, reminder});
     }
     if (route === '/api/agent/preferences') {
       if (method === 'GET') return respond(res,200,agent.preferences());

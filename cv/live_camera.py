@@ -20,7 +20,9 @@ from PIL import Image, ImageOps
 from detect_image import DEFAULT_WEIGHTS, detect
 from item_features import item_features
 from obstacles import is_obstacle_candidate
+from path_intrusion import Corridor, IntrusionPredictor
 from risk import RiskAssessment
+from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from tracking import FrameTracker
 from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
 
@@ -29,10 +31,13 @@ class CameraWorker:
     def __init__(
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
-        item_encoder=None
+        item_encoder=None, road=None, corridor=None
     ):
         self.side = side
         self.stereo = stereo
+        self.road = road
+        self.corridor = corridor
+        self.intrusions = {}
         self.record = record
         self.api = server.rstrip("/") + "/api/cv"
         self.model = model
@@ -58,7 +63,7 @@ class CameraWorker:
         }
         for cache in (
             self.etags, self.trackers,
-            self.risk_assessments, self.pending
+            self.risk_assessments, self.intrusions, self.pending
         ):
             for source in cache.keys() - active.keys():
                 del cache[source]
@@ -108,11 +113,12 @@ class CameraWorker:
                 "objects": objects
             }
 
-            # Preserve stereo depth estimation.
-            if self.stereo is not None and self.side == "A":
-                payload["stereo"] = self.measure_depth(
-                    params, payload, image
-                )
+            depth = None
+            if self.side == "A":
+                if self.stereo is not None:
+                    payload["stereo"], depth = self.measure_depth(params, payload, image)
+                if self.road is not None:
+                    payload["road_edge"] = self.road(image, depth)
 
             stream = frame.headers.get("X-CV-Stream-Id")
             frame_stamp = frame.headers.get("X-CV-Frame-Ms")
@@ -126,6 +132,15 @@ class CameraWorker:
                     )
                     self.risk_assessments[source] = RiskAssessment()
                 tracker.update(objects, stamp)
+            right_stream = payload.get("stereo", {}).pop("partner_stream", None)
+            capture_ms = frame.headers.get("X-CV-Sample-Ms")
+            if self.corridor and depth is not None and stream and right_stream and capture_ms:
+                pair = stream, right_stream
+                if source not in self.intrusions or self.intrusions[source][0] != pair:
+                    self.intrusions[source] = pair, IntrusionPredictor(self.stereo.camera_a, self.corridor)
+                self.intrusions[source][1].update(np.asarray(image.convert("L")), depth, objects, int(capture_ms))
+            else:
+                self.intrusions.pop(source, None)
 
             for obj in objects:
                 obj["obstacle_candidate"] = is_obstacle_candidate(
@@ -201,7 +216,7 @@ class CameraWorker:
 
     def measure_depth(self, params, payload, image):
         if image.size != self.stereo.size:
-            return {"status": "size_mismatch"}
+            return {"status": "size_mismatch"}, None
 
         query = {
             **params,
@@ -214,7 +229,7 @@ class CameraWorker:
             timeout=3
         )
         if partner.status_code in (204, 404):
-            return {"status": "waiting_for_pair"}
+            return {"status": "waiting_for_pair"}, None
 
         partner.raise_for_status()
         right = cv2.imdecode(
@@ -222,7 +237,7 @@ class CameraWorker:
             cv2.IMREAD_GRAYSCALE
         )
         if right is None or right.shape != self.stereo.size[::-1]:
-            return {"status": "size_mismatch"}
+            return {"status": "size_mismatch"}, None
 
         depth = self.stereo.compute(
             np.asarray(image.convert("L")), right
@@ -233,7 +248,7 @@ class CameraWorker:
                 obj["depth_m"] = z
 
         if not np.isfinite(depth).any():
-            return {"status": "no_matches"}
+            return {"status": "no_matches"}, None
 
         preview = self.stereo.preview(depth)
         scale = min(1, 240 / max(preview.shape))
@@ -249,8 +264,9 @@ class CameraWorker:
         return {
             "status": "ready",
             "partner_id": partner.headers["X-Partner-Id"],
+            "partner_stream": partner.headers.get("X-Partner-Stream"),
             "preview": base64.b64encode(png).decode("ascii")
-        }
+        }, depth
 
 
 CameraAWorker = CameraWorker
@@ -355,6 +371,8 @@ def main():
         help="Personal item feature extractor"
     )
 
+    parser.add_argument("--road-alerts", action="store_true", help="Enable sidewalk-to-road warnings on Camera A")
+    parser.add_argument("--road-config", type=Path, default=DEFAULT_ROAD_CONFIG)
     inference_options(parser)
     args = parser.parse_args()
 
@@ -368,6 +386,12 @@ def main():
             f"Invalid stereo configuration "
             f"{args.stereo_config}: {error}"
         )
+
+    try:
+        corridor = Corridor.load(args.road_config) if stereo is not None else None
+        road = RoadEdge.load(args.road_config, stereo) if args.road_alerts else None
+    except (ImportError, KeyError, OSError, ValueError, TypeError, RuntimeError) as error:
+        parser.error(f"Invalid path warning configuration: {error}")
 
     if not args.weights.is_file():
         parser.error(
@@ -466,7 +490,9 @@ def main():
                 record,
                 stereo=stereo if side == "A" else None,
                 infer=infer,
-                item_encoder=item_encoder
+                item_encoder=item_encoder,
+                road=road if side == "A" else None,
+                corridor=corridor if side == "A" else None
             )
             for side, infer in zip("AB", predictors)
         ]
