@@ -1,5 +1,4 @@
-const VisionPerceptionView = (() => {
-  const $ = selector => document.querySelector(selector);
+export function createPerceptionView($) {
   const sample = [
     {label:'Chair', camera:'A', distance:1.4, position:'Center', box:[36,22,33,77]},
     {label:'Desk', camera:'A', distance:2.3, position:'Right', box:[78,32,22,65], align:'right'},
@@ -8,6 +7,7 @@ const VisionPerceptionView = (() => {
   ];
 
   function makeAnnotations(feeds) {
+    feeds.forEach(({node}) => node.querySelector('.overlays').replaceChildren());
     for (const object of sample) {
       const overlay = document.createElement('div');
       overlay.className = 'box';
@@ -130,4 +130,4 @@ const VisionPerceptionView = (() => {
   }
 
   return {makeAnnotations, renderDetections, showDepth, paintCamera};
-})();
+}

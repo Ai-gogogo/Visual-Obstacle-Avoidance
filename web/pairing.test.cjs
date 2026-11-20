@@ -17,9 +17,6 @@ test('desktop and two phones pair independently and stale frames are withheld', 
     assert.equal(response.status,status);
     return response.json();
   };
-  assert.match(await (await call('/')).text(),/Judge view/);
-  assert.match(await (await call('/camera')).text(),/Enter pairing code/);
-  assert.equal((await call('/demo-lab.webp')).headers.get('content-type'),'image/webp');
   assert.equal((await call('/api/frame/A')).status,401);
   assert.equal((await call('/api/session','POST',undefined,undefined,{Origin:'https://example.test'})).status,403);
 

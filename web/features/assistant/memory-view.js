@@ -1,10 +1,9 @@
-function createVisionMemoryView({agentRequest, loadPreferences}) {
-  const $ = selector => document.querySelector(selector);
+export function createVisionMemoryView({$, agentRequest, loadPreferences, accessibility, signal}) {
   const timestamp = value => new Date(value).toLocaleString();
   const observationText = ({time,camera,position}) =>
     timestamp(time)+' · Camera '+camera+' · '+position;
   const showError = error => {
-    $('#memory-status').textContent = VisionAccessibility.requestError(error,'Could not reach saved memory.');
+    $('#memory-status').textContent = accessibility.requestError(error,'Could not reach saved memory.');
   };
   let request = 0;
   async function refresh() {
@@ -16,7 +15,7 @@ function createVisionMemoryView({agentRequest, loadPreferences}) {
     $('#memory-status').textContent = 'Loading saved records…';
     try {
       const {records} = await agentRequest('/api/memory/'+kind,'GET');
-      if (version !== request || kind !== $('#memory-kind').value) return;
+      if (signal.aborted || version !== request || kind !== $('#memory-kind').value) return;
       $('#memory-status').textContent = '';
       const rows = records.map(record => {
         const row = document.createElement('li');
@@ -76,7 +75,7 @@ function createVisionMemoryView({agentRequest, loadPreferences}) {
           history.onclick = async () => {
             try {
               const {observations} = await agentRequest('/api/memory/items/'+record.id+'/history','GET');
-              if (version !== request) return;
+              if (signal.aborted || version !== request) return;
               const entries = observations.map(observationText);
               $('#memory-status').textContent = entries.length
                 ? 'Past possible matches for '+record.name+'. '+entries.join(' / ') : 'No observations saved.';

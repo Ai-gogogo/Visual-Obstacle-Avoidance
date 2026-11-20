@@ -2,31 +2,9 @@ const http = require('node:http');
 const https = require('node:https');
 const { randomBytes, randomInt } = require('node:crypto');
 const { readFileSync } = require('node:fs');
-const { join } = require('node:path');
 const { createAgentRoutes, DETECTION_SCHEMA_VERSION } = require('../llm/agent-routes.cjs');
 const {PREVIEW_MAX_ANALYSIS_LAG_MS} = require('../llm/agent.cjs');
 
-const files = {
-  '/': ['index.html','text/html; charset=utf-8'],
-  '/index.html': ['index.html','text/html; charset=utf-8'],
-  '/camera': ['camera.html','text/html; charset=utf-8'],
-  '/camera.html': ['camera.html','text/html; charset=utf-8'],
-  '/ui.css': ['ui.css','text/css; charset=utf-8'],
-  '/styles/tokens.css': ['styles/tokens.css','text/css; charset=utf-8'],
-  '/styles/components.css': ['styles/components.css','text/css; charset=utf-8'],
-  '/styles/features.css': ['styles/features.css','text/css; charset=utf-8'],
-  '/styles/layout.css': ['styles/layout.css','text/css; charset=utf-8'],
-  '/styles/motion.css': ['styles/motion.css','text/css; charset=utf-8'],
-  '/accessibility.js': ['accessibility.js','text/javascript; charset=utf-8'],
-  '/voice-view.js': ['voice-view.js','text/javascript; charset=utf-8'],
-  '/perception-view.js': ['perception-view.js','text/javascript; charset=utf-8'],
-  '/memory-view.js': ['memory-view.js','text/javascript; charset=utf-8'],
-  '/desktop.js': ['desktop.js','text/javascript; charset=utf-8'],
-  '/voice-capture.js': ['voice-capture.js','text/javascript; charset=utf-8'],
-  '/calibration.js': ['calibration.js','text/javascript; charset=utf-8'],
-  '/camera.js': ['camera.js','text/javascript; charset=utf-8'],
-  '/demo-lab.webp': ['demo-lab.webp','image/webp']
-};
 const TTL = 4 * 60 * 60 * 1000;
 const CODE_TTL = 5 * 60 * 1000;
 const FRESH = 5000;
@@ -56,22 +34,23 @@ function createServer(options = {}) {
   const attempts = new Map();
   const assistant = createAgentRoutes(options.agent, sessions, read, respond);
   const handler = async (req, res) => {
-    res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
     const route = new URL(req.url, 'http://localhost').pathname;
     const method = req.method;
     const now = Date.now();
     if (!route.startsWith('/api/')) {
-      if (!Object.hasOwn(files, route) || method !== 'GET') return respond(res, 404, {error:'Page not found.'});
-      const [filename, type] = files[route];
+      if (!options.frontend) return respond(res, 404, {error:'Page not found.'});
+      // Original-pixel uploads refresh their stereo clock from GET /camera.
+      if (route === '/camera') res.setHeader('X-Server-Ms', Date.now());
       try {
-        const content = readFileSync(join(__dirname,filename));
-        if (filename === 'camera.html') res.setHeader('X-Server-Ms', Date.now());
-        res.writeHead(200, {'Content-Type':type});
-        return res.end(content);
-      } catch { return respond(res, 404, {error:'File not found.'}); }
+        return await options.frontend(req,res);
+      } catch {
+        if (!res.headersSent) return respond(res, 500, {error:'Frontend unavailable.'});
+        return res.destroy();
+      }
     }
+    res.setHeader('Cache-Control','no-store');
     try {
       const origin = req.headers.origin;
       if (req.headers['sec-fetch-site'] === 'cross-site' || (origin && new URL(origin).host !== req.headers.host)) {
@@ -244,14 +223,27 @@ function createServer(options = {}) {
   return server;
 }
 
-if (require.main === module) {
-  const [cert, privateKey] = process.argv.slice(2);
+async function main(args) {
+  const dev = args.includes('--dev');
+  const [cert, privateKey] = args.filter(value => value !== '--dev');
   if (Boolean(cert) !== Boolean(privateKey)) throw new Error('Provide both the certificate and private-key paths, or neither.');
   const tls = cert ? {cert:readFileSync(cert), key:readFileSync(privateKey)} : undefined;
   const port = Number(process.env.VISIONASSIST_PORT || 8765);
-  createServer({tls}).listen(port, tls ? '0.0.0.0' : '127.0.0.1', () => {
-    console.log(tls ? 'Use the HTTPS hostname covered by your certificate, on port ' + port + ', for both entries.'
-      : 'Desktop: http://localhost:' + port + '/   Camera: http://localhost:' + port + '/camera');
+  const host = tls ? '0.0.0.0' : '127.0.0.1';
+  process.env.NODE_ENV = dev ? 'development' : 'production';
+  const next = require('next');
+  const app = next({dev, dir:__dirname, hostname:host, port});
+  await app.prepare();
+  const server = createServer({tls,frontend:app.getRequestHandler()});
+  server.listen(port, host, () => {
+    const actualPort = server.address().port;
+    console.log(tls ? 'Use the HTTPS hostname covered by your certificate, on port ' + actualPort + ', for both entries.'
+      : 'Desktop: http://localhost:' + actualPort + '/   Camera: http://localhost:' + actualPort + '/camera');
   });
 }
+
+if (require.main === module) main(process.argv.slice(2)).catch(error => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
 module.exports = {createServer};
