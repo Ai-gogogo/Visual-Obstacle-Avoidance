@@ -1,5 +1,6 @@
 """Local speech and image feature extraction for VisionAssist."""
 import base64
+from functools import lru_cache
 import io
 import json
 import os
@@ -14,19 +15,23 @@ from cv.item_features import item_features, unit
 MODELS = Path(os.environ.get("VISIONASSIST_MODELS", Path(__file__).parent / "models"))
 
 
-def transcribe(payload):
+@lru_cache(maxsize=1)
+def whisper_model():
     from faster_whisper import WhisperModel
 
-    audio = io.BytesIO(base64.b64decode(payload["audio"], validate=True))
     provisioned = next((MODELS / name for name in ("whisper-small", "whisper-base")
                         if (MODELS / name / "model.bin").is_file()), "base")
-    model = WhisperModel(
+    return WhisperModel(
         os.environ.get("VISIONASSIST_STT_MODEL", str(provisioned)),
         device="cpu",
         compute_type="int8",
         local_files_only=True,
     )
-    segments, info = model.transcribe(
+
+
+def transcribe(payload):
+    audio = io.BytesIO(base64.b64decode(payload["audio"], validate=True))
+    segments, info = whisper_model().transcribe(
         audio, language=payload.get("language"), beam_size=3,
         condition_on_previous_text=False, vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 250},
@@ -68,13 +73,21 @@ def export_conversation(payload):
 
 
 def synthesize(payload):
-    from piper import PiperVoice
+    from onnxruntime import InferenceSession, SessionOptions
+    from piper import PiperConfig, PiperVoice
 
     voice_path = {
         "zh": "zh/zh_CN/huayan/medium/zh_CN-huayan-medium.onnx",
         "en": "en/en_US/lessac/medium/en_US-lessac-medium.onnx",
     }[payload["language"]]
-    voice = PiperVoice.load(MODELS / "piper" / voice_path)
+    model_path = MODELS / "piper" / voice_path
+    with model_path.with_suffix(".onnx.json").open(encoding="utf-8") as config_file:
+        config = PiperConfig.from_dict(json.load(config_file))
+    # Limit the speech worker's CPU pool so it can run alongside CV.
+    options = SessionOptions()
+    options.intra_op_num_threads = 2
+    session = InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
+    voice = PiperVoice(session=session, config=config)
     audio = io.BytesIO()
     with wave.open(audio, "wb") as wav:
         voice.synthesize_wav(payload["text"], wav)
@@ -124,4 +137,12 @@ def main(mode, payload):
 
 
 if __name__ == "__main__":
-    print(json.dumps(main(sys.argv[1], json.load(sys.stdin)), ensure_ascii=False))
+    if sys.argv[1] == "stt-session":
+        for line in sys.stdin:
+            try:
+                result = transcribe(json.loads(line))
+            except Exception:
+                result = {"error": True}
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+    else:
+        print(json.dumps(main(sys.argv[1], json.load(sys.stdin)), ensure_ascii=False))

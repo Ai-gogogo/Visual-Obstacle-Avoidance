@@ -5,5 +5,11 @@
   "caution_m": 5.0,
   "urgent_m": 3.0,
   "rearm_margin_m": 0.6,
-  "min_confidence": 0.55
+  "min_confidence": 0.55,
+  "intrusion": {
+    "enabled": true,
+    "horizon_s": 2.0,
+    "max_forward_m": 6.0,
+    "max_turn_deg_s": 35.0
+  }
 }

@@ -1,6 +1,7 @@
 """Replay phone JPEGs against the real pairing, CV and Agent routes."""
 import base64
 import io
+import json
 import subprocess
 import sys
 import time
@@ -8,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import requests
 from PIL import Image
 from ultralytics import YOLO
@@ -15,6 +17,9 @@ from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
 from live_camera import CameraAWorker, CameraWorker
+from path_intrusion import Corridor
+from road_edge import DEFAULT_ROAD_CONFIG
+from stereo_depth import DEFAULT_CONFIG, StereoDepth
 
 
 def phone_jpeg(image):
@@ -313,6 +318,54 @@ class LiveCameraTests(unittest.TestCase):
         self.upload(phones["B"], frame_at(40))
         b_worker.poll()
         self.assertEqual(people("B")[0], b_ids)
+
+    def test_predict_crossing_before_entry_and_drop_alert_after_b_repair(self):
+        phones = {side: self.pair(side) for side in "AB"}
+        config = json.loads(DEFAULT_CONFIG.read_text())
+        camera = dict(fx=420, fy=420, cx=320, cy=180, distortion=[0]*5)
+        config.update(image_size_px=[640, 360], baseline_m=.12, camera_A=camera, camera_B=camera,
+                      rotation_A_to_B=np.eye(3).tolist(), translation_direction_A_to_B=[-1, 0, 0])
+        self.worker.stereo = StereoDepth(config)
+        self.worker.corridor = Corridor.load(DEFAULT_ROAD_CONFIG)
+        with Image.open(ASSETS / "bus.jpg") as photo:
+            person = photo.crop((44, 390, 244, 907)).resize((76, 197))
+        rng = np.random.default_rng(449)
+        wall = Image.fromarray(rng.integers(100, 205, (360, 640), dtype=np.uint8)).convert("RGB")
+        predictions = []
+        for x in range(467, 385, -13):
+            left = wall.copy()
+            left.paste(person, (x, 92))
+            right = Image.new("RGB", left.size)
+            right.paste(left, (-12, 0))  # Uniform known disparity (4.2 m).
+            stamp = int(time.time()*1000)
+            for side, frame in [('B',right), ('A',left)]:
+                self.request("PUT", "/api/frame", phones[side], data=phone_jpeg(frame),
+                             headers={"Content-Type":"image/jpeg","X-Sample-Ms":str(stamp),"X-Clock-Error-Ms":"2"})
+            self.request("GET", "/api/preview/A", self.desk,
+                         headers={"X-Depth-Options": json.dumps({"meters": False})})
+            self.worker.poll()
+            snapshot = self.request("GET", "/api/preview/A", self.desk).json()
+            predictions.extend(o for o in snapshot["objects"] if o.get("intrusion"))
+            alerts = self.request("GET", "/api/agent/alerts", self.desk).json()["alerts"]
+            warnings = [a for a in alerts if a.get("kind") == "path_intrusion"]
+            if warnings:
+                break
+            time.sleep(.18)
+        self.assertTrue(predictions)
+        self.assertNotIn("depth_m", predictions[-1])  # Hidden readings still support crossing alerts.
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["track_id"], predictions[-1]["track_id"])
+        self.assertEqual(warnings[0]["from_side"], "right")
+        self.assertIn("右侧行人", warnings[0]["text_zh"])
+        self.assertLessEqual(predictions[-1]["intrusion"]["eta_s"], 2)
+        self.assertGreater(predictions[-1]["bbox"][0]*640, 320+.45*420/4.2)
+        self.worker.poll()  # Identical frame is not published twice.
+        self.assertEqual(self.request("GET", "/api/agent/alerts?after="+str(warnings[0]["id"]), self.desk).json()["alerts"], [])
+        self.pair("B")
+        events = self.request("GET", "/api/agent/alerts", self.desk).json()["alerts"]
+        self.assertFalse(any(e.get("kind") == "path_intrusion" for e in events))
+        preview = self.request("GET", "/api/preview/A", self.desk).json()
+        self.assertTrue(all("intrusion" not in o for o in preview["objects"]))
 
     def test_running_cli_follows_phone_uploads(self):
         script = Path(__file__).with_name("live_camera.py")

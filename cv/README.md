@@ -54,9 +54,9 @@ python cv/live_camera.py
 
 Open the dashboard at `http://localhost:8765/`, generate independent pairing codes for **Camera A** and **Camera B**, then open `/camera` on each device and enter its code. Camera A can run alone for YOLO. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
 
-In live mode, the left panel displays Camera A with YOLO boxes, and the right panel displays a depth map aligned to that exact A frame. The default worker loads one YOLO predictor for A on either CPU or CUDA. B only uploads JPEGs for stereo matching. Pair A first to test detection; pair B and load a calibration for these phones to measure meters. If stereo is unavailable, A keeps detecting and the right panel explains why. The built-in sample scene remains available separately.
+In live mode, the left panel displays Camera A with YOLO boxes, and the right panel displays a depth map aligned to that exact A frame. The default worker loads one YOLO predictor for A on either CPU or CUDA. B supplies matching frames in the selected JPEG or lossless PNG mode. Pair A first to test detection; pair B and load a calibration for these phones to measure meters. If stereo is unavailable, A keeps detecting and the right panel explains why. The built-in sample scene remains available separately.
 
-For a keyboard scene question, select Camera A in Voice assistant. The worker pins its YOLO result to the ETag of the actual JPEG. The historical two-predictor comparison is available with `--dual-yolo`; the dual-camera benchmark opts into that mode.
+For a keyboard scene question, select Camera A in Voice assistant. The worker pins its YOLO result to the ETag of the actual frame. The historical two-predictor comparison is available with `--dual-yolo`; the dual-camera benchmark opts into that mode.
 
 The live integration tests in `test_live_camera.py` replay JPEGs through the actual Node server and Agent with real YOLO weights. They exercise the running CLI, a camera change during inference, unchanged and expired frames, simultaneous feeds, B disconnecting while A continues, and re-pairing. Run them with the CV environment active and Node available:
 
@@ -158,8 +158,12 @@ at least 0.50, a crop at least 24 pixels on each side, and a label other than
 `person`. The optional same-frame payload field is
 `item_feature: { "version": "spatial-hsv-v1", "vector": [...] }`, with 540
 normalized values. The Agent uses it for enrollment and matching with existing
-saved samples and computes missing descriptors from the same JPEG when needed.
-Dashboard preview responses omit the descriptor.
+saved samples and computes missing descriptors from the same frame when needed.
+Dashboard preview responses omit the descriptor. To use the optional 768-value SigLIP2
+encoder, install `transformers` and its tokenizer dependencies in the CV environment and
+start the worker with `--item-encoder siglip2`. The first run loads
+`google/siglip2-base-patch16-224` from the local cache or Hugging Face. Saved samples
+match other descriptors from the same encoder.
 
 To try it, center one detectable object, say “这个水杯是我的”, confirm, then ask
 “我的水杯在哪里？”. Try a differently colored object of the same YOLO class as
@@ -168,9 +172,9 @@ similar appearances or react to lighting changes.
 
 ## Live detection JSON v1
 
-The worker sends one result per processed JPEG to
+The worker sends one result per processed frame to
 `POST /api/cv/detections?source_id=…&camera_id=A` (or B). The frame GET supplies the
-unquoted ETag for `frame_id` and the server's JPEG receipt time from
+unquoted ETag for `frame_id` and the server's frame receipt time from
 `X-CV-Frame-Ms` for `timestamp_ms` (Unix milliseconds).
 
 ```json
@@ -198,8 +202,8 @@ The service validates metadata against the pinned frame. Legacy payloads with
 only `frame_id` and `objects` are normalized to v1 on receipt. The Agent consumes
 the accepted snapshot directly, including any validated `item_feature` fields.
 `GET /api/preview/A` returns the same public fields plus the matching base64
-`jpeg`, with item descriptors omitted. In a preview, `objects: null` means
-the JPEG has no current detection result, while `objects: []` means the CV
+`jpeg` or `png` field, with item descriptors omitted. In a preview, `objects: null` means
+the frame has no current detection result, while `objects: []` means the CV
 worker processed the frame and found no objects.
 
 ## 双手机绝对深度（米）
@@ -212,7 +216,7 @@ worker processed the frame and found no objects.
 
 | 配置字段 | 填写方式 |
 | --- | --- |
-| `image_size_px` | 两部手机**实际上传 JPEG** 的共同宽、高（像素）。网页将最长边缩至最多 640 像素。标定工具直接采集该尺寸。 |
+| `image_size_px` | 两部手机实际上传的共同宽、高（像素）。标准 JPEG 模式的最长边最多 640 像素；原始像素 PNG 保留浏览器相机视频的尺寸。两台手机应使用与标定时相同的模式和尺寸。 |
 | `baseline_m` | 两个**活动镜头光心**之间的直线距离，单位米。可用尺量作独立核对。 |
 | `camera_A`、`camera_B` | 分别填写上传尺寸下的 `fx, fy, cx, cy`（像素）和 OpenCV 普通针孔模型的五项畸变系数 `[k1,k2,p1,p2,k3]`。 |
 | `rotation_A_to_B`、`translation_direction_A_to_B` | OpenCV 外参约定 `X_B = R × X_A + T`。分别填 3×3 旋转矩阵和单位向量 `T / norm(T)`。平行水平安装且 B 在右侧时，理论方向为 `[-1,0,0]`。实际安装用标定结果。 |
@@ -271,7 +275,7 @@ SGBM 在计算代价时延伸搜索边界，再检查每个左右匹配的 5 × 
 
 ### 导出逐像素深度图
 
-同一对已保存的左右 JPEG 也可离线处理，不需要 YOLO 权重。将命令中的路径替换为同一对标定尺寸的图片，输出目录须是新目录。
+同一对已保存的左右 JPEG 或 PNG 也可离线处理，不需要 YOLO 权重。将命令中的路径替换为同一对标定尺寸的图片，输出目录须是新目录。
 
 ```sh
 python cv/stereo_depth.py path/to/A.jpg path/to/B.jpg --config cv/stereo_config.json --output /tmp/depth-check
@@ -299,10 +303,37 @@ estimator = RoadEdge.load(DEFAULT_ROAD_CONFIG, stereo=None)
 road, sidewalk = estimator.segment(image.convert("RGB"), estimator.confidence)
 ```
 
-两个布尔掩膜与输入图像同尺寸。现有实时深度预览独立运行。若使用路沿距离估计，传入的双目深度必须以米为单位；以棋盘格为单位的实验配置只用于相对深度预览。
+两个布尔掩膜与输入图像同尺寸。路沿距离和目标横穿预测都使用未滤波的米制深度。棋盘格单位的标定需要输入实测格长才能提供米制深度。Show meters 只控制深度图和检测框的米数显示。
 
 ### 可选深度滤波与米数
 
 Chrome 实时深度图提供三个独立开关，初始均关闭。Edge-aware filter 在逆深度图上以左图灰度引导加权最小二乘平滑，仅插补至少有三个相容邻点的小孔。Temporal median 使用同一对摄像头近期的三帧，在局部亮度和深度均稳定时取中值。滤波影响预览；距离只取原始有效双目观测。黑色表示当前仍未知。
 
 Show meters 显示相对于 Camera A 光轴的前向距离。若标定 JSON 带有 `"units":"checker_squares_only"`，在页面输入同一张棋盘连续五格的**实测总毫米数**，转换系数为该数除以 5000。未量格长时保持空白。公制标定直接使用米。对准中心圆圈可读该点的距离；目标框内的距离沿用项目的可靠深度聚合。没有足够观测时显示未知。输入的尺度适用于当前页面会话；更换镜头、机位或标定后请重新核对。
+
+## 前方车行道边缘预警
+
+在上面的双手机标定、配对和 HTTPS 服务可用后，运行：
+
+```sh
+cv/.venv/bin/python cv/live_camera.py --road-alerts --server https://localhost:8765
+```
+
+Camera A 用 Cityscapes SegFormer-B0 分割车行道和人行道，寻找从脚下方向的人行道走向前方车行道的交界。程序在交界附近取多个地面像素的双目深度，使用 A 的标定射线计算横向位置和水平前向距离，选择行走通道内最近且有一段连续像素支持的交界。Dashboard 在对应的 A 帧上用黄色圆圈标出取值位置，图下显示距离。B 为 A 提供双目匹配；运行 worker 时加上 `--dual-yolo` 也可独立检测 B。
+
+- 默认在 **5 米**内提醒，进入 **3 米**再升级，每档需要连续两张已接受的不同帧确认，间隔不超过 1.2 秒。退到 5.6 米外或持续看不到交界至少一秒后可重新提示。按 Dashboard 的语音语言设置通过现有 Piper 播报。[语音模型和浏览器播放设置](../llm/README.md)
+- 未标定、缺少同步帧或交界纹理不足时，连续看到前方交界可播报「前方可能是车行道」，并显示距离不可用。道路延伸到侧面时，程序以朝前通道筛选交界。当前假设手机朝向与行走方向一致，地面近似水平。
+- [road_config.json](road_config.json) 中的 `pitch_down_deg` 默认 0，镜头从水平向下倾斜 10° 时填 10。`corridor_width_m` 是通道总宽，默认 0.9 米。`caution_m`、`urgent_m` 和 `rearm_margin_m` 分别控制两级提示和重新触发的距离余量。改完重启 worker。匹配范围还取决于 [stereo_config.json](stereo_config.json) 中的有效深度范围和标定参数。
+- 首次实机验证可用卷尺在封闭路段标出 5 米和 3 米，分别从正面、斜向接近并沿路沿平行行走。没有可见人行道、已走上车道、路口被车辆遮挡或在坡道上时，可能漏报或误报。
+
+## 预测人车从侧面进入前方通道
+
+完成 A/B 双目标定后，普通 `cv/live_camera.py` 会自动启用路径侵入预测。安装路沿分割模型是 `--road-alerts` 的要求，单独使用横穿预测只需要原有 YOLO、OpenCV 和双目标定。默认相机 A 朝向与短时间内的行走方向一致，按直线通道预测未来 2 秒内、前方 6 米范围的进入事件。
+
+系统复用 YOLO 的目标类别、跟踪 ID 和逐帧米制深度。每对 A 帧都先遮掉检测框，再用校正过畸变的背景三维点和下一帧光流，以 RANSAC 估计相机的旋转与平移。只有背景匹配覆盖足够多的区域、双向光流吻合、当前双目深度也支持该姿态时才采用结果。旧的目标位置先旋转到当前坐标轴，再估算相对速度。背景平移用于排除仅由用户侧移造成的假横穿。转身过快、缺少特征、目标刚换 ID、双目掉线或两台手机重新配对时停止累积预测证据。
+
+行人、自行车、摩托、汽车、公交、卡车或狗的近侧边缘仍在通道外，且连续两个运动区间都显示朝内移动时，系统估算它的边缘何时进入通道。满足时间和前向距离条件后，A 的检测框显示方向和预计进入时间，Dashboard 沿用现有语音通道播报「右侧自行车可能横穿前方，请小心」一类提示。进入时间以采集帧为起点，服务器丢弃已经过期的预警。同一轨迹同方向的告警在 5 秒内去重。目标已在通道内时，已有的占道风险规则继续工作。
+
+调整 [road_config.json](road_config.json) 中的 `corridor_width_m`（通道总宽）和 `pitch_down_deg`（正数表示下俯）。`intrusion.enabled` 控制此功能，`horizon_s` 默认为 2，`max_forward_m` 默认为 6，`max_turn_deg_s` 默认为 35。修改后重启 worker。双目参数和时钟配对要求与上文的绝对深度功能一致。
+
+封闭场地实测可以覆盖手机转动而物体静止、人员平行于通道行走，以及人员从通道两侧横穿这三种情况。记录告警相对实际入道的提前量，以及漏报和误报。急转弯、移动背景占满视野、严重遮挡、稀疏深度和目标突然变向会影响预测。此处的时间是按短时速度估计的入道时间，碰撞还取决于使用者之后的路线和速度。

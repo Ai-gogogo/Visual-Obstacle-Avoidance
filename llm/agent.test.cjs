@@ -19,12 +19,12 @@ test('a habit is private until confirmation, persists after restart and can be d
     assert.throws(() => agent.confirm({slots:{}},confirmation.id,true,true),{status:409});
     assert.match((await agent.chat(session,{text:'確認。'})).reply_text,/已保存/);
     const [habit] = agent.records('habit');
-    assert.deepEqual(agent.savePreferences({concise:false,reminder:habit.id}),{concise:false,reminder:habit.id});
+    assert.deepEqual(agent.savePreferences({concise:false,habit:habit.id,interval_minutes:0}),{concise:false,habit:habit.id,interval_minutes:0});
     agent.close();
     agent = createAgent({filename});
     assert.match((await agent.chat({slots:{}},{text:'出门前要记得做什么？'})).reply_text,/检查钥匙/);
     const [row] = agent.records('habit');
-    assert.deepEqual(agent.preferences(),{concise:false,reminder:row.id});
+    assert.deepEqual(agent.preferences(),{concise:false,habit:row.id,interval_minutes:0});
     const live = {slots:{A:{stamp:Date.now(),frame:Buffer.from('live')}}};
     assert.match(agent.cameraReminder(live),/检查钥匙/);
     assert.equal(agent.cameraReminder(live),null);
@@ -33,7 +33,7 @@ test('a habit is private until confirmation, persists after restart and can be d
     live.slots.A = {stamp:Date.now(),frame:Buffer.from('new frame')};
     assert.match(agent.cameraReminder(live),/检查钥匙/);
     assert.equal(agent.remove('habit',row.id),true);
-    assert.deepEqual(agent.preferences(),{concise:false,reminder:null});
+    assert.deepEqual(agent.preferences(),{concise:false,habit:null,interval_minutes:0});
     assert.deepEqual(agent.records('habit'),[]);
   } finally { agent.close(); rmSync(directory,{recursive:true,force:true}); }
 });
@@ -222,8 +222,8 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.match(generated.at(-1).messages.at(-1).content,/first image is Camera A/);
   assert.match(generated.at(-1).messages[0].content,/Never identify people or provide walking directions/);
   assert.deepEqual(await json(await call('/api/agent/preferences',{
-    method:'PUT',token:desk,body:{concise:false,reminder:null}
-  }),200),{concise:false,reminder:null});
+    method:'PUT',token:desk,body:{concise:false,habit:null,interval_minutes:0}
+  }),200),{concise:false,habit:null,interval_minutes:0});
   assert.equal((await chat('Hello')).source,'llm');
   assert.equal((await chat('Can you repeat that?')).source,'llm');
   assert.ok(generated.at(-1).messages.some(message => message.role === 'assistant'));
@@ -248,4 +248,119 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   const afterPair = await json(await call('/api/agent/alerts?after=0',{token:desk}),200);
   assert.deepEqual(afterPair.alerts,[]);
   assert.equal((await chat('我的蓝水杯在哪里？')).source,'history');
+});
+
+test('optional routines, semantic memory, planning and reminder API work together', async t => {
+  const directory = mkdtempSync(join(tmpdir(),'visionassist-optional-'));
+  const filename = join(directory,'memory.sqlite');
+  const embeddingCalls = [];
+  let clock = Date.now();
+  const options = {
+    filename,
+    now:() => clock,
+    embed:async (_model,inputs) => {
+      embeddingCalls.push(inputs);
+      return inputs.map(input => /keys|leav/i.test(input) ? [1,0,0] : /dishes|洗碗/iu.test(input) ? [0,1,0] : [0,0,1]);
+    },
+    generate:async (messages,_image,format) => {
+      if (format) {
+        assert.equal(format.properties.steps.type,'array');
+        return messages.at(-1).content === 'pack a backpack'
+          ? JSON.stringify({steps:['Put the empty bag on a table.','Pack your notebook.']})
+          : '{"steps":[]}';
+      }
+      return messages[0].content;
+    }
+  };
+  const server = createServer({agent:options});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(async () => {
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+    rmSync(directory,{recursive:true,force:true});
+  });
+  const root = 'http://127.0.0.1:'+server.address().port;
+  async function request(path,{method='GET',body,token,status=200,type='application/json'}={}) {
+    const response = await fetch(root+path,{
+      method,
+      body:body && (Buffer.isBuffer(body) ? body : JSON.stringify(body)),
+      headers:{...(token && {Authorization:'Bearer '+token}),...(body && {'Content-Type':type})}
+    });
+    assert.equal(response.status,status);
+    return status === 204 ? undefined : response.json();
+  }
+  const createSession = async () => (await request('/api/session',{method:'POST',status:201})).token;
+  const desk = await createSession();
+  const chat = (text,token=desk) => request('/api/agent/chat',{method:'POST',token,body:{text}});
+  const habits = () => request('/api/memory/habits',{token:desk}).then(result => result.records);
+  const pair = async token => {
+    const {code} = await request('/api/pair/A',{method:'POST',token,status:201});
+    return (await request('/api/join',{method:'POST',body:{code}})).token;
+  };
+  const publish = token => request('/api/frame',{
+    method:'PUT',token,type:'image/jpeg',body:Buffer.from([255,216,4,255,217]),status:204
+  });
+  const alerts = token => request('/api/agent/alerts?reminders=1',{token});
+
+  assert.match((await chat('I usually check my keys')).confirmation.summary,/routine/);
+  assert.deepEqual(await habits(),[]);
+  await chat('cancel');
+  assert.deepEqual(await habits(),[]);
+  assert.equal((await chat('我今天出门前检查了钥匙')).confirmation,null);
+  assert.equal((await chat('我今天出门前检查了钥匙')).confirmation,null);
+  clock += 60_000;
+  assert.match((await chat('我刚才出门前检查了钥匙')).confirmation.summary,/日常习惯/);
+  assert.deepEqual(await habits(),[]);
+  await chat('取消');
+  await chat('I usually check my keys');
+  await chat('confirm');
+  await chat('我每天洗碗');
+  await chat('确认');
+  const [keys] = await habits();
+  assert.match((await chat('Search memory leaving home')).reply_text,/check my keys/);
+  assert.equal(embeddingCalls[0].length,3);
+  assert.match((await chat('Search memory leaving home')).reply_text,/check my keys/);
+  assert.deepEqual(embeddingCalls[1],['leaving home']);
+  assert.match((await chat('Search memory weather')).reply_text,/no related/);
+
+  const saved = {concise:false,habit:keys.id,interval_minutes:15};
+  assert.deepEqual(await request('/api/agent/preferences',{method:'PUT',token:desk,body:saved}),saved);
+  await request('/api/agent/preferences',{method:'PUT',token:desk,body:{...saved,habit:true},status:400});
+  assert.match((await chat('Hello')).reply_text,/up to four short sentences/);
+  const phone = await pair(desk);
+  assert.equal((await alerts(desk)).reminder,null);
+  await publish(phone);
+  assert.equal((await alerts(desk)).reminder,keys.name);
+  assert.equal((await alerts(desk)).reminder,null);
+  const other = await createSession();
+  const otherPhone = await pair(other);
+  await publish(otherPhone);
+  assert.equal((await alerts(other)).reminder,null);
+  clock += 15*60_000;
+  const later = await createSession();
+  await publish(await pair(later));
+  assert.equal((await alerts(later)).reminder,keys.name);
+
+  assert.match((await chat('Plan pack a backpack')).reply_text,/Step 1 of 2/);
+  assert.match((await chat('repeat step')).reply_text,/Step 1 of 2/);
+  assert.match((await chat('next step',other)).reply_text,/no active plan/);
+  assert.match((await chat('next step')).reply_text,/Pack your notebook/);
+  assert.match((await chat('next step')).reply_text,/end of the plan/);
+  await chat('Plan pack a backpack');
+  assert.match((await chat('cancel plan')).reply_text,/cancelled/);
+  assert.equal((await chat('Plan cross a street')).source,'unavailable');
+
+  await new Promise(resolve => server.close(resolve));
+  const reopened = createAgent(options);
+  try {
+    assert.deepEqual(reopened.preferences(),saved);
+    const session = {slots:{}};
+    assert.match((await reopened.chat(session,{text:'Search memory leaving home'})).reply_text,/check my keys/);
+    assert.deepEqual(embeddingCalls.at(-1),['leaving home']);
+    assert.equal(reopened.remove('habit',keys.id),true);
+    assert.equal(reopened.preferences().habit,null);
+    assert.match((await reopened.chat(session,{text:'Search memory leaving home'})).reply_text,/no related/);
+  } finally {
+    reopened.close();
+  }
 });

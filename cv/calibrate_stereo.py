@@ -43,7 +43,9 @@ def input_pairs(args):
         return
     for folder in sorted(args.pairs.iterdir()):
         if folder.is_dir() and not folder.name.startswith("."):
-            images = [cv2.imread(str(folder / f"{side}.jpg"), cv2.IMREAD_GRAYSCALE) for side in "AB"]
+            paths = [folder / f"{side}.png" if (folder / f"{side}.png").is_file()
+                     else folder / f"{side}.jpg" for side in "AB"]
+            images = [cv2.imread(str(path), cv2.IMREAD_GRAYSCALE) for path in paths]
             if all(image is not None for image in images):
                 yield folder.name, images
 

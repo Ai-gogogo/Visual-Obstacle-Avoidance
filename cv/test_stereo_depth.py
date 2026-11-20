@@ -11,6 +11,7 @@ import numpy as np
 import requests
 
 from live_camera import CameraWorker
+from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
 
 
@@ -118,12 +119,17 @@ class LiveStereoTests(unittest.TestCase):
         config = configuration()
         left, right = plane(config, 2)
         worker = CameraWorker(base, None, http, stereo=StereoDepth(config))
+        road_mask = np.indices(left.shape)[0] < 140
+        worker.road = RoadEdge(json.loads(DEFAULT_ROAD_CONFIG.read_text()), worker.stereo,
+                               lambda image, confidence: (road_mask, ~road_mask))
 
-        def upload(phone, image, stamp):
-            headers = {"Content-Type": "image/jpeg"}
+        def upload(phone, image, stamp, lossless=False):
+            headers = {"Content-Type": "image/png" if lossless else "image/jpeg"}
             if stamp is not None:
                 headers.update({"X-Sample-Ms": str(stamp), "X-Clock-Error-Ms": "3"})
-            request("PUT", "/api/frame", phone, headers=headers, data=cv2.imencode(".jpg", image)[1].tobytes())
+            frame = cv2.imencode(".png" if lossless else ".jpg", image)[1].tobytes()
+            request("PUT", "/api/frame", phone, headers=headers, data=frame)
+            return frame
 
         def read():
             example = dict(label="chair", confidence=.9, position="center", bbox=[.3,.2,.7,.8])
@@ -135,26 +141,42 @@ class LiveStereoTests(unittest.TestCase):
         upload(b, right, now-180)
         upload(a, left, now)
         self.assertEqual(read()["stereo_status"], "waiting_for_pair")
-        upload(b, right, now)
+        upload(b, right, now, lossless=True)
         upload(b, right*0, now+160)  # The newer B frame is a worse match.
-        upload(a, left, now+5)
+        original = upload(a, left, now+5, lossless=True)
         measured = read()
+        self.assertEqual(base64.b64decode(measured["png"]), original)
+        self.assertNotIn("jpeg", measured)
         self.assertEqual(measured["stereo_status"], "ready")
+        self.assertGreater(measured["depth_valid_fraction"], .5)
         self.assertAlmostEqual(measured["objects"][0]["depth_m"], 2, delta=.05)
         png = np.frombuffer(base64.b64decode(measured["depth_preview"]), np.uint8)
         self.assertGreater(cv2.imdecode(png, cv2.IMREAD_GRAYSCALE).max(), 0)
+        self.assertEqual(measured["road_edge"]["level"], "urgent")
+        self.assertAlmostEqual(measured["road_edge"]["distance_m"], 2, delta=.05)
+        time.sleep(.01)
+        upload(a, left, now+8)
+        read()
+        worker.poll()  # An unchanged JPEG must not generate a second road alert.
+        alerts = request("GET", "/api/agent/alerts", desk).json()["alerts"]
+        road_alerts = [alert for alert in alerts if alert.get("kind") == "road_edge"]
+        self.assertEqual(len(road_alerts), 1)
+        self.assertEqual(road_alerts[0]["risk"], "urgent")
         ready_preview = request("GET", "/api/preview/A", desk)
         request("DELETE", "/api/frame", b)
         cleared = request("GET", "/api/preview/A", desk, headers={"If-None-Match": ready_preview.headers["ETag"]})
         self.assertEqual(cleared.status_code, 200)
-        self.assertEqual(cleared.json()["frame_id"], measured["frame_id"])
+        self.assertEqual(cleared.json()["frame_id"], ready_preview.json()["frame_id"])
         self.assertEqual(cleared.json()["stereo_status"], "waiting_for_pair")
         self.assertNotIn("depth_preview", cleared.json())
+        self.assertNotIn("depth_valid_fraction", cleared.json())
         self.assertNotIn("depth_m", cleared.json()["objects"][0])
         upload(a, left, None)
         old_phone = read()
         self.assertNotIn("depth_m", old_phone["objects"][0])
         self.assertNotIn("depth_preview", old_phone)
+        self.assertEqual(old_phone["road_edge"]["level"], "visual")
+        self.assertNotIn("distance_m", old_phone["road_edge"])
         upload(a, left[:100], now)
         self.assertEqual(read()["stereo_status"], "size_mismatch")
         b = pair("B")
@@ -172,6 +194,12 @@ class LiveStereoTests(unittest.TestCase):
             snap = read()
             self.assertEqual(snap["stereo_status"],"ready")
             self.assertEqual(snap["depth_options"],prefs)
+            if width == 0:
+                self.assertEqual(snap["road_edge"]["level"], "visual")
+                self.assertNotIn("distance_m", snap["road_edge"])
+            else:
+                # Road warnings use meters independently of the display toggle.
+                self.assertAlmostEqual(snap["road_edge"]["distance_m"], 2*width/5000, delta=.002)
             if expected is None:
                 self.assertNotIn("depth_m",snap["objects"][0])
                 self.assertNotIn("center_m",snap)

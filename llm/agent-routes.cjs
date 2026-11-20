@@ -1,16 +1,53 @@
-const {createAgent, MAX_FRAME_AGE} = require('./agent.cjs');
+const {createAgent, currentDetection, MAX_FRAME_AGE} = require('./agent.cjs');
+const {acceptRoadEdge} = require('./road-alerts.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
 const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 const DETECTION_SCHEMA_VERSION = 1;
+const movingLabels = new Map(Object.entries({
+  person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
+}));
+
 
 function validItemFeature(feature) {
-  return feature?.version === 'spatial-hsv-v1' &&
-    Array.isArray(feature.vector) && feature.vector.length === 540 &&
-    feature.vector.every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
-    Math.abs(feature.vector.reduce((sum,value) => sum + value * value,0) - 1) <= 0.001;
+  if (!feature || !Array.isArray(feature.vector)) {
+    return false;
+  }
+
+  const specs = {
+    "spatial-hsv-v1": {
+      dimensions: 540,
+      nonnegative: true
+    },
+    "siglip2-base-patch16-224-v1": {
+      dimensions: 768,
+      nonnegative: false
+    }
+  };
+
+  const spec = specs[feature.version];
+
+  if (!spec || feature.vector.length !== spec.dimensions) {
+    return false;
+  }
+
+  const vector = feature.vector;
+
+  if (!vector.every(value =>
+    Number.isFinite(value) &&
+    (!spec.nonnegative || (value >= 0 && value <= 1))
+  )) {
+    return false;
+  }
+
+  const normSquared = vector.reduce(
+    (sum, value) => sum + value * value, 0
+  );
+
+  return Math.abs(normSquared - 1) <= 0.001;
 }
+
 
 function parseObjects(objects) {
   if (!Array.isArray(objects) || objects.length > 40) return null;
@@ -62,9 +99,12 @@ function createAgentRoutes(options, sessions, read, respond) {
       slot.cvFrames ||= new Map();
       for (const [id, item] of slot.cvFrames) if (!recent(item)) slot.cvFrames.delete(id);
       const id = slot.etag.slice(1,-1);
-      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,frameType:slot.frameType,stamp:slot.stamp,sample:slot.sample});
-      while (slot.cvFrames.size > (slot.frameType === 'image/png' ? 3 : 8)) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
-      return res.writeHead(200,{'Content-Type':slot.frameType,ETag:slot.etag,
+      const frameType = slot.frameType ?? 'image/jpeg';
+      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,frameType,stamp:slot.stamp,sample:slot.sample});
+      const retain = frameType === 'image/png' ? 3 : 8;
+      while (slot.cvFrames.size > retain) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
+      return res.writeHead(200,{'Content-Type':frameType,ETag:slot.etag,
+        ...(slot.sample ? {'X-CV-Sample-Ms':slot.sample.ms} : {}),
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
     if (route === '/api/cv/stereo-partner' && req.method === 'GET' && camera === 'A') {
@@ -93,7 +133,8 @@ function createAgentRoutes(options, sessions, read, respond) {
         res.setHeader('X-Depth-Stamp',left.stamp);
       }
       left.partner = {depthOptions:opt, id:best.id, stream:right.streamID, stamp:best.stamp};
-      return res.writeHead(200,{'Content-Type':best.frameType, 'X-Partner-Id':best.id}).end(best.frame);
+      return res.writeHead(200,{'Content-Type':best.frameType ?? 'image/jpeg', 'X-Partner-Id':best.id,
+        'X-Partner-Stream':right.streamID}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
     return error(res,404,'Unknown CV route.');
@@ -125,11 +166,20 @@ function createAgentRoutes(options, sessions, read, respond) {
         slot.detection.stereoStatus = ['size_mismatch','no_matches','unavailable'].includes(payload.stereo.status)
           ? payload.stereo.status : 'waiting_for_pair';
       }
-      if (camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
-          partner.stream === session.slots.B.streamID) {
+      const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
+          partner.stream === session.slots.B.streamID;
+      if (paired) {
         for (const [i, object] of objects.entries()) {
           const z = payload.objects[i].depth_m;
-          if (Number.isFinite(z) && z > 0) object.depth_m = z;
+          const measured = Number.isFinite(z) && z > 0;
+          if (measured && partner.depthOptions?.meters !== false) object.depth_m = z;
+          const prediction = payload.objects[i].intrusion;
+          if (measured && object.track_id && movingLabels.has(object.label) && object.confidence >= .5 &&
+              ['left','right'].includes(prediction?.from_side) && Number.isFinite(prediction.eta_s) &&
+              prediction.eta_s > 0 && prediction.eta_s <= 3 && captured.sample) {
+            const expires = captured.sample.ms + Math.round(1000*prediction.eta_s) - captured.sample.error;
+            if (expires > Date.now()) object.intrusion = {from_side:prediction.from_side, eta_s:prediction.eta_s, expires};
+          }
         }
         const preview = payload.stereo.preview;
         if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
@@ -137,6 +187,11 @@ function createAgentRoutes(options, sessions, read, respond) {
           slot.detection.depthPreview = preview;
           const center = payload.stereo.center_m;
           if (Number.isFinite(center) && center>0) slot.detection.centerM = center;
+
+          const fraction = payload.stereo.valid_fraction;
+          if (Number.isFinite(fraction) && fraction >= 0 && fraction <= 1) {
+            slot.detection.depthValidFraction = fraction;
+          }
           const range = payload.stereo.range_m;
           if (Array.isArray(range) && range.length === 2 && range.every(Number.isFinite) &&
               range[0] > 0 && range[0] < range[1]) slot.detection.depthRange = range;
@@ -153,6 +208,22 @@ function createAgentRoutes(options, sessions, read, respond) {
         session.alertCooldown.set(id,now);
         session.alerts.push({id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,streamID:slot.streamID,
           text:(obstacle.risk === 'urgent' ? 'Urgent. ' : 'Caution. ') + obstacle.label + ', Camera ' + camera + ', ' + obstacle.position + '.', stamp:captured.stamp});
+      }
+      if (camera === 'A') {
+        const warning = acceptRoadEdge(slot, payload.road_edge, captured.stamp, session.slots.B.streamID, paired);
+        if (warning) session.alerts.push({...warning,id:++session.alertSeq,streamID:slot.streamID,
+          partnerStream:slot.detection.road_edge?.distance_m === undefined ? undefined : partner?.stream});
+        for (const obj of objects.filter(o => o.intrusion).sort((a,b) => a.intrusion.expires-b.intrusion.expires)) {
+          const side = obj.intrusion.from_side;
+          const id = ['intrusion',slot.streamID,partner.stream,obj.track_id,side].join(':');
+          if (session.alertCooldown.has(id)) continue;
+          session.alertCooldown.set(id,now);
+          session.alerts.push({kind:'path_intrusion', id:++session.alertSeq, camera_id:'A', risk:'caution',
+            stamp:captured.stamp, streamID:slot.streamID, partnerStream:partner.stream, expires:obj.intrusion.expires, track_id:obj.track_id, from_side:side,
+            text:'Caution. A '+obj.label+' may cross your path from the '+side+'.',
+            text_zh:(side === 'left' ? '左侧' : '右侧')+movingLabels.get(obj.label)+'可能横穿前方，请小心。'});
+        }
+        if (paired) slot.detection.partnerStream = partner.stream;
       }
       session.alerts = session.alerts.slice(-20);
       // Measured on one clock, from server receipt of the JPEG to acceptance of CV results.
@@ -177,10 +248,21 @@ function createAgentRoutes(options, sessions, read, respond) {
     const method = req.method;
     if (route === '/api/agent/alerts' && method === 'GET') {
       const after = Number(requestURL.searchParams.get('after') || 0);
-      const reminder = agent.cameraReminder(session);
-      return respond(res,200,{sequence:session.alertSeq, reminder,
-        alerts:session.alerts.filter(alert => alert.id > after && recent(alert) && session.slots[alert.camera_id].streamID === alert.streamID)
-          .map(({streamID, ...alert}) => alert)});
+      const remindersEnabled = requestURL.searchParams.get('reminders') === '1';
+      const reminder = remindersEnabled ? agent.cameraReminder(session) : null;
+      const active = session.alerts.filter(alert => {
+        if (alert.id <= after || !recent(alert) || session.slots[alert.camera_id].streamID !== alert.streamID ||
+            (alert.partnerStream && session.slots.B.streamID !== alert.partnerStream)) return false;
+        if (alert.kind !== 'path_intrusion') return true;
+        const scene = session.slots.A.detection;
+        return alert.expires > Date.now() && scene?.partnerStream === session.slots.B.streamID &&
+          scene?.objects.some(obj => obj.track_id === alert.track_id && obj.intrusion?.from_side === alert.from_side);
+      });
+      const cameras = Object.fromEntries(Object.entries(session.slots).map(([side,slot]) => [
+        side, !slot.phone ? 'offline' : !recent(slot) ? 'waiting' :
+          currentDetection(slot) ? 'detecting' : 'live'
+      ]));
+      return respond(res,200,{sequence:session.alertSeq, alerts:active.map(({streamID, partnerStream, ...alert}) => alert), reminder,cameras});
     }
     if (route === '/api/agent/preferences') {
       if (method === 'GET') return respond(res,200,agent.preferences());

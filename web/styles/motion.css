@@ -1,0 +1,17 @@
+.primary,.quiet,.mic{transition:transform var(--press-duration) var(--ease-out)}
+.mic{transition:transform var(--press-duration) var(--ease-out),background-color var(--voice-duration) var(--ease-out),color var(--voice-duration) var(--ease-out)}
+.voice-icon{transition:opacity var(--voice-duration) var(--ease-out)}
+.feed-status::before,#voice-state::before{transition:color var(--status-duration) var(--ease-out),opacity var(--status-duration) var(--ease-out)}
+@media(pointer:fine){button:active:not(:focus-visible):not(:disabled){transform:scale(.98)}}
+@media(pointer:coarse){button:active:not(:disabled){transform:scale(.98)}}
+dialog[open][data-animate]{animation:dialog-in var(--dialog-duration) var(--ease-out)}
+details[data-animate][open]>:not(summary){animation:disclosure-in var(--disclosure-duration) var(--ease-out)}
+.toast-visible{animation:disclosure-in var(--toast-duration) var(--ease-out)}
+@keyframes dialog-in{from{opacity:0;transform:scale(.98)}}
+@keyframes disclosure-in{from{opacity:0;transform:translateY(4px)}}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important}
+  button:active:not(:disabled){transform:none!important}
+}
+:root[data-reduced-motion] *, :root[data-reduced-motion] *::before, :root[data-reduced-motion] *::after{transition:none!important;animation:none!important}
+:root[data-reduced-motion] button:active:not(:disabled){transform:none!important}

@@ -1,26 +1,12 @@
 const http = require('node:http');
 const https = require('node:https');
 const { randomBytes, randomInt } = require('node:crypto');
-const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
+const { readFileSync } = require('node:fs');
 const { createAgentRoutes, DETECTION_SCHEMA_VERSION } = require('../llm/agent-routes.cjs');
+const {PREVIEW_MAX_ANALYSIS_LAG_MS} = require('../llm/agent.cjs');
 
-const files = {
-  '/': ['index.html','text/html; charset=utf-8'],
-  '/index.html': ['index.html','text/html; charset=utf-8'],
-  '/camera': ['camera.html','text/html; charset=utf-8'],
-  '/camera.html': ['camera.html','text/html; charset=utf-8'],
-  '/ui.css': ['ui.css','text/css; charset=utf-8'],
-  '/desktop.js': ['desktop.js','text/javascript; charset=utf-8'],
-  '/voice-capture.js': ['voice-capture.js','text/javascript; charset=utf-8'],
-  '/calibration-quality.js': ['calibration-quality.js','text/javascript; charset=utf-8'],
-  '/stereo-video.js': ['stereo-video.js','text/javascript; charset=utf-8'],
-  '/box-targets.pdf': ['box-targets.pdf','application/pdf'],
-  '/calibration.js': ['calibration.js','text/javascript; charset=utf-8'],
-  '/camera.js': ['camera.js','text/javascript; charset=utf-8'],
-  '/demo-lab.webp': ['demo-lab.webp','image/webp']
-};
-const qrcode = require('./vendor/qrcode-generator-2.0.4/qrcode.js');
+const qrcode = require('./vendor/qrcode-generator-2.0.4/qrcode.cjs');
 
 function phonePairingInfo(origin, side, code) {
   if (!origin || !URL.canParse(origin)) return {};
@@ -64,22 +50,23 @@ function createServer(options = {}) {
   const attempts = new Map();
   const assistant = createAgentRoutes(options.agent, sessions, read, respond);
   const handler = async (req, res) => {
-    res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
     const route = new URL(req.url, 'http://localhost').pathname;
     const method = req.method;
     const now = Date.now();
     if (!route.startsWith('/api/')) {
-      if (!Object.hasOwn(files, route) || method !== 'GET') return respond(res, 404, {error:'Page not found.'});
-      const [filename, type] = files[route];
+      if (!options.frontend) return respond(res, 404, {error:'Page not found.'});
+      // Original-pixel uploads refresh their stereo clock from GET /camera.
+      if (route === '/camera') res.setHeader('X-Server-Ms', Date.now());
       try {
-        const content = readFileSync(join(__dirname,filename));
-        if (filename === 'camera.html') res.setHeader('X-Server-Ms', Date.now());
-        res.writeHead(200, {'Content-Type':type});
-        return res.end(content);
-      } catch { return respond(res, 404, {error:'File not found.'}); }
+        return await options.frontend(req,res);
+      } catch {
+        if (!res.headersSent) return respond(res, 500, {error:'Frontend unavailable.'});
+        return res.destroy();
+      }
     }
+    res.setHeader('Cache-Control','no-store');
     try {
       const origin = req.headers.origin;
       if (req.headers['sec-fetch-site'] === 'cross-site' || (origin && new URL(origin).host !== req.headers.host)) {
@@ -197,6 +184,7 @@ function createServer(options = {}) {
         phones.delete(slot.phone);
         const phone = key();
         session.slots[entry.slot] = {phone, streamID:key(), stamp:0};
+        session.alerts = session.alerts.filter(alert => alert.kind !== 'path_intrusion');
         phones.set(phone, {session:entry.session, slot:entry.slot});
         attempts.delete(ip);
         res.setHeader('X-Server-Ms', Date.now());
@@ -209,6 +197,7 @@ function createServer(options = {}) {
         const slot = session.slots[entry.slot];
         if (method === 'DELETE') {
           session.slots[entry.slot] = {};
+          session.alerts = session.alerts.filter(alert => alert.kind !== 'path_intrusion');
           phones.delete(token);
           return res.writeHead(204).end();
         }
@@ -261,26 +250,41 @@ function createServer(options = {}) {
         }
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
-        const detection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
+        const recentDetection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
+        const analysisDelayed = recentDetection && slot.frame !== recentDetection.frame &&
+          now - recentDetection.timestamp_ms > PREVIEW_MAX_ANALYSIS_LAG_MS;
+        const detection = analysisDelayed ? null : recentDetection;
         const partner = detection?.stereoPartner;
         const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
         const frame = detection?.frame ?? slot.frame;
         const format = detection?.frameType ?? slot.frameType;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
         // A raw preview can acquire boxes without the camera uploading a new JPEG.
-        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + (lostPartner ? '-unpaired' : '') + '"';
-        res.setHeader('ETag', etag);
-        if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
-        const objects = detection?.objects.map(({item_feature, ...object}) => {
+        const activeForecasts = [];
+        const objects = detection?.objects.map(({item_feature, intrusion, ...object}, i) => {
           if (lostPartner) delete object.depth_m;
+          if (!lostPartner && intrusion && intrusion.expires > now && detection.partnerStream === session.slots.B.streamID) {
+            object.intrusion = intrusion;
+            activeForecasts.push(i);
+          }
           return object;
         }) ?? null;
+        const forecastTag = activeForecasts.length ? '-cross-' + activeForecasts.join('-') : '';
+        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + forecastTag +
+          (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + '"';
+        res.setHeader('ETag', etag);
+        if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
           ...(format === 'image/png' ? {png:frame.toString('base64')} : {jpeg:frame.toString('base64')}), objects,
+          ...(detection?.road_edge && (!lostPartner || detection.road_edge.distance_m === undefined) ? {road_edge:detection.road_edge} : {}),
+          ...(analysisDelayed ? {analysis_delayed:true} : {}),
           ...(detection?.stereoStatus ? {stereo_status:lostPartner ? 'waiting_for_pair' : detection.stereoStatus} : {}),
-          ...(!lostPartner && detection?.depthPreview ? {depth_preview:detection.depthPreview, depth_range_m:detection.depthRange, center_m:detection.centerM, depth_options:partner.depthOptions} : {})
+          ...(!lostPartner && detection?.depthPreview ? {
+            depth_preview:detection.depthPreview, depth_range_m:detection.depthRange,
+            depth_valid_fraction:detection.depthValidFraction, center_m:detection.centerM, depth_options:partner?.depthOptions
+          } : {})
         });
       }
       if (method === 'POST' && action === 'pair') {
@@ -310,8 +314,9 @@ function createServer(options = {}) {
   return server;
 }
 
-if (require.main === module) {
-  const [cert, privateKey] = process.argv.slice(2);
+async function main(args) {
+  const dev = args.includes('--dev');
+  const [cert, privateKey] = args.filter(value => value !== '--dev');
   if (Boolean(cert) !== Boolean(privateKey)) throw new Error('Provide both the certificate and private-key paths, or neither.');
   const tls = cert ? {cert:readFileSync(cert), key:readFileSync(privateKey)} : undefined;
   const port = Number(process.env.VISIONASSIST_PORT || 8765);
@@ -320,9 +325,21 @@ if (require.main === module) {
     try { phoneOrigin = readFileSync(join(__dirname,'../.visionassist','phone-origin-'+port+'.txt'),'utf8').trim(); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
-  createServer({tls,phoneOrigin}).listen(port, tls ? '0.0.0.0' : '127.0.0.1', () => {
-    console.log(tls ? 'Use the HTTPS hostname covered by your certificate, on port ' + port + ', for both entries.'
-      : 'Desktop: http://localhost:' + port + '/   Camera: http://localhost:' + port + '/camera');
+  const host = tls ? '0.0.0.0' : '127.0.0.1';
+  process.env.NODE_ENV = dev ? 'development' : 'production';
+  const next = require('next');
+  const app = next({dev, dir:__dirname, hostname:host, port});
+  await app.prepare();
+  const server = createServer({tls,phoneOrigin,frontend:app.getRequestHandler()});
+  server.listen(port, host, () => {
+    const actualPort = server.address().port;
+    console.log(tls ? 'Use the HTTPS hostname covered by your certificate, on port ' + actualPort + ', for both entries.'
+      : 'Desktop: http://localhost:' + actualPort + '/   Camera: http://localhost:' + actualPort + '/camera');
   });
 }
+
+if (require.main === module) main(process.argv.slice(2)).catch(error => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
 module.exports = {createServer};
