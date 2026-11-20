@@ -55,6 +55,8 @@ function trackedLabel(object) {
 }
 
 function renderDetections() {
+  const stereo = !sampleMode && !$('#stereo-view').hidden;
+  $('#metric-heading').hidden = !stereo;
   const list = sampleMode ? sample : feeds.flatMap(feed =>
     (feed.objects ?? []).map(object => ({...object, camera:feed.side})));
   const waiting = !sampleMode && feeds.every(feed => feed.objects == null);
@@ -63,6 +65,7 @@ function renderDetections() {
     const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
     const cells = [trackedLabel(object), 'Camera ' + object.camera, value, object.position];
     if (!sampleMode) cells.push(object.relative_depth ?? 'unknown');
+    if (stereo) cells.push(Number.isFinite(object.depth_m) ? object.depth_m.toFixed(2) + ' m' : '—');
     for (const text of cells) {
       const cell = document.createElement('td');
       cell.textContent = text;
@@ -81,6 +84,34 @@ function renderDetections() {
     'No objects detected in the processed views.';
 }
 
+function showDepth(snapshot, preview) {
+  const status = snapshot?.stereo_status ?? (snapshot?.objects ? 'uncalibrated' : 'waiting_for_a');
+  const messages = {
+    waiting_for_a:'Waiting for a processed Camera A frame.',
+    uncalibrated:'Load the calibration for this phone pair to measure depth.',
+    size_mismatch:'Depth unavailable · check both phones’ image dimensions against calibration.',
+    waiting_for_pair:'Depth waiting for two time-matched camera frames.',
+    no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
+  };
+  $('#stereo-view').hidden = sampleMode;
+  $('#stereo-caption').textContent = messages[status] ?? '';
+  const canvas = $('#stereo-map');
+  canvas.hidden = !preview;
+  $('#stereo-caption').hidden = Boolean(preview);
+  const [near, far] = snapshot?.depth_range_m ?? [];
+  $('#depth-scale').textContent = preview
+    ? (near ? 'Bright ' + near + ' m · dark ' + far + ' m' : 'Near is bright, far is dark') + ' · black is unknown'
+    : '';
+  if (preview) {
+    canvas.width = preview.naturalWidth;
+    canvas.height = preview.naturalHeight;
+    canvas.getContext('2d').drawImage(preview, 0, 0);
+    canvas.dataset.frameId = snapshot.frame_id;
+  } else {
+    delete canvas.dataset.frameId;
+  }
+}
+
 function paintCamera(canvas, image, snapshot) {
   const width = canvas.width = image.naturalWidth;
   const height = canvas.height = image.naturalHeight;
@@ -95,7 +126,8 @@ function paintCamera(canvas, image, snapshot) {
     const x = x1 * width, y = y1 * height;
     ctx.strokeStyle = '#8ce9ff';
     ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
-    const caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position;
+    const caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
+      (Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
     const labelWidth = Math.min(width, Math.ceil(ctx.measureText(caption).width) + 8);
     const left = Math.min(x, width-labelWidth);
     const top = Math.max(0, y-fontSize-6);
@@ -133,6 +165,7 @@ function setFeed(feed, connected, message) {
   const image = node.querySelector('.live-frame');
   image.hidden = sampleMode || !connected;
   if (!connected) {
+    if (feed.side === 'A') showDepth(null);
     feed.etag = undefined;
     image.getContext('2d').clearRect(0,0,image.width,image.height);
     delete image.dataset.frameId;
@@ -164,11 +197,14 @@ async function readFrame(feed, version) {
     }
     const image = new Image();
     image.src = 'data:image/jpeg;base64,' + snapshot.jpeg;
-    await image.decode();
+    const depth = snapshot.depth_preview ? new Image() : null;
+    if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
+    await Promise.all([image.decode(), depth?.decode()]);
     if (version !== pollVersion) return;
     paintCamera(feed.node.querySelector('canvas'), image, snapshot);
     feed.etag = response.headers.get('etag');
     feed.objects = snapshot.objects;
+    if (feed.side === 'A') showDepth(snapshot,depth);
     setFeed(feed,true);
     renderDetections();
   } catch {
@@ -188,15 +224,16 @@ function refreshPolling() {
     await readFrame(feed,version);
     if (version === pollVersion) setTimeout(() => poll(feed),260);
   }
-  feeds.forEach(poll);
+  poll(feeds.find(feed => feed.side === 'A'));
 }
 
 function renderMode(demo) {
   stopAudio();
   sampleMode = demo;
+  feeds.find(feed => feed.side === 'B').node.hidden = !demo;
   $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
   $('#assist-mode').textContent = demo ? 'Sample scene' : 'Live preview mode';
-  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'Depth compares objects on the same level ground within each camera view.';
+  $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'Relative depth compares ground contacts. Forward depth is measured from Camera A using both phones.';
   $('#voice-message').textContent = '';
   feeds.forEach(feed => setFeed(feed,false));
   refreshPolling();
@@ -464,7 +501,7 @@ function restoreVoiceSettings() {
   let settings;
   try { settings = JSON.parse(sessionStorage.getItem('visionassist-voice-settings') || '{}'); }
   catch { settings = {}; }
-  $('#agent-camera').value = ['both','A','B'].includes(settings?.camera) ? settings.camera : 'both';
+  $('#agent-camera').value = ['both','A','B'].includes(settings?.camera) ? settings.camera : 'A';
   $('#voice-language').value = ['system','zh','en','auto'].includes(settings?.language) ? settings.language : 'system';
   $('#review-voice').checked = settings?.review === true;
   syncVoiceSettings(false);

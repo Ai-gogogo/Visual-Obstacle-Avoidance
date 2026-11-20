@@ -21,7 +21,7 @@
     <p class="obstacle-alert" id="obstacle-alert" role="alert"></p>
     <section id="monitor" data-page>
       <div class="page-head">
-        <div><h1 tabindex="-1">Live perception</h1><p>Compare two camera views and inspect object detections.</p></div>
+        <div><h1 tabindex="-1">Live perception</h1><p>Inspect Camera A detections and their stereo depth.</p></div>
         <div class="toolbar"><button class="quiet" id="mode">Show live cameras</button><button class="primary" id="pair">Pair a phone</button></div>
       </div>
       <div class="feed-grid">
@@ -35,10 +35,15 @@
           <div class="frame"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><canvas class="live-frame" role="img" aria-label="Live camera B preview with YOLO detections" hidden></canvas><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
           <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
         </article>
+        <article class="feed" id="stereo-view" hidden>
+          <header><h2>Stereo depth map</h2></header>
+          <div class="frame"><canvas id="stereo-map" class="live-frame" role="img" aria-label="Stereo depth aligned to Camera A" hidden></canvas><p id="stereo-caption" class="no-feed"></p></div>
+          <footer>Camera A + B <span id="depth-scale"></span></footer>
+        </article>
       </div>
       <section class="detections" aria-labelledby="detections-title">
         <div class="section-head"><div><h2 id="detections-title">Detected objects</h2><p id="detection-note">Sample annotations · distances are illustrative.</p></div><span class="status" id="detection-count">4 objects</span></div>
-        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th id="detection-measure" scope="col">Distance</th><th scope="col">Position in frame</th><th id="depth-heading" scope="col" hidden>Relative depth</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th scope="col">Category</th><th scope="col">Camera</th><th id="detection-measure" scope="col">Distance</th><th scope="col">Position in frame</th><th id="depth-heading" scope="col" hidden>Relative depth</th><th id="metric-heading" scope="col" hidden>Forward depth (A)</th></tr></thead><tbody id="detection-rows"></tbody></table></div>
         <p class="empty" id="empty-detections" hidden>Waiting for camera detections.</p>
       </section>
     </section>
@@ -53,13 +58,13 @@
             <p id="mic-error" role="alert"></p>
             <p class="voice-help" id="voice-help">Pause after each question. The assistant replies and listens again. Tap to end the conversation.</p>
           </div>
-          <p class="active-options" id="active-options">Both cameras · System language</p>
+          <p class="active-options" id="active-options">Left camera (A) · System language</p>
           <details class="assist-details">
             <summary>Voice controls and settings</summary>
             <p>Say “Only look left”, “Use both cameras”, “Switch to Mandarin”, or “Export the conversation”.</p>
             <div class="voice-options">
               <label>Camera for visual questions
-                <select id="agent-camera"><option value="both" selected>Both cameras</option><option value="A">Left camera (A)</option><option value="B">Right camera (B)</option></select></label>
+                <select id="agent-camera"><option value="both">Both cameras</option><option value="A" selected>Left camera (A)</option><option value="B">Right camera (B)</option></select></label>
               <label>Speech language
                 <select id="voice-language"><option value="system" selected>Follow system</option><option value="zh">Mandarin Chinese</option><option value="en">English</option><option value="auto">Auto detect</option></select></label>
               <label class="review-option"><input id="review-voice" type="checkbox"> Review transcription before sending</label>

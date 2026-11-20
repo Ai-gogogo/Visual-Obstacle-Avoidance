@@ -98,6 +98,7 @@ function createServer(options = {}) {
         session.slots[entry.slot] = {phone, streamID:key(), stamp:0};
         phones.set(phone, {session:entry.session, slot:entry.slot});
         attempts.delete(ip);
+        res.setHeader('X-Server-Ms', Date.now());
         return respond(res, 200, {token:phone});
       }
       if (route === '/api/frame' && ['PUT','DELETE'].includes(method)) {
@@ -118,6 +119,17 @@ function createServer(options = {}) {
         slot.frame = frame;
         slot.stamp = Date.now();
         slot.etag = '"' + key() + '"';
+        const sample = Number(req.headers['x-sample-ms']);
+        const uncertainty = Number(req.headers['x-clock-error-ms']);
+        slot.sample = Number.isSafeInteger(sample) && Math.abs(slot.stamp-sample) < FRESH &&
+          Number.isSafeInteger(uncertainty) && uncertainty >= 0 && uncertainty <= 250
+          ? {ms:sample, error:uncertainty} : null;
+        if (entry.slot === 'B' && slot.sample) {
+          slot.history ||= [];
+          slot.history.push({id:slot.etag.slice(1,-1), frame, stamp:slot.stamp, sample:slot.sample});
+          if (slot.history.length > 6) slot.history.shift();
+        }
+        res.setHeader('X-Server-Ms', slot.stamp);
         return res.writeHead(204).end();
       }
       const match = /^\/api\/(pair|frame|preview)\/([AB])$/.exec(route);
@@ -130,17 +142,24 @@ function createServer(options = {}) {
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
         const detection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
+        const partner = detection?.stereoPartner;
+        const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
         const frame = detection?.frame ?? slot.frame;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
         // A raw preview can acquire boxes without the camera uploading a new JPEG.
-        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + '"';
+        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + (lostPartner ? '-unpaired' : '') + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
-        const objects = detection?.objects.map(({item_feature, ...object}) => object) ?? null;
+        const objects = detection?.objects.map(({item_feature, ...object}) => {
+          if (lostPartner) delete object.depth_m;
+          return object;
+        }) ?? null;
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
-          jpeg:frame.toString('base64'), objects
+          jpeg:frame.toString('base64'), objects,
+          ...(detection?.stereoStatus ? {stereo_status:lostPartner ? 'waiting_for_pair' : detection.stereoStatus} : {}),
+          ...(!lostPartner && detection?.depthPreview ? {depth_preview:detection.depthPreview, depth_range_m:detection.depthRange} : {})
         });
       }
       if (method === 'POST' && action === 'pair') {

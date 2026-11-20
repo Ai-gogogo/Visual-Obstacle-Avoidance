@@ -1,5 +1,6 @@
-"""Publish live Camera A and B detections to the local VisionAssist server."""
+"""Detect on Camera A and use a time-matched B frame for calibrated stereo depth."""
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 import csv
@@ -10,22 +11,23 @@ from itertools import count
 from pathlib import Path
 from threading import Event, Lock
 
-import requests
-from PIL import Image, ImageOps
-
 import cv2
 import numpy as np
+import requests
+from PIL import Image, ImageOps
 
 from detect_image import DEFAULT_WEIGHTS, detect
 from item_features import item_features
 from obstacles import is_obstacle_candidate
 from risk import RiskAssessment
 from tracking import FrameTracker
+from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
 
 
 class CameraWorker:
-    def __init__(self, server, model, session, side="A", record=None, *, infer=None):
+    def __init__(self, server, model, session, side="A", record=None, stereo=None, *, infer=None):
         self.side = side
+        self.stereo = stereo
         self.record = record
         self.api = server.rstrip("/") + "/api/cv"
         self.model = model
@@ -72,6 +74,9 @@ class CameraWorker:
                 return
 
             objects = self.infer(image) if self.infer else detect(self.model, image)
+            payload = {"frame_id": etag.strip('"'), "objects": objects}
+            if self.stereo is not None and self.side == "A":
+                payload["stereo"] = self.measure_depth(params, payload, image)
             stream = frame.headers.get("X-CV-Stream-Id")
             frame_stamp = frame.headers.get("X-CV-Frame-Ms")
             stamp = int(frame_stamp) if frame_stamp is not None else None
@@ -94,7 +99,6 @@ class CameraWorker:
                 for obj, feature in zip(items, item_features(bgr, [obj["bbox"] for obj in items])):
                     if feature:
                         obj["item_feature"] = feature
-            payload = {"frame_id": etag.strip('"'), "objects": objects}
             if stamp is not None:
                 payload.update(schema_version=1, camera_id=self.side, timestamp_ms=stamp)
             self.pending[source] = (etag, payload)
@@ -108,6 +112,34 @@ class CameraWorker:
         # this ETag eligible for retry if the same JPEG is still available.
         self.etags[source] = etag
         del self.pending[source]
+
+    def measure_depth(self, params, payload, image):
+        if image.size != self.stereo.size:
+            return {"status": "size_mismatch"}
+        query = {**params, "frame_id": payload["frame_id"], "max_skew_ms": self.stereo.skew_ms}
+        partner = self.http.get(self.api + "/stereo-partner", params=query, timeout=3)
+        if partner.status_code in (204, 404):
+            return {"status": "waiting_for_pair"}
+        partner.raise_for_status()
+        right = cv2.imdecode(np.frombuffer(partner.content, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if right is None or right.shape != self.stereo.size[::-1]:
+            return {"status": "size_mismatch"}
+        depth = self.stereo.compute(np.asarray(image.convert("L")), right)
+        for obj in payload["objects"]:
+            z = object_depth(depth, obj["bbox"])
+            if z is not None:
+                obj["depth_m"] = z
+        if not np.isfinite(depth).any():
+            return {"status": "no_matches"}
+        preview = self.stereo.preview(depth)
+        scale = min(1, 240 / max(preview.shape))
+        thumb = cv2.resize(preview, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+        ok, png = cv2.imencode(".png", thumb)
+        if not ok:
+            raise RuntimeError("Cannot encode depth preview")
+        return {"status": "ready", "partner_id": partner.headers["X-Partner-Id"],
+                "preview": base64.b64encode(png).decode("ascii"),
+                "range_m": [self.stereo.min_m, self.stereo.max_m]}
 
 
 # Existing single-camera callers can keep their original constructor.
@@ -157,9 +189,16 @@ def main():
     parser.add_argument("--server", default="http://127.0.0.1:8765",
                         help="VisionAssist server URL on this computer")
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
+    parser.add_argument("--dual-yolo", action="store_true",
+                        help="Also run independent YOLO on B (legacy dual-camera benchmark)")
+    parser.add_argument("--stereo-config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--metrics", type=Path, help="New CSV file for accepted frames from both cameras")
     inference_options(parser)
     args = parser.parse_args()
+    try:
+        stereo = StereoDepth.load(args.stereo_config)
+    except (KeyError, OSError, ValueError, TypeError, cv2.error) as error:
+        parser.error(f"Invalid stereo configuration {args.stereo_config}: {error}")
     if not args.weights.is_file():
         parser.error(f"Missing local weights: {args.weights}. See cv/README.md for setup.")
 
@@ -179,9 +218,10 @@ def main():
         torch.set_num_threads(args.cpu_threads)
     cv2.setNumThreads(1)
     options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half)
-    if device == "cpu":
+    sides = "AB" if args.dual_yolo else "A"
+    if device == "cpu" or not args.dual_yolo:
         # Independent predictors let both camera threads use the CPU concurrently.
-        predictors = [partial(detect, YOLO(str(args.weights), task="detect"), **options) for _ in "AB"]
+        predictors = [partial(detect, YOLO(str(args.weights), task="detect"), **options) for _ in sides]
     else:
         # Ultralytics predictors hold mutable state. Serialize only inference on
         # one resident GPU model; frame fetch and publication stay independent.
@@ -209,10 +249,13 @@ def main():
                     writer.writerow(row)
                     output.flush()
 
-        workers = [CameraWorker(args.server, None, stack.enter_context(requests.Session()),
-                                side, record, infer=infer) for side, infer in zip("AB", predictors)]
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            print(f"YOLO loaded. Watching cameras A and B on {device} at {args.server}. Ctrl+C to stop.", flush=True)
+        workers = [
+            CameraWorker(args.server, None, stack.enter_context(requests.Session()), side, record,
+                         stereo=stereo if side == "A" else None, infer=infer)
+            for side, infer in zip(sides, predictors)
+        ]
+        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            print(f"YOLO loaded for {sides} on {device} at {args.server}. Ctrl+C to stop.", flush=True)
             try:
                 futures = [pool.submit(watch, worker, stop, args.poll_ms / 1000) for worker in workers]
                 for future in as_completed(futures):
