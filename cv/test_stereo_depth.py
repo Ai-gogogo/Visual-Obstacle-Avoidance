@@ -149,6 +149,20 @@ class LiveStereoTests(unittest.TestCase):
         upload(a, left, now)
         self.assertEqual(read()["stereo_status"], "waiting_for_pair")
 
+        get = http.get
+
+        def time_out_partner(url, **kwargs):
+            if url.endswith("/stereo-partner"):
+                raise requests.Timeout("Simulated unavailable stereo partner")
+            return get(url, **kwargs)
+
+        upload(a, left, now)
+        with patch.object(http, "get", side_effect=time_out_partner):
+            unavailable = read()
+        self.assertEqual(unavailable["stereo_status"], "unavailable")
+        self.assertEqual(unavailable["objects"][0]["label"], "chair")
+        self.assertNotIn("depth_preview", unavailable)
+
 
 if __name__ == "__main__":
     unittest.main()

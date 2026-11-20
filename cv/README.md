@@ -101,8 +101,9 @@ To log accepted detections (A by default, both with `--dual-yolo`), use `python 
 
 The live worker defaults to `--device auto`, which selects CUDA when the
 installed PyTorch can use it and otherwise selects CPU. The default input size
-is 640. CPU mode uses one PyTorch intra-op thread per inference by default. Resize
-with `--imgsz 512` or compare CPU thread counts with `--cpu-threads 2`. Use
+is 640. CPU mode defaults to up to four PyTorch intra-op threads for Camera A
+alone and one thread per predictor with `--dual-yolo`. Override with
+`--cpu-threads` to suit the machine. Use
 `--device cuda:0 --half` to compare FP16 with CUDA FP32. Check small-object
 detections before choosing a smaller resolution or FP16. Both cameras poll at
 50 ms by default and fetch JPEGs only when discovery reports a new frame;

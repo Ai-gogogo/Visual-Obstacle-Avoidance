@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 import csv
 import io
+import os
 import sys
 from functools import partial
 from itertools import count
@@ -117,10 +118,13 @@ class CameraWorker:
         if image.size != self.stereo.size:
             return {"status": "size_mismatch"}
         query = {**params, "frame_id": payload["frame_id"], "max_skew_ms": self.stereo.skew_ms}
-        partner = self.http.get(self.api + "/stereo-partner", params=query, timeout=3)
-        if partner.status_code in (204, 404):
-            return {"status": "waiting_for_pair"}
-        partner.raise_for_status()
+        try:
+            partner = self.http.get(self.api + "/stereo-partner", params=query, timeout=.25)
+            if partner.status_code in (204, 404):
+                return {"status": "waiting_for_pair"}
+            partner.raise_for_status()
+        except requests.RequestException:
+            return {"status": "unavailable"}
         right = cv2.imdecode(np.frombuffer(partner.content, np.uint8), cv2.IMREAD_GRAYSCALE)
         if right is None or right.shape != self.stereo.size[::-1]:
             return {"status": "size_mismatch"}
@@ -176,11 +180,12 @@ def resolve_device(requested):
     raise ValueError(f"Unavailable inference device {requested!r}. Use cpu or an available CUDA device.")
 
 
-def inference_options(parser):
+def inference_options(parser, *, default_cpu_threads=1):
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
     parser.add_argument("--imgsz", type=int, default=640, help="YOLO input size, a multiple of 32")
     parser.add_argument("--half", action="store_true", help="Opt in to FP16 on CUDA")
-    parser.add_argument("--cpu-threads", type=int, default=1, help="PyTorch intra-op threads per CPU inference")
+    parser.add_argument("--cpu-threads", type=int, default=default_cpu_threads,
+                        help="PyTorch intra-op threads per CPU inference")
     parser.add_argument("--poll-ms", type=int, default=50, help="Milliseconds between discovery polls")
 
 
@@ -193,8 +198,10 @@ def main():
                         help="Also run independent YOLO on B (legacy dual-camera benchmark)")
     parser.add_argument("--stereo-config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--metrics", type=Path, help="New CSV file for accepted frames from both cameras")
-    inference_options(parser)
+    inference_options(parser, default_cpu_threads=None)
     args = parser.parse_args()
+    if args.cpu_threads is None:
+        args.cpu_threads = 1 if args.dual_yolo else min(4, os.cpu_count() or 1)
     try:
         stereo = StereoDepth.load(args.stereo_config)
     except (KeyError, OSError, ValueError, TypeError, cv2.error) as error:
