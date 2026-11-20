@@ -132,3 +132,6 @@ dialog p{color:var(--muted);margin-bottom:.8rem}
 @media(max-width:760px){.masthead{flex-wrap:wrap;padding-block:.65rem}.page-head{align-items:flex-start;flex-direction:column}.feed-grid,.assist-grid{grid-template-columns:minmax(0,1fr)}.contrast{margin-left:auto}.masthead nav{order:1;width:100%}}
 @media(max-width:400px){th,td{padding:.5rem}.feed header,.feed footer{padding:.65rem}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}button:active{transform:none}}
+
+#calibration-dialog { width: min(850px, 92vw); max-height: 90vh; overflow: auto; }
+#calibration-dialog canvas { display: block; width: 100%; max-height: 48vh; object-fit: contain; background: #111; }

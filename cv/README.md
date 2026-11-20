@@ -224,6 +224,14 @@ worker processed the frame and found no objects.
 1. 打印平整棋盘格，量出**单个方格边长**。例如 10×7 个方格有 **9×6 个内角点**。固定两台手机，每次同时看见完整棋盘。采集约 15–25 个姿态，改变棋盘的倾角、方向、距离和在画面中的位置，按回车采集时保持棋盘静止。
 2. 运行下面的采集和求解命令。把示例的内角点数和 `25` 毫米换成实物的值。求解会输出重投影 RMS（像素）、基线（米），并将参数写入指定文件。基线应与实测镜头间距相符。RMS 明显超过约 1 像素时，检查棋盘尺寸、镜头设置、图像清晰度和姿态覆盖。
 
+
+For manual capture from Chrome, pair both cameras and open **Stereo calibration**.
+Hold the 10 × 7 square checkerboard still until both views show green corners.
+Press **Capture Stereo Pair** or Space for each new pose. Pairs are stored under
+`.visionassist/calibration/<batch>/` in the project. Pass that batch directory to
+`solve --pairs` below. Re-pairing a camera starts a new batch. The desktop server
+uses the CV virtual environment or the interpreter set in `VISIONASSIST_CV_PYTHON`.
+
 ```sh
 python cv/calibrate_stereo.py capture --server https://localhost:8765 --pairs /tmp/rig-pairs
 python cv/calibrate_stereo.py solve --pairs /tmp/rig-pairs --corners 9 6 --square-mm 25 --output cv/stereo_config.json

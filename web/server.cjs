@@ -13,6 +13,7 @@ const files = {
   '/ui.css': ['ui.css','text/css; charset=utf-8'],
   '/desktop.js': ['desktop.js','text/javascript; charset=utf-8'],
   '/voice-capture.js': ['voice-capture.js','text/javascript; charset=utf-8'],
+  '/calibration.js': ['calibration.js','text/javascript; charset=utf-8'],
   '/camera.js': ['camera.js','text/javascript; charset=utf-8'],
   '/demo-lab.webp': ['demo-lab.webp','image/webp']
 };
@@ -71,6 +72,17 @@ function createServer(options = {}) {
       for (const [code, entry] of codes) if (entry.until <= now) codes.delete(code);
       for (const [ip, entry] of attempts) if (entry.until <= now) attempts.delete(ip);
       const token = (req.headers.authorization || '').replace(/^Bearer /,'');
+      if (route === '/api/calibration/preview' || route === '/api/calibration/capture') {
+        const session = sessions.get(token);
+        if (!session) return respond(res,401,{error:'Pair cameras from this dashboard first.'});
+        if (method !== 'POST') return respond(res,405,{error:'Use POST.'});
+        const {id} = JSON.parse((await read(req,1024)).toString() || '{}');
+        try {
+          return respond(res,200,await require('./calibration.cjs').calibration(session,route.split('/').pop(),id));
+        } catch (error) {
+          return respond(res,503,{error:error.message});
+        }
+      }
       if (/^\/api\/(agent|memory|cv)\//.test(route)) {
         return await assistant.handle(req,res,route,token);
       }
