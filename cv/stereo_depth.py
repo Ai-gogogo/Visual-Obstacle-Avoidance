@@ -34,6 +34,7 @@ class StereoDepth:
         return cls(config) if config["enabled"] else None
 
     def __init__(self, config):
+        self.config = config.copy()
         self.square_units = config.get("units") == "checker_squares_only"
         width, height = config["image_size_px"]
         count = config["num_disparities"]
@@ -41,6 +42,12 @@ class StereoDepth:
                 or type(count) is not int or count <= 0 or count % 16 or count + 8 >= width):
             raise ValueError("Set image_size_px and a positive num_disparities multiple of 16 below image width")
         self.size = (width, height)
+        divisor = config.get("matching_divisor", 1)
+        if (type(divisor) is not int or divisor < 1 or width % divisor or height % divisor
+                or min(width, height) // divisor < 16 or count + 8 >= width // divisor):
+            raise ValueError("Invalid matching_divisor or disparity range for matching dimensions")
+        width, height = width // divisor, height // divisor
+        self.match_size = (width, height)
         self.min_m, self.max_m, baseline = array(
             [config["min_depth_m"], config["max_depth_m"], config["baseline_m"]], (3,), "metric limits")
         self.skew_ms = config["max_pair_skew_ms"]
@@ -49,6 +56,12 @@ class StereoDepth:
         ka, da = camera_parameters(config["camera_A"])
         self.camera_a = ka, da
         kb, db = camera_parameters(config["camera_B"])
+        if divisor != 1:
+            ka, kb = ka.copy(), kb.copy()
+            for intrinsic in (ka, kb):
+                intrinsic[0, 0] /= divisor
+                intrinsic[1, 1] /= divisor
+                intrinsic[:2, 2] = (intrinsic[:2, 2] + .5) / divisor - .5
         rotation = array(config["rotation_A_to_B"], (3, 3), "rotation_A_to_B")
         direction = array(config["translation_direction_A_to_B"], (3,), "translation_direction_A_to_B")
         if (not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-4)
@@ -56,11 +69,11 @@ class StereoDepth:
                 or not math.isclose(np.linalg.norm(direction), 1, abs_tol=1e-4)):
             raise ValueError("Expected a proper rotation and a unit translation direction")
         ra, rb, pa, pb, _, roi_a, roi_b = cv2.stereoRectify(
-            ka, da, kb, db, self.size, rotation, direction * baseline, flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
+            ka, da, kb, db, self.match_size, rotation, direction * baseline, flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
         if pb[0, 3] >= 0 or abs(pb[0, 3]) <= abs(pb[1, 3]) or pa[0, 0] <= 0:
             raise ValueError("Use a horizontal rig with A on the left, B on the right")
         self.fb = -pb[0, 3]
-        self.maps = [cv2.initUndistortRectifyMap(k, d, r, p, self.size, cv2.CV_32FC1)
+        self.maps = [cv2.initUndistortRectifyMap(k, d, r, p, self.match_size, cv2.CV_32FC1)
                      for k, d, r, p in [(ka, da, ra, pa), (kb, db, rb, pb)]]
         # Raw A pixels -> rectified A sampling coordinates. Rotate rectified Z back to A's optical axis.
         y, x = np.indices((height, width), dtype=np.float32)
@@ -85,10 +98,25 @@ class StereoDepth:
                          speckleWindowSize=50, speckleRange=2, disp12MaxDiff=1)
                          for start in (0, 1-count)]
 
+    def for_usb_low_output(self):
+        """Match the same lens after the phone crops 240 rows per end and resizes."""
+        if self.size != (1080, 1920):
+            raise ValueError("USB low output needs the original portrait calibration")
+        cfg = dict(self.config, image_size_px=[480, 640], matching_divisor=2, num_disparities=176)
+        for side in ("camera_A", "camera_B"):
+            cam = self.config[side]
+            scale = 4 / 9
+            cfg[side] = dict(cam, fx=cam["fx"]*scale, fy=cam["fy"]*scale,
+                             cx=(cam["cx"]+.5)*scale-.5, cy=(cam["cy"]-240+.5)*scale-.5)
+        return StereoDepth(cfg)
+
     def compute(self, left, right):
         """Inputs are grayscale uint8, result is float32 axial meters; invalid pixels are NaN."""
         if any(image.shape != self.size[::-1] or image.dtype != np.uint8 for image in (left, right)):
             raise ValueError(f"Both grayscale inputs must match calibrated size {self.size}")
+        if self.match_size != self.size:
+            left, right = [cv2.resize(image, self.match_size, interpolation=cv2.INTER_AREA)
+                           for image in (left, right)]
         a, b = [cv2.remap(image, *maps, cv2.INTER_LINEAR) for image, maps in zip((left, right), self.maps)]
         # SGBM skips an entire disparity range at its search border. Extend that
         # border for the cost computation, then reject matches touching padding.
@@ -96,14 +124,14 @@ class StereoDepth:
         def match_disparity(matcher, first, second, pad_left, pad_right):
             first = cv2.copyMakeBorder(first, 0, 0, pad_left, pad_right, cv2.BORDER_REPLICATE)
             second = cv2.copyMakeBorder(second, 0, 0, pad_left, pad_right, cv2.BORDER_REPLICATE)
-            values = matcher.compute(first, second)[:, pad_left:pad_left+self.size[0]]
+            values = matcher.compute(first, second)[:, pad_left:pad_left+self.match_size[0]]
             return values.astype(np.float32) / 16
 
         disp = match_disparity(self.matchers[0], a, b, n, 0)
         reverse = match_disparity(self.matchers[1], b, a, 0, n)
         right_x = self.cols - disp
         bx = np.rint(right_x).astype(np.int32)
-        match = reverse[self.rows, bx.clip(0, self.size[0]-1)]
+        match = reverse[self.rows, bx.clip(0, self.match_size[0]-1)]
         ax0, _, ax1, _ = self.window_bounds[0]
         bx0, _, bx1, _ = self.window_bounds[1]
         support = (self.left_support & (right_x >= bx0) & (right_x <= bx1)
@@ -115,7 +143,11 @@ class StereoDepth:
         z = np.full(disp.shape, np.nan, np.float32)
         np.divide(self.fb * self.z_scale, disp, out=z, where=valid)
         z[(z < self.min_m) | (z > self.max_m)] = np.nan
-        return cv2.remap(z, self.raw_lookup, None, cv2.INTER_NEAREST, borderValue=float("nan"))
+        depth = cv2.remap(z, self.raw_lookup, None, cv2.INTER_NEAREST, borderValue=float("nan"))
+
+        if self.match_size != self.size:
+            depth = cv2.resize(depth, self.size, interpolation=cv2.INTER_NEAREST)
+        return depth
 
     def preview(self, depth):
         """Black is unknown. Near is bright, far is dark, on a fixed inverse-depth scale."""

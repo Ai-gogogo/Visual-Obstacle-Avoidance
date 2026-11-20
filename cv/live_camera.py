@@ -36,6 +36,9 @@ class CameraWorker:
     ):
         self.side = side
         self.stereo = stereo
+        self.original_stereo = stereo
+        self.low_stereo = None
+        self.usb_resolution = None
         self.road = road
         self.corridor = corridor
         self.intrusions = {}
@@ -89,6 +92,14 @@ class CameraWorker:
             return
 
         frame.raise_for_status()
+        resolution = frame.headers.get("X-USB-Resolution")
+        if resolution == "480x640" and self.original_stereo and self.original_stereo.size == (1080, 1920):
+            if self.low_stereo is None:
+                self.low_stereo = self.original_stereo.for_usb_low_output()
+            self.stereo = self.low_stereo
+        elif self.usb_resolution == "480x640":
+            self.stereo = self.original_stereo
+        self.usb_resolution = resolution
         etag = frame.headers["ETag"]
         pending = self.pending.get(source)
 
@@ -227,6 +238,8 @@ class CameraWorker:
         except requests.RequestException:
             return {"status": "unavailable"}, None
 
+        if self.usb_resolution and partner.headers.get("X-USB-Resolution") != self.usb_resolution:
+            return {"status": "size_mismatch"}, None
         right = cv2.imdecode(
             np.frombuffer(partner.content, np.uint8),
             cv2.IMREAD_GRAYSCALE
@@ -234,7 +247,17 @@ class CameraWorker:
         if right is None or right.shape != self.stereo.size[::-1]:
             return {"status": "size_mismatch"}, None
         gray = np.asarray(image.convert("L"))
-        depth = self.stereo.compute(gray, right)
+        low_crop = partner.headers.get("X-Depth-Low") == "1" and self.stereo.size == (1080, 1920)
+        if low_crop:
+            if self.low_stereo is None:
+                self.low_stereo = self.stereo.for_usb_low_output()
+            small = [cv2.resize(view[240:-240], (480, 640), interpolation=cv2.INTER_AREA)
+                     for view in (gray, right)]
+            result = self.low_stereo.compute(*small)
+            depth = np.full(gray.shape, np.nan, dtype=np.float32)
+            depth[240:-240] = cv2.resize(result, (1080, 1440), interpolation=cv2.INTER_NEAREST)
+        else:
+            depth = self.stereo.compute(gray, right)
         options = partner.headers
         source = params["source_id"]
         meters = options.get("X-Depth-Meters", "1") == "1"
@@ -253,7 +276,7 @@ class CameraWorker:
         if spatial:
             display = spatial_depth(depth, gray)
         if options.get("X-Depth-Temporal") == "1":
-            key = (options.get("X-Depth-Rig"), spatial)
+            key = (options.get("X-Depth-Rig"), spatial, low_crop)
             display = self.temporal.setdefault(source, StaticMedian()).apply(
                 key, int(options["X-Depth-Stamp"]), gray, display)
         else:
@@ -354,6 +377,7 @@ def main():
     parser.add_argument("--dual-yolo", action="store_true",
                         help="Also run independent YOLO on B (legacy dual-camera benchmark)")
     parser.add_argument("--stereo-config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--usb-low-config", type=Path, help="Measured 480 × 640 calibration for this USB rig")
     parser.add_argument("--metrics", type=Path, help="New CSV file for accepted frames from both cameras")
     # New option. HSV stays the default.
     parser.add_argument(
@@ -371,6 +395,10 @@ def main():
         args.cpu_threads = 1 if args.dual_yolo else min(4, os.cpu_count() or 1)
     try:
         stereo = StereoDepth.load(args.stereo_config)
+        low_stereo = StereoDepth.load(args.usb_low_config) if args.usb_low_config else None
+        if args.usb_low_config and (not low_stereo or low_stereo.size != (480, 640)
+                                    or not stereo or stereo.size != (1080, 1920)):
+            raise ValueError("USB profiles require enabled 1080 × 1920 and 480 × 640 calibrations")
     except (
         KeyError, OSError, ValueError,
         TypeError, cv2.error
@@ -480,6 +508,7 @@ def main():
             for side, infer in zip(sides, predictors)
         ]
 
+        workers[0].low_stereo = low_stereo
         with ThreadPoolExecutor(max_workers=len(workers)) as pool:
             print(
                 f"YOLO loaded for {sides} "

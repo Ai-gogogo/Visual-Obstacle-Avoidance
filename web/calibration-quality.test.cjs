@@ -55,3 +55,20 @@ test('recording target considers valid pairs, steady poses and all three faces',
   counts.observe(top,62,21400);
   assert.equal(counts.ready,true);
 });
+
+test('each new steady pose counts past the suggested target', () => {
+  const counts = new RecordingCounts('single');
+  let frame = 0;
+  for (let i = 0; i < 25; i++) {
+    const pose = poseFromBoards([board((i % 5) * 10), board(Math.floor(i / 5) * 10)], 'single');
+    for (let j = 0; j < 3; j++) {
+      frame++;
+      counts.observe(pose, frame, frame * 400);
+    }
+    assert.equal(counts.poses.length, i + 1);
+    assert.equal(counts.ready, i >= 19);
+  }
+  counts.observe(counts.poses[0], ++frame, frame * 400);
+  counts.observe(counts.poses[0], ++frame, frame * 400);
+  assert.equal(counts.poses.length, 25);
+});

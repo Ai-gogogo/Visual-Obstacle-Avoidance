@@ -104,6 +104,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       const retain = frameType === 'image/png' ? 3 : 8;
       while (slot.cvFrames.size > retain) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
       return res.writeHead(200,{'Content-Type':frameType,ETag:slot.etag,
+        ...(slot.usbResolution ? {'X-USB-Resolution':slot.usbResolution} : {}),
         ...(slot.sample ? {'X-CV-Sample-Ms':slot.sample.ms} : {}),
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
@@ -125,6 +126,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (!best) return res.writeHead(204).end();
       const opt = session.depthOptions;
       if (opt) {
+        res.setHeader('X-Depth-Low',Number(opt.low === true));
         res.setHeader('X-Depth-Spatial',Number(opt.spatial));
         res.setHeader('X-Depth-Temporal',Number(opt.temporal));
         res.setHeader('X-Depth-Meters',Number(opt.meters));
@@ -134,6 +136,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       }
       left.partner = {depthOptions:opt, id:best.id, stream:right.streamID, stamp:best.stamp};
       return res.writeHead(200,{'Content-Type':best.frameType ?? 'image/jpeg', 'X-Partner-Id':best.id,
+        ...(right.usbResolution ? {'X-USB-Resolution':right.usbResolution} : {}),
         'X-Partner-Stream':right.streamID}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();

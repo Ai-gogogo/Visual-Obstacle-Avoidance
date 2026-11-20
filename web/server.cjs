@@ -49,6 +49,7 @@ function createServer(options = {}) {
   const phones = new Map();
   const attempts = new Map();
   const assistant = createAgentRoutes(options.agent, sessions, read, respond);
+  const usb = require("./usb-cameras.cjs").usbCameras({sessions, phones, key, read, respond});
   const handler = async (req, res) => {
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
@@ -80,6 +81,19 @@ function createServer(options = {}) {
       for (const [code, entry] of codes) if (entry.until <= now) codes.delete(code);
       for (const [ip, entry] of attempts) if (entry.until <= now) attempts.delete(ip);
       const token = (req.headers.authorization || '').replace(/^Bearer /,'');
+      const archive = /^\/api\/depth-replay\/(d8be72ae|4317d705|36ad570e)$/.exec(route);
+      if (archive && method === 'GET') {
+        if (!sessions.has(token)) return respond(res,401,{error:'Open the desktop dashboard.'});
+        if (!['localhost','127.0.0.1','[::1]'].includes(new URL('http://' + req.headers.host).hostname) ||
+            !['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress))
+          return respond(res,403,{error:'Open saved recordings on the Mac.'});
+        const file = join(__dirname,'../.visionassist/depth-replays',archive[1]+'.mp4');
+        try {
+          const bytes = await require('node:fs/promises').readFile(file);
+          return res.writeHead(200,{'Content-Type':'video/mp4'}).end(bytes);
+        } catch { return respond(res,404,{error:'This saved depth replay is unavailable on this Mac.'}); }
+      }
+      if (route === '/api/usb') return await usb.handle(req,res,token);
       if (route === '/api/calibration/video-check') {
         if (!sessions.has(token)) return respond(res,401,{error:'Camera session ended.'});
         if (method !== 'POST') return respond(res,405,{error:'Use POST.'});
@@ -175,10 +189,14 @@ function createServer(options = {}) {
         if (attempt.count >= 15) return respond(res, 429, {error:'Too many attempts. Wait a minute and retry.'});
         attempt.count += 1;
         attempts.set(ip, attempt);
-        const {code} = JSON.parse((await read(req,1024)).toString());
+        const {code,expectedSlot,expectedSourceID} = JSON.parse((await read(req,1024)).toString());
         const entry = codes.get(code);
         const session = entry && sessions.get(entry.session);
         if (!session || entry.until <= now) return respond(res, 404, {error:'Code expired or invalid. Generate a new code on the computer.'});
+        if (expectedSlot !== undefined && expectedSlot !== entry.slot)
+          return respond(res,409,{error:'Use the pairing code for Camera '+entry.slot+' in its matching slot.'});
+        if (expectedSourceID !== undefined && expectedSourceID !== session.sourceID)
+          return respond(res,409,{error:'Generate both camera codes in the same dashboard tab.'});
         codes.delete(code);
         const slot = session.slots[entry.slot];
         phones.delete(slot.phone);
@@ -188,7 +206,7 @@ function createServer(options = {}) {
         phones.set(phone, {session:entry.session, slot:entry.slot});
         attempts.delete(ip);
         res.setHeader('X-Server-Ms', Date.now());
-        return respond(res, 200, {token:phone});
+        return respond(res, 200, {token:phone,slot:entry.slot,sourceID:session.sourceID});
       }
       if (route === '/api/frame' && ['PUT','DELETE'].includes(method)) {
         const entry = phones.get(token);
@@ -245,7 +263,7 @@ function createServer(options = {}) {
         if (side === 'A' && req.headers['x-depth-options'] !== undefined) {
           const opt = JSON.parse(req.headers['x-depth-options']);
           const mm = Number(opt.fiveMm);
-          session.depthOptions = {spatial:opt.spatial === true, temporal:opt.temporal === true,
+          session.depthOptions = {...(typeof opt.low === 'boolean' ? {low:opt.low} : {}), spatial:opt.spatial === true, temporal:opt.temporal === true,
             meters:opt.meters === true, fiveMm:Number.isFinite(mm) && mm>0 ? mm : 0};
         }
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
@@ -276,6 +294,7 @@ function createServer(options = {}) {
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
+          depth_rig:[session.slots.A.streamID,session.slots.B.streamID].join("/"),
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
           ...(format === 'image/png' ? {png:frame.toString('base64')} : {jpeg:frame.toString('base64')}), objects,
           ...(detection?.road_edge && (!lostPartner || detection.road_edge.distance_m === undefined) ? {road_edge:detection.road_edge} : {}),
@@ -311,6 +330,7 @@ function createServer(options = {}) {
   };
   const server = options.tls ? https.createServer(options.tls, handler) : http.createServer(handler);
   server.once('close', assistant.close);
+  server.once('close', usb.close);
   return server;
 }
 

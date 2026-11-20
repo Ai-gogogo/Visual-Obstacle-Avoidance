@@ -22,13 +22,20 @@ test('desktop and two phones pair independently and stale frames are withheld', 
 
   const {token:desk} = await read(await call('/api/session','POST'),201);
   const pair = async side => (await read(await call('/api/pair/'+side,'POST',desk),201)).code;
-  const join = code => call('/api/join','POST',undefined,JSON.stringify({code}),{'Content-Type':'application/json'});
+  const join = (code,expected = {}) => call('/api/join','POST',undefined,JSON.stringify({code,...expected}),{'Content-Type':'application/json'});
   const codeA = await pair('A');
   const codeB = await pair('B');
   assert.notEqual(codeA, codeB);
-  const {token:a} = await read(await join(codeA),200);
+  assert.equal((await join(codeA,{expectedSlot:'B'})).status,409);
+  const {token:a,slot,sourceID} = await read(await join(codeA,{expectedSlot:'A'}),200);
+  assert.equal(slot,'A');
+  assert.ok(sourceID);
   assert.equal((await join(codeA)).status,404);
-  const {token:b} = await read(await join(codeB),200);
+  assert.equal((await join(codeB,{expectedSlot:'B',expectedSourceID:'other-session'})).status,409);
+  const joinedB = await read(await join(codeB,{expectedSlot:'B',expectedSourceID:sourceID}),200);
+  assert.equal(joinedB.slot,'B');
+  assert.equal(joinedB.sourceID,sourceID);
+  const b = joinedB.token;
   const jpegA = Buffer.from([255,216,11,255,217]);
   const jpegB = Buffer.from([255,216,22,255,217]);
   const push = (token, bytes) => call('/api/frame','PUT',token,bytes,{'Content-Type':'image/jpeg'});

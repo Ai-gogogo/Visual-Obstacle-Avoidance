@@ -2,7 +2,7 @@ import { createPerceptionView } from "./perception-view";
 
 export function createPerceptionController({$, scope, root, session, isMonitor, onModeChange}) {
   const {listen} = scope;
-  const VisionPerceptionView = createPerceptionView($);
+  const VisionPerceptionView = createPerceptionView($, scope.signal);
   const feeds = [...root.querySelectorAll('[data-camera]')].map(node => ({node, side:node.dataset.camera}));
   let sampleMode = true;
   let pollVersion = 0;
@@ -66,13 +66,15 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       }
       const image = new Image();
       image.src = snapshot.png ? 'data:image/png;base64,' + snapshot.png : 'data:image/jpeg;base64,' + snapshot.jpeg;
-      const depth = snapshot.depth_preview ? new Image() : null;
+      let depth = snapshot.depth_preview ? new Image() : null;
       if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
       await Promise.all([image.decode(), depth?.decode()]);
       if (version !== pollVersion) return;
       if (snapshot.depth_options && Object.entries(VisionPerceptionView.depthOptions()).some(
         ([key, value]) => snapshot.depth_options[key] !== value
       )) {
+        depth = null;
+        snapshot.stereo_status = 'waiting_for_a';
         delete snapshot.depth_range_m;
         delete snapshot.center_m;
         for (const object of snapshot.objects ?? []) delete object.depth_m;
@@ -124,6 +126,36 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     refreshPolling();
   }
 
+  let replayURL, replayVersion = 0;
+  const source = $('#depth-source'), video = $('#saved-depth-video');
+  function clearReplay() {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    if (replayURL) URL.revokeObjectURL(replayURL);
+    replayURL = undefined;
+  }
+  listen(source,'change', async () => {
+    const version = ++replayVersion;
+    const saved = !['live','low'].includes(source.value);
+    clearReplay();
+    $('#saved-depth').hidden = !saved;
+    $('#live-depth-controls').hidden = saved;
+    if (!saved) { VisionPerceptionView.showDepth(null,null,sampleMode); refreshPolling(); return; }
+    $('#saved-depth-status').textContent = 'Loading saved depth…';
+    try {
+      const response = await session.agentFetch('/api/depth-replay/'+source.value,'GET');
+      const blob = await response.blob();
+      if (version !== replayVersion || scope.signal.aborted) return;
+      replayURL = URL.createObjectURL(blob);
+      video.src = replayURL;
+      $('#saved-depth-status').textContent = 'Recorded relative depth · near is warm, far is cool.';
+      await video.play().catch(() => {});
+    } catch (err) {
+      if (version === replayVersion) $('#saved-depth-status').textContent = err.message;
+    }
+  });
+  scope.signal.addEventListener('abort',clearReplay,{once:true});
   listen($('#depth-palette'), 'change', VisionPerceptionView.repaintDepth);
   for (const id of ['depth-spatial','depth-temporal','depth-meters','depth-five-mm']) {
     listen($('#'+id), 'change', () => {

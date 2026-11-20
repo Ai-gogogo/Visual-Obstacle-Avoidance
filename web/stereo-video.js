@@ -84,7 +84,7 @@ export function connectStereoVideo({$, scope, session}) {
     if (signal.aborted || displayedRun !== run) return;
     const counts = run.counts;
     const pending = run.frames - counts.checked - run.unchecked;
-    let message = 'Valid pairs: '+counts.valid+' / '+counts.checked+' checked (goal: 60 valid) · Distinct steady poses: '+counts.poses.length+' / 20';
+    let message = 'Valid pairs: '+counts.valid+' / '+counts.checked+' checked (goal: 60 valid) · Distinct steady poses: '+counts.poses.length+' (goal: 20)';
     if (run.mode === 'three') message += ' · Faces: '+counts.faces.size+' / 3';
     if (pending) message += ' · Checking: '+pending;
     if (run.unchecked) message += ' · Unchecked: '+run.unchecked;

@@ -1,15 +1,18 @@
+import {connectUsbControls} from './usb-controls.js';
 export function connectPairing({$, root, scope, session, accessibility, isMonitor, onPaired}) {
   const {listen} = scope;
   let pairingVersion = 0;
   const dialog = $('#pair-dialog');
   const pairButtons = [...root.querySelectorAll('[data-pair]')];
   const copyCode = $('#copy-code');
+  const usb = connectUsbControls({$, scope, session, dialog, onPaired});
   function openPairDialog(event) {
     $('#phone-address').hidden = true;
     $('#pair-result').textContent = '';
     $('#copy-status').textContent = '';
     copyCode.hidden = true;
     accessibility.openDialog(dialog,event);
+    usb();
   }
   listen($('#pair'), 'click',openPairDialog);
   listen($('#assist-pair'), 'click',openPairDialog);

@@ -14,7 +14,7 @@ const depthPalettes = {
   viridis:depthColors('440154 48186a 472d7b 424086 3b528b 33638d 2c728e 26828e 21918c 1f9f88 27ad81 3dbc74 5cc863 81d34d aadc32 d5e21a fde725')
 };
 
-export function createPerceptionView($) {
+export function createPerceptionView($, signal) {
   const sample = [
     {label:'Chair', camera:'A', distance:1.4, position:'Center', box:[36,22,33,77]},
     {label:'Desk', camera:'A', distance:2.3, position:'Right', box:[78,32,22,65], align:'right'},
@@ -22,10 +22,12 @@ export function createPerceptionView($) {
     {label:'Water bottle', camera:'B', distance:2.1, position:'Right', box:[65,36,7,24]}
   ];
 
-  let lastDepthFrame;
+  let lastDepthFrame, holdTimer;
+  signal?.addEventListener('abort', () => clearTimeout(holdTimer), {once:true});
 
   function depthOptions() {
     return {
+      low: $('#depth-source').value === 'low',
       spatial: $('#depth-spatial').checked,
       temporal: $('#depth-temporal').checked,
       meters: $('#depth-meters').checked,
@@ -87,6 +89,20 @@ export function createPerceptionView($) {
   }
 
   function showDepth(snapshot, preview, sampleMode) {
+    clearTimeout(holdTimer);
+    const notice = $('#depth-hold-status');
+    notice.hidden = true;
+    const age = lastDepthFrame ? Date.now() - lastDepthFrame.snapshot.timestamp_ms : Infinity;
+    const waiting = snapshot && !snapshot.objects && !snapshot.stereo_status;
+    if (!preview && !sampleMode && waiting && age >= 0 && age < 3500 &&
+        snapshot.depth_rig === lastDepthFrame.snapshot.depth_rig) {
+      notice.textContent = 'Last depth frame · '+(age/1000).toFixed(1)+' s ago · waiting for update';
+      notice.hidden = false;
+      $('#depth-reading').textContent = '';
+      $('#depth-reticle').hidden = true;
+      holdTimer = setTimeout(() => showDepth(snapshot,null,false),Math.min(500,3500-age));
+      return;
+    }
     lastDepthFrame = preview ? {snapshot, preview} : null;
     const status = snapshot?.stereo_status ?? (snapshot?.objects ? 'uncalibrated' : 'waiting_for_a');
     const messages = {
@@ -97,7 +113,7 @@ export function createPerceptionView($) {
       unavailable:'Depth processing is unavailable. Camera A is still detecting objects.',
       no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
     };
-    $('#stereo-view').hidden = sampleMode;
+    $('#stereo-view').hidden = false;
     $('#stereo-caption').textContent = messages[status] ?? '';
     const canvas = $('#stereo-map');
     canvas.hidden = !preview;

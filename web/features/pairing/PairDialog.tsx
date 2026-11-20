@@ -12,9 +12,28 @@ export function PairDialog() {
       <h2 id="pair-title" tabIndex={-1} data-initial-focus>
         Pair a phone
       </h2>
-      <p>
-        Choose a camera, then scan its QR code or enter the six-digit code on the phone.
-      </p>
+      <section id="usb-controls" hidden aria-labelledby="usb-title">
+        <h3 id="usb-title">USB cameras</h3>
+        <p>Plug both iPhones into this Mac and open WiredCamera on each phone.</p>
+        <div className="pair-options">
+          <label>Camera A · left <select id="usb-A" /></label>
+          <label>Camera B · right <select id="usb-B" /></label>
+        </div>
+        <label>Camera output · both phones
+          <select id="usb-resolution" defaultValue="1080x1920">
+            <option value="1080x1920">1080 × 1920 · full frame</option>
+            <option value="480x640">480 × 640 · centered crop</option>
+          </select>
+        </label>
+        <p id="usb-status" role="status" aria-live="polite"></p>
+        <div className="pair-options">
+          <button type="button" className="primary" id="usb-connect" disabled>Connect USB cameras</button>
+          <button type="button" className="quiet" id="usb-refresh">Refresh devices</button>
+          <button type="button" className="quiet" id="usb-disconnect" hidden>Disconnect USB</button>
+        </div>
+      </section>
+      <details id="wifi-pairing">
+      <summary>Wi-Fi pairing</summary>
       <p id="phone-address" className="address" hidden></p>
       <div className="pair-options">
         <button type="button" className="primary" data-pair="A">
@@ -29,6 +48,7 @@ export function PairDialog() {
         Copy pairing code
       </button>
       <p id="copy-status" role="status"></p>
+      </details>
     </dialog>
   );
 }

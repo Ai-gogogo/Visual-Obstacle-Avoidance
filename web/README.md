@@ -1,5 +1,7 @@
 # VisionAssist 桌面与手机相机原型
 
+两台 iPhone 通过数据线连接 Mac 时，请按[双 USB 采集说明](../wired/README.md)操作。
+
 ## 先看设计
 
 - 电脑打开 `http://localhost:8765/`。默认进入 **Judge view**，显示两路示例画面和物体框。配对后进入实时模式，显示 Camera A 的 YOLO 检测、Camera B 和双目深度图。首次测距前需要为当前支架完成双目标定。顶部 **Voice assistant** 切到用户页。
