@@ -127,8 +127,11 @@ function paintCamera(canvas, image, snapshot) {
     const x = x1 * width, y = y1 * height;
     ctx.strokeStyle = '#8ce9ff';
     ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
-    const caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
+    let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
       (Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
+    if (object.intrusion && object.intrusion.expires > Date.now()) {
+      caption += ' · may cross from '+object.intrusion.from_side+' (~'+object.intrusion.eta_s.toFixed(1)+' s)';
+    }
     const labelWidth = Math.min(width, Math.ceil(ctx.measureText(caption).width) + 8);
     const left = Math.min(x, width-labelWidth);
     const top = Math.max(0, y-fontSize-6);
@@ -136,6 +139,14 @@ function paintCamera(canvas, image, snapshot) {
     ctx.fillRect(left, top, labelWidth, fontSize+6);
     ctx.fillStyle = '#102031';
     ctx.fillText(caption, left+4, top+2, Math.max(1,labelWidth-8));
+  }
+  const edge = snapshot.road_edge;
+  if (edge?.point) {
+    const [u,v] = edge.point;
+    ctx.strokeStyle = '#ffd44c';
+    ctx.beginPath();
+    ctx.arc(u*width,v*height,Math.max(5,width/65),0,2*Math.PI);
+    ctx.stroke();
   }
   canvas.dataset.frameId = snapshot.frame_id;
 }
@@ -209,6 +220,10 @@ async function readFrame(feed, version) {
     setFeed(feed,true);
     if (snapshot.analysis_delayed) {
       feed.node.querySelector('.feed-summary').textContent = 'Live preview · analysis catching up';
+    } else if (snapshot.road_edge?.point) {
+      const meters = snapshot.road_edge.distance_m;
+      feed.node.querySelector('.feed-summary').textContent = Number.isFinite(meters)
+        ? 'Road edge ahead · '+meters.toFixed(1)+' m' : 'Possible road ahead · distance unavailable';
     }
     renderDetections();
   } catch {
@@ -250,10 +265,9 @@ const conversation = readConversation();
 let confirmation;
 let alertSequence = 0;
 let warningUntil = 0;
-let lastWarningRisk;
-let pendingReminder;
 let deferredReply;
 let warningActive = false;
+let pendingReminder;
 
 function setVoiceState(title, prompt, label) {
   $('#voice-state').textContent = title;
@@ -289,7 +303,11 @@ function resumeListening() {
   active.segment = {lead:[], chunks:[], onset:0, voiced:0, quiet:0, floor:0.002};
   active.stream.getAudioTracks().forEach(track => { track.enabled = true; });
   active.listening = true;
-  setVoiceState('Listening','Speak, then pause for a reply','End conversation');
+  if (active.waitingForWakeWord) {
+    setVoiceState('Wake word','Say “Hey VisionAssist” or “你好，视觉助手”','Stop wake-word listening');
+  } else {
+    setVoiceState('Listening','Speak, then pause for a reply','End conversation');
+  }
 }
 
 function interruptTurn() {
@@ -306,6 +324,8 @@ function stopAudio() {
   setReview(false);
   const active = voiceSession;
   voiceSession = undefined;
+  $('#wake-voice').setAttribute('aria-pressed','false');
+  $('#wake-voice').textContent = 'Enable wake word';
   active?.stream?.getTracks().forEach(track => track.stop());
   active?.capture?.port.close();
   if (active && active.context.state !== 'closed') active.context.close().catch(() => {});
@@ -651,13 +671,30 @@ function wavRecording(chunks, sampleRate) {
   return new Blob([header,...chunks],{type:'audio/wav'});
 }
 
-async function transcribeTurn(chunks, sampleRate) {
+function wakeCommand(transcript) {
+  const phrase = /^(?:(?:hey|hi|hello)[,\s]+vision\s*assist\b|(?:你好|您好)[，,\s]*(?:视觉助手|視覺助手|vision\s*assist\b))/iu;
+  const text = transcript.trim();
+  const match = phrase.exec(text);
+  return match ? text.slice(match[0].length).replace(/^[\s,.!?:，。！？：]+/u,'') : null;
+}
+
+async function transcribeTurn(active, chunks, sampleRate) {
   const turn = beginTurn('Transcribing locally…');
   try {
     const audio = wavRecording(chunks,sampleRate);
-    const language = transcriptionLanguage();
-    const {text} = await agentRequest('/api/agent/transcribe?language='+language,'POST',audio,audio.type,turn.signal);
+    const language = active.waitingForWakeWord ? 'auto' : transcriptionLanguage();
+    let {text} = await agentRequest('/api/agent/transcribe?language='+language,'POST',audio,audio.type,turn.signal);
     if (pendingTurn !== turn) return;
+    if (active.waitingForWakeWord) {
+      const command = wakeCommand(text || '');
+      $('#voice-message').textContent = '';
+      if (command === null) return;
+      active.waitingForWakeWord = false;
+      $('#wake-voice').setAttribute('aria-pressed','false');
+      $('#wake-voice').textContent = 'Enable wake word';
+      if (!command) return;
+      text = command;
+    }
     if (!text?.trim()) {
       $('#voice-message').textContent = 'No speech recognized. Try again.';
       return;
@@ -698,12 +735,13 @@ function readMicrophone(active, {samples,rms}) {
   segment.chunks.push(samples);
   if (speaking) { segment.voiced += 1; segment.quiet = 0; }
   else segment.quiet += 1;
-  if (segment.quiet < 30 && segment.chunks.length < 780) return;
+  const maxChunks = active.waitingForWakeWord ? 250 : 780;
+  if (segment.quiet < 30 && segment.chunks.length < maxChunks) return;
   if (segment.voiced < 5) {
     active.segment = {lead:[],chunks:[],onset:0,voiced:0,quiet:0,floor:segment.floor};
     return;
   }
-  transcribeTurn(segment.chunks, active.context.sampleRate);
+  transcribeTurn(active, segment.chunks, active.context.sampleRate);
 }
 
 function showMicrophoneError(english, chinese) {
@@ -718,11 +756,12 @@ function endConversation() {
   $('#voice-message').textContent = 'Conversation ended.';
 }
 
-async function startVoice() {
-  if (voiceSession) {
+async function startVoice(waitingForWakeWord = false) {
+  if (voiceSession && (!waitingForWakeWord || voiceSession.waitingForWakeWord)) {
     endConversation();
     return;
   }
+  if (voiceSession) stopAudio();
   if (speech) {
     stopPlayback('Playback stopped.');
     return;
@@ -735,8 +774,12 @@ async function startVoice() {
   interruptTurn();
   let active;
   try {
-    active = {context:new AudioContext({sampleRate:16000})};
+    active = {context:new AudioContext({sampleRate:16000}),waitingForWakeWord};
     voiceSession = active;
+    if (waitingForWakeWord) {
+      $('#wake-voice').setAttribute('aria-pressed','true');
+      $('#wake-voice').textContent = 'Stop wake-word listening';
+    }
     setVoiceState('Starting','Waiting for the microphone','End conversation');
     $('#mic-error').textContent = '';
     $('#voice-message').textContent = '';
@@ -871,51 +914,68 @@ async function refreshMemory() {
 }
 
 async function loadPreferences() {
+  const form = $('#preferences-form');
+  form.querySelector('button').disabled = true;
   const [preferences,{records}] = await Promise.all([
     agentRequest('/api/agent/preferences','GET'),agentRequest('/api/memory/habits','GET')
   ]);
-  $('#concise-replies').checked = preferences.concise;
-  const select = $('#camera-reminder');
-  select.replaceChildren(new Option('Off',''), ...records.map(record => new Option(record.name,record.id)));
-  select.value = preferences.reminder ?? '';
+  const select = $('#reminder-habit');
+  select.replaceChildren(new Option('Off',''),...records.map(row => new Option(row.name,row.id)));
+  select.value = preferences.habit ?? '';
+  $('#reply-length').value = preferences.concise ? 'short' : 'detail';
+  $('#reminder-interval').value = preferences.interval_minutes;
+  form.querySelector('button').disabled = false;
 }
 
+let pendingRoadAlert;
+let activeWarningRisk;
 async function pollAlerts() {
   try {
-    const {sequence,alerts,reminder} = await agentRequest('/api/agent/alerts?after='+alertSequence,'GET');
-    if (reminder) pendingReminder = reminder;
-    const urgent = alerts.findLast(alert => alert.risk === 'urgent');
-    const warning = urgent || alerts.at(-1);
-    const now = Date.now();
-    if (warning && (now >= warningUntil || (urgent && lastWarningRisk !== 'urgent'))) {
-      alertSequence = sequence;
-      lastWarningRisk = warning.risk;
-      warningUntil = now+3000;
-      const banner = $('#obstacle-alert');
-      banner.textContent = warning.text;
+    const allowReminder = currentPage === 'assist';
+    const {sequence,alerts,reminder} = await agentRequest('/api/agent/alerts?after='+alertSequence+
+      (allowReminder ? '&reminders=1' : ''),'GET');
+    if (reminder && allowReminder) pendingReminder = {text:reminder,until:Date.now()+15_000};
+    if (!allowReminder || pendingReminder?.until < Date.now()) pendingReminder = undefined;
+    alertSequence = sequence;
+    const road = alerts.filter(alert => alert.kind === 'road_edge').at(-1);
+    if (road) pendingRoadAlert = road;
+    if (pendingRoadAlert && Date.now()-pendingRoadAlert.stamp >= 5000) pendingRoadAlert = undefined;
+    const intrusion = alerts.filter(alert => alert.kind === 'path_intrusion' && alert.expires > Date.now())
+      .sort((a,b) => a.expires-b.expires)[0];
+    const others = alerts.filter(alert => alert.kind !== 'road_edge' && alert.kind !== 'path_intrusion');
+    const warning = pendingRoadAlert?.risk === 'urgent' ? pendingRoadAlert :
+      others.findLast(alert => alert.risk === 'urgent') || intrusion || pendingRoadAlert || others.at(-1);
+    if (warning && (Date.now() >= warningUntil ||
+        ((warning.risk === 'urgent' || warning.kind === 'path_intrusion') && activeWarningRisk !== 'urgent'))) {
+      activeWarningRisk = warning.risk;
+      if (warning === pendingRoadAlert) pendingRoadAlert = undefined;
+      const text = transcriptionLanguage() === 'zh' && warning.text_zh ? warning.text_zh : warning.text;
+      warningUntil = Date.now()+3000;
+      $('#obstacle-alert').textContent = text;
       const conversationInUse = pendingTurn || speech || reviewing || confirmation || voiceSession?.segment?.chunks.length;
-      if (urgent || !conversationInUse) {
+      if (warning.risk === 'urgent' || !conversationInUse) {
         pauseListening();
         clearTimeout(recoveryTimer);
         releaseSpeech();
-        speakLocal(warning.text,true);
+        speakLocal(text,true);
       }
       setTimeout(() => {
-        if (Date.now() >= warningUntil) banner.textContent = '';
+        if ($('#obstacle-alert').textContent === text && Date.now() >= warningUntil) $('#obstacle-alert').textContent = '';
       },3400);
-    } else if (!warning) {
-      alertSequence = sequence;
-      if (pendingReminder && !pendingTurn && !speech && !reviewing && now >= warningUntil) {
-        $('#voice-message').textContent = pendingReminder;
-        speakLocal(pendingReminder);
-        pendingReminder = null;
-      }
+    } else if (pendingReminder && currentPage === 'assist' && !pendingTurn &&
+        !speech && !reviewing && !confirmation && !voiceSession?.segment?.onset && Date.now() >= warningUntil) {
+      const prefix = transcriptionLanguage() === 'zh' ? '提醒：' : 'Reminder: ';
+      const message = prefix + pendingReminder.text;
+      pendingReminder = undefined;
+      $('#voice-message').textContent = message;
+      speakLocal(message);
     }
   } catch (error) {
     if (error.status === 403 || location.protocol === 'file:') return;
     if (error.status === 401) {
       alertSequence = 0;
-      pendingReminder = null;
+      pendingReminder = undefined;
+      pendingRoadAlert = undefined;
     }
   }
   setTimeout(pollAlerts,450);
@@ -961,7 +1021,8 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
 dialog.addEventListener('close', () => { pairingVersion += 1; });
 $('#mode').addEventListener('click', () => renderMode(!sampleMode));
 $('#contrast').addEventListener('click', () => setContrast(!document.documentElement.hasAttribute('data-contrast')));
-$('#mic').addEventListener('click',startVoice);
+$('#mic').addEventListener('click',() => startVoice());
+$('#wake-voice').addEventListener('click',() => startVoice(true));
 $('#describe').addEventListener('click', () => {
   if ($('#agent-camera').value === 'both') answer('Compare the views from Camera A and Camera B.',true,'image');
   else answer('Describe surroundings',true,'scene');
@@ -1004,19 +1065,27 @@ showPage();
 $('#confirm-save').addEventListener('click',() => finishConfirmation(true));
 $('#confirm-cancel').addEventListener('click',() => finishConfirmation(false));
 $('#memory-kind').addEventListener('change',refreshMemory);
-$('#memory-panel').addEventListener('toggle',event => {
+$('#memory-panel').addEventListener('toggle',event => { if (event.target.open) refreshMemory(); });
+$('#preferences-panel').addEventListener('toggle',event => {
   if (!event.target.open) return;
-  refreshMemory();
-  loadPreferences().catch(error => { $('#memory-status').textContent = error.message; });
+  $('#preferences-status').textContent = '';
+  loadPreferences().catch(error => { $('#preferences-status').textContent = error.message; });
 });
-$('#agent-preferences').addEventListener('submit',async event => {
+$('#preferences-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const value = $('#camera-reminder').value;
+  const button = event.target.querySelector('button');
+  button.disabled = true;
   try {
     await agentRequest('/api/agent/preferences','PUT',JSON.stringify({
-      concise:$('#concise-replies').checked, reminder:value ? Number(value) : null
+      concise:$('#reply-length').value === 'short',
+      habit:Number($('#reminder-habit').value) || null,
+      interval_minutes:Number($('#reminder-interval').value)
     }));
-    $('#memory-status').textContent = 'Preferences saved.';
-  } catch (error) { $('#memory-status').textContent = error.message; }
+    $('#preferences-status').textContent = 'Preferences saved.';
+  } catch (error) {
+    $('#preferences-status').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 });
 pollAlerts();

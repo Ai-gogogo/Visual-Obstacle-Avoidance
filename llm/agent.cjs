@@ -2,6 +2,8 @@ const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { existsSync, mkdirSync } = require('node:fs');
 const path = require('node:path');
+const {embedLocally,semanticMatches} = require('./semantic-memory.cjs');
+const {PLAN_FORMAT,routineStatement,routineObservation,parsePlan,planStep} = require('./routines.cjs');
 
 const MAX_FRAME_AGE = 5000;
 const cn = text => /[\u3400-\u9fff]/u.test(text);
@@ -28,7 +30,7 @@ function localWorker(mode, data) {
   });
 }
 
-async function ollama(messages, image) {
+async function ollama(messages, image, format) {
   const model = image ? process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b' :
     process.env.VISIONASSIST_CHAT_MODEL || 'qwen3:4b-instruct-2507-q4_K_M';
   if (/cloud/i.test(model)) throw new Error('Choose a local Ollama model.');
@@ -36,8 +38,8 @@ async function ollama(messages, image) {
   if (image) input.at(-1).images = (Array.isArray(image) ? image : [image]).map(frame => frame.toString('base64'));
   const response = await fetch('http://127.0.0.1:11434/api/chat', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model, messages:input, stream:false, think:false,
-      keep_alive:image ? 0 : '2m', options:{num_ctx:4096,num_predict:140}}),
+    body:JSON.stringify({model, messages:input, stream:false, think:false, format,
+      keep_alive:image ? 0 : '2m', options:{num_ctx:4096,num_predict:format ? 450 : 140}}),
     signal:AbortSignal.timeout(55000)
   });
   if (!response.ok) throw new Error('Ollama could not run the requested local model.');
@@ -46,7 +48,7 @@ async function ollama(messages, image) {
   return message.content.trim();
 }
 
-function createAgent({ filename, worker = localWorker, generate = ollama } = {}) {
+function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now } = {}) {
   let db;
   const busy = new Set();
   function database() {
@@ -59,7 +61,11 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
     db.exec("CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY, kind TEXT, name TEXT, normalized TEXT, label TEXT, last_seen TEXT, UNIQUE(kind, normalized));" +
       "CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY, owner INTEGER REFERENCES memory(id) ON DELETE CASCADE, feature TEXT);" +
       "CREATE TABLE IF NOT EXISTS observation (owner INTEGER REFERENCES memory(id) ON DELETE CASCADE, time TEXT, camera TEXT, position TEXT, PRIMARY KEY(owner,time,camera));" +
-      "CREATE TABLE IF NOT EXISTS preference (id INTEGER PRIMARY KEY CHECK(id=1), concise INTEGER NOT NULL, reminder INTEGER REFERENCES memory(id) ON DELETE SET NULL);");
+      "CREATE TABLE IF NOT EXISTS preference (id INTEGER PRIMARY KEY CHECK(id=1), concise INTEGER NOT NULL, reminder INTEGER REFERENCES memory(id) ON DELETE SET NULL);" +
+      "CREATE TABLE IF NOT EXISTS embedding (owner INTEGER PRIMARY KEY REFERENCES memory(id) ON DELETE CASCADE, model TEXT NOT NULL, vector TEXT NOT NULL);" +
+      "CREATE TABLE IF NOT EXISTS agent_preferences (id INTEGER PRIMARY KEY CHECK(id=1), concise INTEGER NOT NULL, habit INTEGER REFERENCES memory(id) ON DELETE SET NULL, interval_minutes INTEGER NOT NULL, last_reminder INTEGER);");
+    db.exec("INSERT OR IGNORE INTO agent_preferences (id,concise,habit,interval_minutes) " +
+      "SELECT id,concise,reminder,0 FROM preference");
     return db;
   }
 
@@ -72,29 +78,116 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
   const detections = slot => fresh(slot?.detection?.timestamp_ms) ? slot.detection : null;
 
   function preferences() {
-    const row = database().prepare('SELECT concise, reminder FROM preference WHERE id=1').get();
-    return {concise:Boolean(row?.concise ?? true), reminder:row?.reminder ?? null};
+    const row = database().prepare('SELECT concise,habit,interval_minutes FROM agent_preferences WHERE id=1').get();
+    return {concise:Boolean(row?.concise ?? true),habit:row?.habit ?? null,interval_minutes:row?.interval_minutes ?? 60};
   }
 
-  function savePreferences({concise, reminder}) {
-    if (typeof concise !== 'boolean' || (reminder !== null &&
-        (!Number.isSafeInteger(reminder) ||
-          !database().prepare("SELECT id FROM memory WHERE id=? AND kind='habit'").get(reminder)))) {
-      throw failure(400, 'Choose a response length and a saved reminder.');
+  function savePreferences(input) {
+    const {concise,habit,interval_minutes:interval} = input;
+    const store = database();
+    if (typeof concise !== 'boolean' || ![0,15,60,1440].includes(interval) ||
+        (habit !== null && (!Number.isSafeInteger(habit) ||
+          !store.prepare("SELECT id FROM memory WHERE kind='habit' AND id=?").get(habit)))) {
+      throw failure(400,'Choose a response length, a saved habit and a reminder interval.');
     }
-    database().prepare('INSERT INTO preference VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET concise=excluded.concise, reminder=excluded.reminder')
-      .run(Number(concise), reminder);
+    store.prepare(`INSERT INTO agent_preferences VALUES(1,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET
+      concise=excluded.concise, interval_minutes=excluded.interval_minutes,
+      last_reminder=CASE WHEN habit IS excluded.habit THEN last_reminder ELSE NULL END, habit=excluded.habit`)
+      .run(Number(concise),habit,interval);
     return preferences();
   }
 
   function cameraReminder(session) {
-    const live = Object.values(session.slots).some(slot => copyFrame(slot));
-    const becameLive = live && !session.cameraWasLive;
-    session.cameraWasLive = live;
-    if (!becameLive) return null;
-    const id = preferences().reminder;
-    if (id === null) return null;
-    return database().prepare("SELECT name FROM memory WHERE kind='habit' AND id=?").get(id)?.name ?? null;
+    const live = Object.values(session.slots).some(slot => Boolean(copyFrame(slot)));
+    if (!live) {
+      session.reminderCameraLive = false;
+      return null;
+    }
+    if (session.reminderCameraLive) return null;
+    const row = database().prepare(`SELECT memory.name, pref.interval_minutes, pref.last_reminder
+      FROM agent_preferences AS pref JOIN memory ON memory.id=pref.habit WHERE pref.id=1`).get();
+    if (!row) return null;
+    session.reminderCameraLive = true;
+    const time = now();
+    if (row.last_reminder !== null && time-row.last_reminder < row.interval_minutes*60_000) return null;
+    database().prepare('UPDATE agent_preferences SET last_reminder=? WHERE id=1').run(time);
+    return row.name;
+  }
+
+  async function recall(query, isChinese) {
+    if (!query) return output(isChinese ? '请说说要查找的内容。' : 'Give me something to search for.', 'unavailable');
+    let matches;
+    try {
+      matches = await runResource('model', () => semanticMatches(database(),embed,query));
+    } catch (error) {
+      if (error.publicMessage) throw error;
+      return output(isChinese ? '语义记忆暂不可用。请检查本机 Ollama 和嵌入模型。' :
+        'Semantic memory is unavailable. Check the local Ollama embedding model.', 'unavailable');
+    }
+    if (!matches.length) return output(isChinese ? '没有找到相关的已保存记录。' : 'I found no related saved memories.', 'semantic_memory');
+    return output((isChinese ? '可能相关的已保存记录：' : 'Possibly related saved memories: ') +
+      matches.map(row => row.name).join(isChinese ? '；' : '; '), 'semantic_memory');
+  }
+
+  async function startPlan(session, task, isChinese) {
+    if (!task) return output(isChinese ? '请告诉我你想完成的日常任务。' : 'Tell me which everyday task you want to do.', 'unavailable');
+    const messages = [
+      {role:'system',content:'You are VisionAssist. Produce 2–6 short, actionable steps for an ordinary low-risk everyday task. ' +
+        'Use ' + (isChinese ? 'Simplified Chinese' : 'English') + '. Do not assume access to cameras, personal memory or tools. ' +
+        'Return an empty steps array for unclear requests, navigation, dangerous activities, emergencies, or medical instructions.'},
+      {role:'user',content:task}
+    ];
+    let steps;
+    try {
+      steps = parsePlan(await runResource('model', () => generate(messages,null,PLAN_FORMAT)));
+    } catch (error) {
+      if (error.publicMessage) throw error;
+      return output(isChinese ? '暂时无法生成任务步骤。请检查本机 Ollama。' :
+        'I could not generate a usable plan. Check the local Ollama model.', 'unavailable');
+    }
+    if (steps.length < 2) return output(isChinese ? '我可以为普通的低风险日常任务列步骤。请换一个具体任务。' :
+      'I can plan ordinary, low-risk tasks. Try a specific everyday task.', 'unavailable');
+    session.plan = {steps,index:0,chinese:isChinese};
+    const hint = isChinese ? ' 完成后说「下一步」，也可以说「重复这一步」或「取消计划」。' :
+      ' Say “next step” when ready, “repeat step” to hear it again, or “cancel plan”.';
+    return output(planStep(session.plan)+hint,'plan');
+  }
+
+  function advancePlan(session, command, isChinese) {
+    const plan = session.plan;
+    if (!plan) return output(isChinese ? '目前没有进行中的计划。' : 'There is no active plan.', 'unavailable');
+    if (command === 'cancel') {
+      delete session.plan;
+      return output(plan.chinese ? '已取消计划。' : 'Plan cancelled.', 'plan');
+    }
+    if (command === 'next' && ++plan.index === plan.steps.length) {
+      delete session.plan;
+      return output(plan.chinese ? '计划步骤已结束。' : 'You have reached the end of the plan.', 'plan');
+    }
+    return output(planStep(plan),'plan');
+  }
+
+  function suggestHabit(session, name, isChinese) {
+    if (find('habit',name)) return output(isChinese ? '这条习惯已保存。' : 'That habit is already saved.');
+    return stage(session,{kind:'habit',name,suggestion:true},isChinese);
+  }
+
+  function observeRoutine(session, name, isChinese) {
+    if (find('habit',name)) return output(isChinese ? '这条习惯已保存。' : 'That habit is already saved.');
+    const observations = session.routineObservations ||= new Map();
+    const key = normal(name);
+    const time = now();
+    const previous = observations.get(key);
+    if (previous !== undefined && time-previous >= 60_000) {
+      observations.delete(key);
+      return suggestHabit(session,name,isChinese);
+    }
+    if (previous === undefined) {
+      if (observations.size >= 16) observations.delete(observations.keys().next().value);
+      observations.set(key,time);
+    }
+    return output(isChinese ? '收到。这条记录只用于当前会话中的习惯建议。' :
+      'Got it. This report is used to suggest habits within this conversation.', 'assistant');
   }
 
   function rename(kind, id, name) {
@@ -150,7 +243,9 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       ? (isChinese ? '确认已获本人同意，并登记' : 'Confirm the person consented and enroll ') + data.name
       : data.kind === 'item'
       ? (isChinese ? '确认登记相机 ' + data.camera + ' 中的物品：' : 'Confirm the item in Camera ' + data.camera + ': ') + data.name
-      : (isChinese ? '保存：' : 'Save: ') + data.name;
+      : data.suggestion
+        ? (isChinese ? '要把这条日常习惯存下来吗？' : 'Save this as a routine? ') + data.name
+        : (isChinese ? '保存：' : 'Save: ') + data.name;
     return output(summary, 'confirmation', {confirmation:{id:pending.id, summary}});
   }
 
@@ -339,8 +434,22 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
         : 'Point a camera at the item and wait for detections before registering it.', 'unavailable');
       return camera ? enroll(session,camera,'item',clean(item[1]),isChinese) : oneCamera();
     }
+    if (!input.mode) {
+      const task = /^(?:plan(?: a task)?(?:[：:\s]+|$)|(?:帮我)?(?:制定|规划|規劃)(?:一个|一個)?(?:任务)?计划[：:\s]*|一步步教我[：:\s]*)(.*)$/iu.exec(text);
+      if (task) return startPlan(session,clean(task[1]),isChinese);
+      const step = text.replace(/[.!。！]+$/u,'');
+      if (/^(?:next step|下一步)$/iu.test(step)) return advancePlan(session,'next',isChinese);
+      if (/^(?:repeat (?:this )?step|重复(?:这一步|本步))$/iu.test(step)) return advancePlan(session,'repeat',isChinese);
+      if (/^(?:cancel plan|取消计划)$/iu.test(step)) return advancePlan(session,'cancel',isChinese);
+      const memory = /^(?:search memory(?:[：:\s]+|$)|查(?:找|询)记忆[：:\s]*|语义搜索[：:\s]*)(.*)$/iu.exec(text);
+      if (memory) return recall(clean(memory[1]),isChinese);
+    }
     const habit = /^(?:[记記]住[，,:：\s]*|remember[,:\s]+)(.+)$/iu.exec(text);
     if (habit) return stage(session,{kind:'habit',name:clean(habit[1])},isChinese);
+    const routine = !input.mode && routineStatement(text);
+    if (routine) return suggestHabit(session,routine,isChinese);
+    const observation = !input.mode && routineObservation(text);
+    if (observation) return observeRoutine(session,observation,isChinese);
     if (/这是谁|那是谁|who is (?:this|that|in (?:front|the frame))/iu.test(text)) return twoCameras ? oneCamera() : identify(session,side,isChinese);
     const knownPerson = /^(?:who is\s+(.+?)|(.+?)是谁)[?？。!.！]*$/iu.exec(text);
     if (knownPerson) {
@@ -413,6 +522,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       frame = [A.frame,B.frame];
     }
     if (wantsImage && !frame) return output(isChinese ? '相机当前没有画面。' : 'The camera has no recent frame.', 'unavailable');
+    const concise = preferences().concise;
     const persona = 'Your product identity is VisionAssist, an on-device visual and memory assistant for people with low vision. ' +
       'Speak calmly and naturally. Reply in the user’s language; use simplified Chinese for Chinese replies. ' +
       'Introduce yourself as VisionAssist. Only discuss the underlying model if explicitly asked about the technology. Avoid emoji and boilerplate.';
@@ -422,8 +532,10 @@ function createAgent({ filename, worker = localWorker, generate = ollama } = {})
       : ' Use recent messages to follow the conversation. You have no camera or saved memory access in this turn. Never invent observations, identities, distances, saved data or walking directions.')};
     const history = frame ? [] : session.dialog || [];
     const cameraPrompt = isChinese
-      ? '第一张是相机 A，第二张是相机 B。只比较可见内容，分开注明相机，不推测身份或行走方向。请用简体中文简短回答：'
-      : 'The first image is Camera A and the second image is Camera B. Label each and compare only visible details. Never identify people or provide walking directions. Answer briefly: ';
+      ? '第一张是相机 A，第二张是相机 B。只比较可见内容，分开注明相机，不推测身份或行走方向。请用简体中文' +
+        (concise ? '简短作答：' : '用最多四句话作答：')
+      : 'The first image is Camera A and the second image is Camera B. Label each and compare only visible details. ' +
+        'Never identify people or provide walking directions. ' + (concise ? 'Answer briefly: ' : 'Answer in up to four short sentences: ');
     const message = {role:'user',content:Array.isArray(frame) ? cameraPrompt + text : text};
     const messages = Array.isArray(frame) ? [message] : [system,...history,message];
     let reply;

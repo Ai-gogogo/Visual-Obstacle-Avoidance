@@ -63,6 +63,8 @@
           <details class="assist-details">
             <summary>Voice controls and settings</summary>
             <p>Say “Only look left”, “Use both cameras”, “Switch to Mandarin”, or “Export the conversation”.</p>
+            <button type="button" class="quiet" id="wake-voice" aria-pressed="false">Enable wake word</button>
+            <p>Say “Hey VisionAssist” or “你好，视觉助手” to start. Wake-word mode uses the microphone on this page and transcribes speech locally.</p>
             <div class="voice-options">
               <label>Camera for visual questions
                 <select id="agent-camera"><option value="both">Both cameras</option><option value="A" selected>Left camera (A)</option><option value="B">Right camera (B)</option></select></label>
@@ -78,15 +80,28 @@
           </details>
           <details id="memory-panel">
             <summary>Saved memory</summary>
+            <p>Say “Search memory leaving home” to find related items and habits, or “Plan pack my backpack” to start a step-by-step task.</p>
             <p>Try “Remember, check my keys before going out” or “Register item water bottle.” To register a consenting person in view, say “Enroll person” followed by their name.</p>
             <label for="memory-kind">Memory type</label>
             <select id="memory-kind"><option value="habits">Habits</option><option value="items">Items</option><option value="people">People</option></select>
             <ul id="memory-list"></ul><p id="memory-status" role="status"></p>
-            <form id="agent-preferences">
-              <label><input id="concise-replies" type="checkbox" checked> Prefer brief replies</label>
-              <label for="camera-reminder">Reminder when a camera comes online</label>
-              <select id="camera-reminder"><option value="">Off</option></select>
-              <button class="quiet">Save preferences</button>
+          </details>
+          <details class="assist-details" id="preferences-panel">
+            <summary>Reply and reminder preferences</summary>
+            <form id="preferences-form">
+              <div class="voice-options">
+                <label>Reply length
+                  <select id="reply-length"><option value="short">Short</option><option value="detail">More detail</option></select></label>
+                <label>Reminder when a camera becomes live
+                  <select id="reminder-habit"><option value="">Off</option></select></label>
+                <label>Minimum time between reminders
+                  <select id="reminder-interval">
+                    <option value="0">Each time a camera becomes live</option>
+                    <option value="15">15 minutes</option><option value="60">1 hour</option><option value="1440">24 hours</option>
+                  </select></label>
+              </div>
+              <button type="submit" class="quiet" disabled>Save preferences</button>
+              <p id="preferences-status" role="status"></p>
             </form>
           </details>
         </section>

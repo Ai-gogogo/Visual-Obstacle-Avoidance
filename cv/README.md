@@ -250,3 +250,39 @@ python cv/stereo_depth.py path/to/A.jpg path/to/B.jpg --config cv/stereo_config.
 ```
 
 `depth_m.npy` 保存与 A 图像同尺寸的 float32 米制深度，缺测像素为 NaN。`depth_preview.png` 适合目视查看。Dashboard 为节约带宽显示缩略图，物体读数使用全分辨率深度图。
+
+## 前方车行道边缘预警
+
+在上面的双手机标定、配对和 HTTPS 服务可用后，运行：
+
+```sh
+cv/.venv/bin/python cv/live_camera.py --road-alerts --server https://localhost:8765
+```
+
+Camera A 用 Cityscapes SegFormer-B0 分割车行道和人行道，寻找从脚下方向的人行道走向前方车行道的交界。程序在交界附近取多个地面像素的双目深度，使用 A 的标定射线计算横向位置和水平前向距离，选择行走通道内最近且有一段连续像素支持的交界。Dashboard 在对应的 A 帧上用黄色圆圈标出取值位置，图下显示距离。B 继续运行自己的目标检测并为 A 提供双目匹配。
+
+- 默认在 **5 米**内提醒，进入 **3 米**再升级，每档需要连续两张已接受的不同帧确认，间隔不超过 1.2 秒。退到 5.6 米外或持续看不到交界至少一秒后可重新提示。按 Dashboard 的语音语言设置通过现有 Piper 播报。[语音模型和浏览器播放设置](../llm/README.md)
+- 未标定、缺少同步帧或交界纹理不足时，连续看到前方交界可播报「前方可能是车行道」，并显示距离不可用。道路延伸到侧面时，程序以朝前通道筛选交界。当前假设手机朝向与行走方向一致，地面近似水平。
+- [road_config.json](road_config.json) 中的 `pitch_down_deg` 默认 0，镜头从水平向下倾斜 10° 时填 10。`corridor_width_m` 是通道总宽，默认 0.9 米。`caution_m`、`urgent_m` 和 `rearm_margin_m` 分别控制两级提示和重新触发的距离余量。改完重启 worker。匹配范围还取决于 [stereo_config.json](stereo_config.json) 中的有效深度范围和标定参数。
+- 首次实机验证可用卷尺在封闭路段标出 5 米和 3 米，分别从正面、斜向接近并沿路沿平行行走。没有可见人行道、已走上车道、路口被车辆遮挡或在坡道上时，可能漏报或误报。
+
+新机器需要安装本目录 requirements 和下列 ONNX 权重。文件保存在 Git 忽略的 models 目录，运行时使用本机文件。模型输入为 512×512 RGB，类别 0 为 road，类别 1 为 sidewalk。[原模型](https://huggingface.co/nvidia/segformer-b0-finetuned-cityscapes-512-1024) · [锁定的 ONNX 版本](https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-512-1024/tree/18b12204d4c787afb8df24e49efc36a20d9f16d0)
+
+```sh
+cv/.venv/bin/python -m pip install -r cv/requirements.txt
+mkdir -p cv/models
+curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-cityscapes-512-1024/resolve/18b12204d4c787afb8df24e49efc36a20d9f16d0/onnx/model.onnx -o cv/models/road-segformer-b0.onnx
+echo 'ffd5ceb33f7c7a969bc69d3ad7ab06017de15c42085e7ed10be8ed8d23b10fec  cv/models/road-segformer-b0.onnx' | shasum -a 256 -c -
+```
+
+## 预测人车从侧面进入前方通道
+
+完成 A/B 双目标定后，普通 `cv/live_camera.py` 会自动启用路径侵入预测。安装路沿分割模型是 `--road-alerts` 的要求，单独使用横穿预测只需要原有 YOLO、OpenCV 和双目标定。默认相机 A 朝向与短时间内的行走方向一致，按直线通道预测未来 2 秒内、前方 6 米范围的进入事件。
+
+系统复用 YOLO 的目标类别、跟踪 ID 和逐帧米制深度。每对 A 帧都先遮掉检测框，再用校正过畸变的背景三维点和下一帧光流，以 RANSAC 估计相机的旋转与平移。只有背景匹配覆盖足够多的区域、双向光流吻合、当前双目深度也支持该姿态时才采用结果。旧的目标位置先旋转到当前坐标轴，再估算相对速度。背景平移用于排除仅由用户侧移造成的假横穿。转身过快、缺少特征、目标刚换 ID、双目掉线或两台手机重新配对时停止累积预测证据。
+
+行人、自行车、摩托、汽车、公交、卡车或狗的近侧边缘仍在通道外，且连续两个运动区间都显示朝内移动时，系统估算它的边缘何时进入通道。满足时间和前向距离条件后，A 的检测框显示方向和预计进入时间，Dashboard 沿用现有语音通道播报「右侧自行车可能横穿前方，请小心」一类提示。进入时间以采集帧为起点，服务器丢弃已经过期的预警。同一轨迹同方向的告警在 5 秒内去重。目标已在通道内时，已有的占道风险规则继续工作。
+
+调整 [road_config.json](road_config.json) 中的 `corridor_width_m`（通道总宽）和 `pitch_down_deg`（正数表示下俯）。`intrusion.enabled` 控制此功能，`horizon_s` 默认为 2，`max_forward_m` 默认为 6，`max_turn_deg_s` 默认为 35。修改后重启 worker。双目参数和时钟配对要求与上文的绝对深度功能一致。
+
+封闭场地实测可以覆盖手机转动而物体静止、人员平行于通道行走，以及人员从通道两侧横穿这三种情况。记录告警相对实际入道的提前量，以及漏报和误报。急转弯、移动背景占满视野、严重遮挡、稀疏深度和目标突然变向会影响预测。此处的时间是按短时速度估计的入道时间，碰撞还取决于使用者之后的路线和速度。

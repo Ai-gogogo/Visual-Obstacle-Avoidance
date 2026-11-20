@@ -17,6 +17,7 @@ Invoke-WebRequest "$zoo/face_detection_yunet/face_detection_yunet_2023mar.onnx" 
 Invoke-WebRequest "$zoo/face_recognition_sface/face_recognition_sface_2021dec.onnx" -OutFile models/face_recognition_sface_2021dec.onnx
 ollama pull qwen3:4b-instruct-2507-q4_K_M
 ollama pull qwen3-vl:2b
+ollama pull embeddinggemma
 ~~~
 
 在 server.cjs 所在目录运行 `node server.cjs`，打开 `http://localhost:8765/#assist`。团队仓库里服务入口在 web/，Agent 在 llm/。电脑启动页面后，去 Judge view 生成两路配对码。手机走现有 HTTPS 启动方式。电脑若通过证书域名打开 Dashboard，启动时将 `VISIONASSIST_DASHBOARD_HOST` 设为该主机名（不含协议和端口）。同一电脑可直接用 localhost，不需要设置此变量。
@@ -29,6 +30,7 @@ Ollama 需要在本机 127.0.0.1:11434 运行。建议在启动 Ollama 的环境
 | `VISIONASSIST_MODELS` | Whisper、Piper 与 OpenCV 模型目录。默认是 Agent 同目录的 models |
 | `VISIONASSIST_STT_MODEL` | 另一份本地 faster-whisper 模型目录，或已缓存的模型名 |
 | `VISIONASSIST_CHAT_MODEL`、`VISIONASSIST_VISION_MODEL` | 本地 Ollama 模型名 |
+| `VISIONASSIST_EMBED_MODEL` | 语义记忆使用的本地 Ollama 嵌入模型，默认为 embeddinggemma |
 | `VISIONASSIST_DB` | 单用户 SQLite 文件路径。默认位于 Agent 同目录 .visionassist/ |
 
 ## Dashboard 演示流程
@@ -50,6 +52,19 @@ Ollama 需要在本机 127.0.0.1:11434 运行。建议在启动 Ollama 的环境
 | 回复长度 | 在 Saved memory 中保存 Prefer brief replies，设置会在重启后保留 |
 
 物品首版使用 YOLO 类别和同帧裁剪的空间 HSV 特征匹配，适合外观有区分的物品。特征匹配有分数和分差门槛。单一候选接近匹配门槛时，先询问用户确认，再写入观察历史。记录历史的时机是用户查询并得到一次匹配时，历史表示当时的可能匹配、画面方位和时间。对同一相机同一帧重复查询只记一条，Dashboard 显示最近 20 条。亲友模板经用户确认后才持久化，只存本地。多张脸、低质量或候选分差过小时会提示无法确认。
+
+## LLM 进阶功能
+
+| 功能 | Dashboard 示例 |
+|---|---|
+| 习惯建议 | 说「我通常出门前检查钥匙」或「I usually check my keys」。助手会建议保存。也可以在同一会话中两次报告「我今天出门前检查了钥匙」。两次报告至少间隔一分钟，才会出现保存建议。只有确认后才写入本地记忆 |
+| 个性化提醒 | 在 Reply and reminder preferences 选择回答长度、已保存习惯和最短提醒间隔。Voice assistant 页面中，检测到从无可用相机变为至少一台相机在线时，按设置播报提醒。障碍警报可以打断普通提醒 |
+| 多步骤任务 | 说「一步步教我整理书包」或「Plan pack my backpack」。助手逐步读出计划，说「下一步」「重复这一步」或「取消计划」控制进度。计划保留在当前会话 |
+| 语义记忆 | 说「查找记忆：出门要带什么」或「Search memory leaving home」。助手用本机 Ollama 生成文本向量，从 SQLite 中按相似度检索已经保存的习惯和物品，每次最多返回三条。删除一条记录时会删除其向量 |
+| 唤醒词 | 在 Voice controls and settings 点击 Enable wake word，授权麦克风。说「你好，视觉助手」或「Hey VisionAssist」，可紧接一句命令。唤醒后进入连续对话。离开页面、按 Esc 或点击麦克风结束。等待唤醒时，音频会交给本机 Whisper，未匹配的语句不会进入对话 |
+| 本地运行 | 下载并准备模型后，将 Ollama 以 `OLLAMA_NO_CLOUD=1` 启动。关闭外网连接并保留本地网络，验证文本对话、VLM、语音和记忆。手机相机连接仍需要能访问电脑的本地网络 |
+
+运行 `node --test llm/agent.test.cjs web/pairing.test.cjs` 验证 API、任务进度、确认式习惯保存、重启后记忆和偏好、提醒冷却以及现有 CV 对接。自动化测试使用替代模型响应。真机验证时先安装实际模型，再使用上表中的语句。
 
 ## CV 联调
 

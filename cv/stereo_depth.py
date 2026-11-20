@@ -46,6 +46,7 @@ class StereoDepth:
         if not (0 < self.min_m < self.max_m and baseline > 0 and type(self.skew_ms) is int and 0 < self.skew_ms <= 250):
             raise ValueError("Check metric range, positive baseline and max_pair_skew_ms (1–250)")
         ka, da = camera_parameters(config["camera_A"])
+        self.camera_a = ka, da
         kb, db = camera_parameters(config["camera_B"])
         rotation = array(config["rotation_A_to_B"], (3, 3), "rotation_A_to_B")
         direction = array(config["translation_direction_A_to_B"], (3,), "translation_direction_A_to_B")
