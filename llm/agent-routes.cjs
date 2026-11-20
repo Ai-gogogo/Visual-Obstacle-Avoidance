@@ -124,7 +124,11 @@ function createAgentRoutes(options, sessions, read, respond) {
         }
         const preview = payload.stereo.preview;
         if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
+          slot.detection.stereoPartner = partner;
           slot.detection.depthPreview = preview;
+          const range = payload.stereo.range_m;
+          if (Array.isArray(range) && range.length === 2 && range.every(Number.isFinite) &&
+              range[0] > 0 && range[0] < range[1]) slot.detection.depthRange = range;
           slot.detection.stereoStatus = 'ready';
         }
       }

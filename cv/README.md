@@ -39,7 +39,7 @@ On the example photo, the CPU run found a bus at center and four people (two lef
 
 The CV suite checks the two position boundaries, box normalization, annotation coordinates, real detections on the bus photo and an empty prediction on a rotated blank JPEG. Confidence scores can vary slightly by runtime.
 
-## Live cameras A and B
+## Live stereo rig (A detects, B supplies the second view)
 
 Use the same environment and weights as the single-image detector. From the repository root, start the Web server in one terminal and the CV worker in another:
 
@@ -52,9 +52,11 @@ node web/server.cjs
 python cv/live_camera.py
 ```
 
-Open the dashboard at `http://localhost:8765/`, generate independent pairing codes for **Camera A** and **Camera B**, then open `/camera` on each device and enter its code. Either camera can run alone. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
+Open the dashboard at `http://localhost:8765/`, generate independent pairing codes for **Camera A** and **Camera B**, then open `/camera` on each device and enter its code. Camera A can run alone for YOLO. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
 
-In Voice assistant, select **Camera A** or **Camera B** and ask “What is in front of me?” Each camera has a separate polling thread and HTTP session. CPU mode uses independent YOLO models. CUDA mode shares one resident model between the two cameras. Its frame cache is scoped to the dashboard source. Each result is submitted with the camera ID and the ETag of the JPEG actually processed. An unchanged frame skips inference. An empty prediction clears the object list. The Agent answers from the most recent accepted detection within the server’s five-second freshness window. Newer preview frames can arrive while inference runs. Re-pairing replaces the old camera slot. Leave the worker running to pick up the new stream, or stop it with Ctrl+C.
+In live mode, the left panel displays Camera A with YOLO boxes, and the right panel displays a depth map aligned to that exact A frame. The default worker loads one YOLO predictor for A on either CPU or CUDA. B only uploads JPEGs for stereo matching. Pair A first to test detection; pair B and load a calibration for these phones to measure meters. If stereo is unavailable, A keeps detecting and the right panel explains why. The built-in sample scene remains available separately.
+
+For a keyboard scene question, select Camera A in Voice assistant. The worker pins its YOLO result to the ETag of the actual JPEG. The historical two-predictor comparison is available with `--dual-yolo`; the dual-camera benchmark opts into that mode.
 
 The live integration tests in `test_live_camera.py` replay JPEGs through the actual Node server and Agent with real YOLO weights. They exercise the running CLI, a camera change during inference, unchanged and expired frames, simultaneous feeds, B disconnecting while A continues, and re-pairing. Run them with the CV environment active and Node available:
 
@@ -64,7 +66,7 @@ python -m unittest discover -s cv -p test_live_camera.py -v
 
 ## Live object tracking
 
-When the same person moves across a camera view, the dashboard box and detection table show a label such as `person #A-1`. The JSON carries `"track_id": "A-1"` while `frame_id` changes with each image. Each camera and dashboard stream tracks independently. Pairing a replacement phone starts fresh tracks immediately. Numbers may repeat after restarting the CV worker.
+When the same person moves across a camera view, the dashboard box and detection table show a label such as `person #A-1`. The JSON carries `"track_id": "A-1"` while `frame_id` changes with each image. The default live pipeline tracks Camera A independently for each dashboard session. Pairing a replacement phone starts fresh tracks immediately. Numbers may repeat after restarting the CV worker.
 
 The tracker matches boxes of the same class using overlap and predicted movement. A missed detection clears the box from that frame. If YOLO detects the object again within 1.2 seconds, a matching box can recover the ID. Longer gaps start new tracks. Fully overlapping objects and abrupt motion can break continuity. Tracking runs on live streams only.
 
@@ -95,7 +97,7 @@ Steps, raised surfaces, camera roll and occlusion can invalidate the contact cue
 
 ## Dual-camera performance
 
-To log accepted detections during a real run, use `python cv/live_camera.py --metrics /path/to/new.csv`. Each row identifies the source, camera and frame. Both timestamps used for latency come from the server: from receipt of the complete JPEG to acceptance of the matching detection. This includes waiting for the worker to poll, decoding, inference and result submission. Phone capture, upload to the server and browser rendering occur outside this interval. Duplicate submissions do not add samples.
+To log accepted detections (A by default, both with `--dual-yolo`), use `python cv/live_camera.py --metrics /path/to/new.csv`. Each row identifies the source, camera and frame. Both timestamps used for latency come from the server: from receipt of the complete JPEG to acceptance of the matching detection. This includes waiting for the worker to poll, decoding, inference and result submission. Phone capture, upload to the server and browser rendering occur outside this interval. Duplicate submissions do not add samples.
 
 The live worker defaults to `--device auto`, which selects CUDA when the
 installed PyTorch can use it and otherwise selects CPU. The default input size
@@ -201,7 +203,7 @@ worker processed the frame and found no objects.
 
 ## 双手机绝对深度（米）
 
-用固定的横向支架把 A 放在左侧、B 放在右侧，两部手机朝前且视野重叠。测量量是沿 **A 相机光轴** 的前向深度 Z。双目校正后，深度来自校正焦距（像素）乘以基线（米）再除以视差（像素）。代码将深度映射回 A 的原始图像坐标。Dashboard 的深度图越亮表示越近，黑色表示该像素缺少有效匹配。A 的每个检测框可以带 `depth_m`，取框中央一半区域内有效深度的中位数。有效像素太少或深度分布太分散时显示「—」。框中混有背景时，估计也可能落在背景上。左右两张检测表中，米数显示在参考视图 A 的那一行。
+用固定的横向支架把 A 放在左侧、B 放在右侧，两部手机朝前且视野重叠。测量量是沿 **A 相机光轴** 的前向深度 Z。双目校正后，深度来自校正焦距（像素）乘以基线（米）再除以视差（像素）。代码将深度映射回 A 的原始图像坐标。Dashboard 的深度图越亮表示越近，黑色表示该像素缺少有效匹配。A 的每个检测框可以带 `depth_m`，取框中央一半区域内有效深度的中位数。有效像素太少或深度分布太分散时显示「—」。框中混有背景时，估计也可能落在背景上。左侧检测框和表格显示 A 的有效米数，右侧深度图使用同一帧的 A 图像坐标。
 
 ### 填参数或用棋盘格自动标定
 
@@ -217,7 +219,7 @@ worker processed the frame and found no objects.
 | `num_disparities` | 搜索视差的像素数，正的 16 倍数且小于图宽。近物所需视差约为 `校正焦距 × 基线 / 深度`，超出搜索范围时无法测量。 |
 | `min_depth_m`、`max_depth_m` | 可接受的前向深度范围，也决定预览灰阶。实际可测范围还受基线、焦距、视差搜索范围、重叠区域和纹理影响。 |
 
-只有卷尺时，可以通过下面的工具估计其余参数。先按上文 Setup 安装依赖，启动 Web 服务，用同一个 Dashboard 配对两台手机并保持上传。实机通过 HTTPS 连接。命令里的 `--server` 与 worker 一样指向服务器本机地址。采集标定数据可以在 YOLO 启动前完成。
+只有卷尺时，可以通过下面的工具估计其余参数。先按上文 Setup 安装依赖，启动 Web 服务，用同一个 Dashboard 配对两台手机并保持上传。实机通过 HTTPS 连接。若使用相机专用的 HTTPS 反向代理，它须转发上传请求头 `X-Sample-Ms`、`X-Clock-Error-Ms` 和响应头 `X-Server-Ms`；缺少这些时间信息时只能等待配对帧。命令里的 `--server` 与 worker 一样指向服务器本机地址。采集标定数据可以在 YOLO 启动前完成。
 
 1. 打印平整棋盘格，量出**单个方格边长**。例如 10×7 个方格有 **9×6 个内角点**。固定两台手机，每次同时看见完整棋盘。采集约 15–25 个姿态，改变棋盘的倾角、方向、距离和在画面中的位置，按回车采集时保持棋盘静止。
 2. 运行下面的采集和求解命令。把示例的内角点数和 `25` 毫米换成实物的值。求解会输出重投影 RMS（像素）、基线（米），并将参数写入指定文件。基线应与实测镜头间距相符。RMS 明显超过约 1 像素时，检查棋盘尺寸、镜头设置、图像清晰度和姿态覆盖。
@@ -228,7 +230,7 @@ python cv/calibrate_stereo.py solve --pairs /tmp/rig-pairs --corners 9 6 --squar
 python cv/live_camera.py --server https://localhost:8765
 ```
 
-打开 Dashboard 的 live 模式查看 A 的深度图和 **Forward depth (A)** 列。程序用浏览器视频帧时间和通过 HTTP 估计的服务器时钟配对，优先使用可用的捕获时间，否则使用呈现时间。需要支持 `requestVideoFrameCallback` 的浏览器。手机之间没有硬件快门同步，曝光和呈现之间的差异、运动、反光、低纹理或遮挡都可能增加误差。先用带纹理的静止平面在卷尺量好的几个前向距离验证，例如从 A 镜头沿光轴放在 1、2、3 米处，记录每处误差和缺测比例，再评估移动场景。两路普通 YOLO 检测在缺少配对图像时仍可运行。
+打开 Dashboard 的 live 模式查看 A 的深度图和 **Forward depth (A)** 列。程序用浏览器视频帧时间和通过 HTTP 估计的服务器时钟配对，优先使用可用的捕获时间，否则使用呈现时间。需要支持 `requestVideoFrameCallback` 的浏览器。手机之间没有硬件快门同步，曝光和呈现之间的差异、运动、反光、低纹理或遮挡都可能增加误差。先用带纹理的静止平面在卷尺量好的几个前向距离验证，例如从 A 镜头沿光轴放在 1、2、3 米处，记录每处误差和缺测比例，再评估移动场景。缺少匹配的 B 帧时，A 的 YOLO 检测继续运行。
 
 ### 导出逐像素深度图
 

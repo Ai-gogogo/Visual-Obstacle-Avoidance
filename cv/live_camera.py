@@ -1,4 +1,4 @@
-"""Publish live Camera A and B detections to the local VisionAssist server."""
+"""Detect on Camera A and use a time-matched B frame for calibrated stereo depth."""
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -138,7 +138,8 @@ class CameraWorker:
         if not ok:
             raise RuntimeError("Cannot encode depth preview")
         return {"status": "ready", "partner_id": partner.headers["X-Partner-Id"],
-                "preview": base64.b64encode(png).decode("ascii")}
+                "preview": base64.b64encode(png).decode("ascii"),
+                "range_m": [self.stereo.min_m, self.stereo.max_m]}
 
 
 # Existing single-camera callers can keep their original constructor.
@@ -188,6 +189,8 @@ def main():
     parser.add_argument("--server", default="http://127.0.0.1:8765",
                         help="VisionAssist server URL on this computer")
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
+    parser.add_argument("--dual-yolo", action="store_true",
+                        help="Also run independent YOLO on B (legacy dual-camera benchmark)")
     parser.add_argument("--stereo-config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--metrics", type=Path, help="New CSV file for accepted frames from both cameras")
     inference_options(parser)
@@ -215,9 +218,10 @@ def main():
         torch.set_num_threads(args.cpu_threads)
     cv2.setNumThreads(1)
     options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half)
-    if device == "cpu":
+    sides = "AB" if args.dual_yolo else "A"
+    if device == "cpu" or not args.dual_yolo:
         # Independent predictors let both camera threads use the CPU concurrently.
-        predictors = [partial(detect, YOLO(str(args.weights), task="detect"), **options) for _ in "AB"]
+        predictors = [partial(detect, YOLO(str(args.weights), task="detect"), **options) for _ in sides]
     else:
         # Ultralytics predictors hold mutable state. Serialize only inference on
         # one resident GPU model; frame fetch and publication stay independent.
@@ -248,10 +252,10 @@ def main():
         workers = [
             CameraWorker(args.server, None, stack.enter_context(requests.Session()), side, record,
                          stereo=stereo if side == "A" else None, infer=infer)
-            for side, infer in zip("AB", predictors)
+            for side, infer in zip(sides, predictors)
         ]
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            print(f"YOLO loaded. Watching cameras A and B on {device} at {args.server}. Ctrl+C to stop.", flush=True)
+        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            print(f"YOLO loaded for {sides} on {device} at {args.server}. Ctrl+C to stop.", flush=True)
             try:
                 futures = [pool.submit(watch, worker, stop, args.poll_ms / 1000) for worker in workers]
                 for future in as_completed(futures):

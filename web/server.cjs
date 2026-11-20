@@ -142,19 +142,24 @@ function createServer(options = {}) {
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
         const detection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
+        const partner = detection?.stereoPartner;
+        const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
         const frame = detection?.frame ?? slot.frame;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
         // A raw preview can acquire boxes without the camera uploading a new JPEG.
-        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + '"';
+        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + (lostPartner ? '-unpaired' : '') + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
-        const objects = detection?.objects.map(({item_feature, ...object}) => object) ?? null;
+        const objects = detection?.objects.map(({item_feature, ...object}) => {
+          if (lostPartner) delete object.depth_m;
+          return object;
+        }) ?? null;
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
           jpeg:frame.toString('base64'), objects,
-          ...(detection?.stereoStatus ? {stereo_status:detection.stereoStatus} : {}),
-          ...(detection?.depthPreview ? {depth_preview:detection.depthPreview} : {})
+          ...(detection?.stereoStatus ? {stereo_status:lostPartner ? 'waiting_for_pair' : detection.stereoStatus} : {}),
+          ...(!lostPartner && detection?.depthPreview ? {depth_preview:detection.depthPreview, depth_range_m:detection.depthRange} : {})
         });
       }
       if (method === 'POST' && action === 'pair') {
