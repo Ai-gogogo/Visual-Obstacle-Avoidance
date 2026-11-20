@@ -1,4 +1,4 @@
-const {createAgent, MAX_FRAME_AGE} = require('./agent.cjs');
+const {createAgent, currentDetection, MAX_FRAME_AGE} = require('./agent.cjs');
 const {acceptRoadEdge} = require('./road-alerts.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
 const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
@@ -99,9 +99,11 @@ function createAgentRoutes(options, sessions, read, respond) {
       slot.cvFrames ||= new Map();
       for (const [id, item] of slot.cvFrames) if (!recent(item)) slot.cvFrames.delete(id);
       const id = slot.etag.slice(1,-1);
-      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,stamp:slot.stamp,sample:slot.sample});
-      while (slot.cvFrames.size > 8) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
-      return res.writeHead(200,{'Content-Type':'image/jpeg',ETag:slot.etag,
+      const frameType = slot.frameType ?? 'image/jpeg';
+      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,frameType,stamp:slot.stamp,sample:slot.sample});
+      const retain = frameType === 'image/png' ? 3 : 8;
+      while (slot.cvFrames.size > retain) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
+      return res.writeHead(200,{'Content-Type':frameType,ETag:slot.etag,
         ...(slot.sample ? {'X-CV-Sample-Ms':slot.sample.ms} : {}),
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
@@ -122,7 +124,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       }
       if (!best) return res.writeHead(204).end();
       left.partner = {id:best.id, stream:right.streamID, stamp:best.stamp};
-      return res.writeHead(200,{'Content-Type':'image/jpeg', 'X-Partner-Id':best.id,
+      return res.writeHead(200,{'Content-Type':best.frameType ?? 'image/jpeg', 'X-Partner-Id':best.id,
         'X-Partner-Stream':right.streamID}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
@@ -148,7 +150,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (slot.detection?.frame_id === payload.frame_id) return res.writeHead(204).end();
       slot.detection = {
         schema_version:DETECTION_SCHEMA_VERSION, camera_id:camera, frame_id:payload.frame_id,
-        timestamp_ms:captured.stamp, objects, frame:captured.frame
+        timestamp_ms:captured.stamp, objects, frame:captured.frame, frameType:captured.frameType
       };
       const partner = captured.partner;
       if (camera === 'A' && payload.stereo) {
@@ -173,6 +175,10 @@ function createAgentRoutes(options, sessions, read, respond) {
         if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
           slot.detection.stereoPartner = partner;
           slot.detection.depthPreview = preview;
+          const fraction = payload.stereo.valid_fraction;
+          if (Number.isFinite(fraction) && fraction >= 0 && fraction <= 1) {
+            slot.detection.depthValidFraction = fraction;
+          }
           const range = payload.stereo.range_m;
           if (Array.isArray(range) && range.length === 2 && range.every(Number.isFinite) &&
               range[0] > 0 && range[0] < range[1]) slot.detection.depthRange = range;
@@ -239,7 +245,11 @@ function createAgentRoutes(options, sessions, read, respond) {
         return alert.expires > Date.now() && scene?.partnerStream === session.slots.B.streamID &&
           scene?.objects.some(obj => obj.track_id === alert.track_id && obj.intrusion?.from_side === alert.from_side);
       });
-      return respond(res,200,{sequence:session.alertSeq, alerts:active.map(({streamID, partnerStream, ...alert}) => alert), reminder});
+      const cameras = Object.fromEntries(Object.entries(session.slots).map(([side,slot]) => [
+        side, !slot.phone ? 'offline' : !recent(slot) ? 'waiting' :
+          currentDetection(slot) ? 'detecting' : 'live'
+      ]));
+      return respond(res,200,{sequence:session.alertSeq, alerts:active.map(({streamID, partnerStream, ...alert}) => alert), reminder,cameras});
     }
     if (route === '/api/agent/preferences') {
       if (method === 'GET') return respond(res,200,agent.preferences());

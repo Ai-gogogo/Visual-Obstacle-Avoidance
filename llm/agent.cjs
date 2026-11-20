@@ -1,21 +1,34 @@
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { existsSync, mkdirSync } = require('node:fs');
+const { createInterface } = require('node:readline');
 const path = require('node:path');
 const {embedLocally,semanticMatches} = require('./semantic-memory.cjs');
 const {PLAN_FORMAT,routineStatement,routineObservation,parsePlan,planStep} = require('./routines.cjs');
 
 const MAX_FRAME_AGE = 5000;
+const PREVIEW_MAX_ANALYSIS_LAG_MS = 750;
 const cn = text => /[\u3400-\u9fff]/u.test(text);
 const clean = text => typeof text === 'string' ? text.trim().slice(0, 200) : '';
 const fresh = stamp => stamp && Date.now() - stamp <= MAX_FRAME_AGE;
 const normal = name => name.normalize('NFKC').trim().toLowerCase();
 
-function localWorker(mode, data) {
+function currentDetection(slot) {
+  const detection = slot?.detection;
+  if (!fresh(detection?.timestamp_ms)) return null;
+  if (slot.frame && slot.frame !== detection.frame &&
+      Date.now()-detection.timestamp_ms > PREVIEW_MAX_ANALYSIS_LAG_MS) return null;
+  return detection;
+}
+
+function localPython() {
   const envPython = path.join(__dirname,'.venv',...(process.platform === 'win32' ? ['Scripts','python.exe'] : ['bin','python']));
-  const python = process.env.VISIONASSIST_PYTHON || (existsSync(envPython) ? envPython : 'python');
+  return process.env.VISIONASSIST_PYTHON || (existsSync(envPython) ? envPython : 'python');
+}
+
+function localWorker(mode, data) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(python, ['-X', 'utf8', path.join(__dirname, 'agent_worker.py'), mode],
+    const proc = spawn(localPython(), ['-X', 'utf8', path.join(__dirname, 'agent_worker.py'), mode],
       { windowsHide:true, timeout:mode === 'stt' ? 55000 : 15000 });
     let output = '';
     proc.stderr.resume();
@@ -28,6 +41,64 @@ function localWorker(mode, data) {
     });
     proc.stdin.end(JSON.stringify(data));
   });
+}
+
+function createTranscriber() {
+  let child, pending, idle;
+  const failure = () => new Error('Local transcription worker failed.');
+
+  function close(error = failure()) {
+    clearTimeout(idle);
+    const process = child;
+    child = undefined;
+    process?.stdin.end();
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+      pending = undefined;
+    }
+  }
+
+  function start() {
+    const process = spawn(localPython(),['-X','utf8',path.join(__dirname,'agent_worker.py'),'stt-session'],
+      {windowsHide:true});
+    child = process;
+    process.stderr.resume();
+    const failed = () => { if (child === process) close(); };
+    process.on('error',failed);
+    process.on('close',failed);
+    process.stdin.on('error',failed);
+    createInterface({input:process.stdout}).on('line',line => {
+      if (child !== process || !pending) return;
+      let result;
+      try { result = JSON.parse(line); } catch { return failed(); }
+      if (!result || typeof result.text !== 'string') return failed();
+      const reply = pending;
+      pending = undefined;
+      clearTimeout(reply.timeout);
+      idle = setTimeout(close,120_000);
+      idle.unref();
+      reply.resolve(result);
+    });
+    return process;
+  }
+
+  return {
+    close,
+    request(data) {
+      // The Agent admits a single transcription at a time.
+      clearTimeout(idle);
+      const process = child || start();
+      return new Promise((resolve,reject) => {
+        const timeout = setTimeout(() => {
+          close();
+          process.kill();
+        },55_000);
+        pending = {resolve,reject,timeout};
+        process.stdin.write(JSON.stringify(data)+'\n');
+      });
+    }
+  };
 }
 
 async function ollama(messages, image, format) {
@@ -49,6 +120,7 @@ async function ollama(messages, image, format) {
 }
 
 function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now } = {}) {
+  const transcriber = worker === localWorker ? createTranscriber() : null;
   let db;
   const busy = new Set();
   function database() {
@@ -75,7 +147,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   const failure = (status, message) => Object.assign(new Error(message), {status, publicMessage:message});
   const output = (text, source = 'memory', extra = {}) => ({reply_text:text, source, confirmation:null, ...extra});
   const copyFrame = slot => fresh(slot?.stamp) && slot.frame;
-  const detections = slot => fresh(slot?.detection?.timestamp_ms) ? slot.detection : null;
+  const detections = currentDetection;
 
   function preferences() {
     const row = database().prepare('SELECT concise,habit,interval_minutes FROM agent_preferences WHERE id=1').get();
@@ -548,7 +620,8 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return output(reply,frame ? 'image' : 'llm');
   }
 
-  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory, close:() => db?.close(),
+  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory,
+    close() { transcriber?.close(); db?.close(); },
     remove(kind,id) { return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0; },
     async synthesize(text, priority) {
       if (typeof text !== 'string' || !text.trim() || text.length > 650) throw failure(400, 'Give a short reply to speak.');
@@ -567,7 +640,8 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     },
     async transcribe(bytes, language) {
       try {
-        return await runResource('speech', () => worker('stt',{audio:bytes.toString('base64'),language}));
+        const payload = {audio:bytes.toString('base64'),language};
+        return await runResource('speech', () => transcriber ? transcriber.request(payload) : worker('stt',payload));
       } catch (error) {
         if (error.publicMessage) throw error;
         throw failure(503, 'Local transcription unavailable. Check faster-whisper and its downloaded model.');
@@ -576,4 +650,4 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   };
 }
 
-module.exports = {createAgent,MAX_FRAME_AGE};
+module.exports = {createAgent,currentDetection,MAX_FRAME_AGE,PREVIEW_MAX_ANALYSIS_LAG_MS};
