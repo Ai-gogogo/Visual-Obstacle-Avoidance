@@ -113,7 +113,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       };
       const partner = captured.partner;
       if (camera === 'A' && payload.stereo) {
-        slot.detection.stereoStatus = ['size_mismatch','no_matches'].includes(payload.stereo.status)
+        slot.detection.stereoStatus = ['size_mismatch','no_matches','unavailable'].includes(payload.stereo.status)
           ? payload.stereo.status : 'waiting_for_pair';
       }
       if (camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
