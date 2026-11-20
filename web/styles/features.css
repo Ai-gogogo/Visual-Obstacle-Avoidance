@@ -1,5 +1,8 @@
 .feed,.detections,.voice-card,.response-card{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:.92rem}
 .feed{overflow:hidden}
+.model-compute{display:flex;flex-wrap:wrap;gap:.4rem 1.3rem;padding:.65rem .85rem;margin-bottom:1rem;border:1px solid var(--line);border-radius:.65rem;background:var(--surface);font-size:.9rem}
+.model-compute p{margin:0;max-width:100%;overflow-wrap:anywhere}
+.model-compute strong{margin-inline-end:.35rem}
 .feed header,.feed footer{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.7rem .85rem;flex-wrap:wrap}
 .feed header>div,.section-head{display:flex;align-items:center;gap:.65rem}
 .camera-icon{display:grid;place-items:center;width:1.9rem;height:1.9rem;border-radius:.48rem;background:var(--tint);color:var(--accent);font-weight:750}

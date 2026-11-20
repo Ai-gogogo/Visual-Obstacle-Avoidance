@@ -3,6 +3,45 @@ const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const {createServer} = require('./server.cjs');
 
+test('runtime shows reported YOLO devices and distinguishes model residency from idle', async t => {
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const originalFetch = globalThis.fetch;
+  const chat = process.env.VISIONASSIST_CHAT_MODEL || 'qwen3:4b-instruct-2507-q4_K_M';
+  const vision = process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b';
+  let models = [
+    {name:chat,size:100,size_vram:100},
+    {name:vision,size:200,size_vram:50},
+    {name:'unrelated:latest',size:100,size_vram:0}
+  ];
+  t.mock.method(globalThis,'fetch',(url,options) => url === 'http://127.0.0.1:11434/api/ps'
+    ? Promise.resolve(Response.json({models})) : originalFetch(url,options));
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:'+server.address().port;
+  const runtime = '/api/agent/runtime';
+  assert.equal((await fetch(base+runtime)).status,401);
+  const {token} = await (await fetch(base+'/api/session',{method:'POST'})).json();
+  const readRuntime = async () => (await fetch(base+runtime,{headers:{Authorization:'Bearer '+token}})).json();
+  const pulse = (camera,device,precision) => fetch(base+'/api/cv/sources',{headers:{
+    'X-CV-Camera':camera,'X-CV-Device':device,'X-CV-Precision':precision
+  }});
+  await pulse('A','cuda:0','fp16');
+  await pulse('B','cpu','fp32');
+  const first = await readRuntime();
+  assert.deepEqual(first.yolo.map(({device}) => device),['cuda:0','cpu']);
+  assert.deepEqual(first.agent.loaded.map(({device,gpu_percent}) => [device,gpu_percent]),[['gpu',100],['mixed',25]]);
+  models = [{name:chat,size:100,size_vram:0}];
+  assert.equal((await readRuntime()).agent.loaded[0].device,'cpu');
+  t.mock.timers.tick(5100);
+  models = [];
+  const idle = await readRuntime();
+  assert.deepEqual(idle.yolo,[]);
+  assert.equal(idle.agent.reachable,true);
+  assert.deepEqual(idle.agent.loaded,[]);
+});
+
 test('desktop and two phones pair independently and stale frames are withheld', async t => {
   t.mock.timers.enable({apis:['Date'], now:Date.now()});
   const server = createServer();

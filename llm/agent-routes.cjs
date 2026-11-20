@@ -73,6 +73,7 @@ function parseObjects(objects) {
 
 function createAgentRoutes(options, sessions, read, respond) {
   const agent = createAgent(options);
+  const workerRuntime = new Map();
   const asJSON = async (req, max) => JSON.parse((await read(req,max)).toString('utf8'));
   const error = (res, status, message) => respond(res,status,{error:message});
 
@@ -97,6 +98,14 @@ function createAgentRoutes(options, sessions, read, respond) {
       return error(res,403,'The CV adapter is available to local processes.');
     }
     if (route === '/api/cv/sources' && req.method === 'GET') {
+      const camera = req.headers['x-cv-camera'];
+      const device = req.headers['x-cv-device'];
+      const precision = req.headers['x-cv-precision'];
+      if (['A','B'].includes(camera) && typeof device === 'string' &&
+          /^(cpu|cuda:\d+)$/.test(device) && ['fp16','fp32'].includes(precision) &&
+          (device !== 'cpu' || precision === 'fp32')) {
+        workerRuntime.set(camera,{camera,device,precision,seen:Date.now()});
+      }
       const sources = [...sessions.values()].filter(session => session.assistant).flatMap(session =>
         Object.entries(session.slots).filter(([,slot]) => slot.frame && recent(slot))
           .map(([camera_id,slot]) => ({source_id:session.sourceID,camera_id,frame_id:slot.etag.slice(1,-1)}))
@@ -273,6 +282,14 @@ function createAgentRoutes(options, sessions, read, respond) {
     if (session.pending?.until < Date.now()) delete session.pending;
     session.assistant = true;
     const method = req.method;
+    if (route === '/api/agent/runtime' && method === 'GET') {
+      const agentRuntime = await agent.modelRuntime();
+      const yolo = [...workerRuntime.values()]
+        .filter(worker => Date.now()-worker.seen <= 5000)
+        .sort((a,b) => a.camera.localeCompare(b.camera))
+        .map(({camera,device,precision}) => ({camera,device,precision}));
+      return respond(res,200,{yolo,agent:agentRuntime});
+    }
     if (route === '/api/agent/alerts' && method === 'GET') {
       const after = Number(requestURL.searchParams.get('after') || 0);
       if (requestURL.searchParams.get('wait') === '1' && after === session.alertSeq) {

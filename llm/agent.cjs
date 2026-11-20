@@ -101,28 +101,79 @@ function createSpeechWorker(mode, resultField, timeoutMs) {
   };
 }
 
-async function ollama(messages, image, format) {
-  const model = image ? process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b' :
+function configuredModel(image) {
+  return image ? process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b' :
     process.env.VISIONASSIST_CHAT_MODEL || 'qwen3:4b-instruct-2507-q4_K_M';
+}
+
+const modelKey = name => name.split('/').at(-1).includes(':') ? name : name+':latest';
+
+async function loadedModels() {
+  try {
+    const response = await fetch('http://127.0.0.1:11434/api/ps',{signal:AbortSignal.timeout(900)});
+    if (!response.ok) return null;
+    const {models} = await response.json();
+    if (!Array.isArray(models)) return null;
+    return models.flatMap(({name,size,size_vram:vram}) => {
+      if (typeof name !== 'string' || !Number.isFinite(size) || !Number.isFinite(vram) || size <= 0 || vram < 0) return [];
+      const device = vram === 0 ? 'cpu' : vram >= size ? 'gpu' : 'mixed';
+      return [{name,device,gpu_percent:Math.min(100,Math.round(100*vram/size))}];
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function ollama(messages, image, format, onPlacement) {
+  const model = configuredModel(image);
   if (/cloud/i.test(model)) throw new Error('Choose a local Ollama model.');
   const input = messages.map(message => ({...message}));
   if (image) input.at(-1).images = (Array.isArray(image) ? image : [image]).map(frame => frame.toString('base64'));
-  const response = await fetch('http://127.0.0.1:11434/api/chat', {
+  const request = fetch('http://127.0.0.1:11434/api/chat', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({model, messages:input, stream:false, think:false, format,
       keep_alive:image ? 0 : '2m', options:{num_ctx:4096,num_predict:format ? 450 : 140}}),
     signal:AbortSignal.timeout(55000)
   });
-  if (!response.ok) throw new Error('Ollama could not run the requested local model.');
-  const {message} = await response.json();
-  if (!clean(message?.content)) throw new Error('Ollama returned no answer.');
-  return message.content.trim();
+  let sampling = false;
+  let active = true;
+  async function sample() {
+    if (sampling) return;
+    sampling = true;
+    const models = await loadedModels();
+    const placement = models?.find(entry => modelKey(entry.name) === modelKey(model));
+    if (active && placement) onPlacement({...placement,observed_ms:Date.now()});
+    sampling = false;
+  }
+  const timer = onPlacement && setInterval(sample,350);
+  timer?.unref();
+  try {
+    const response = await request;
+    if (!response.ok) throw new Error('Ollama could not run the requested local model.');
+    const {message} = await response.json();
+    if (!clean(message?.content)) throw new Error('Ollama returned no answer.');
+    return message.content.trim();
+  } finally {
+    active = false;
+    clearInterval(timer);
+  }
 }
 
 function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now } = {}) {
   const transcriber = worker === localWorker ? createSpeechWorker('stt-session','text',55_000) : null;
   const alertSpeaker = worker === localWorker ? createSpeechWorker('tts-session','audio',15_000) : null;
   let db;
+  let lastPlacement;
+  const recordPlacement = placement => { lastPlacement = placement; };
+  async function modelRuntime() {
+    const models = await loadedModels();
+    const names = [modelKey(configuredModel(false)),modelKey(configuredModel(true))];
+    return {
+      reachable:models !== null,
+      loaded:models?.filter(entry => names.includes(modelKey(entry.name))) ?? [],
+      last_observed:lastPlacement ?? null
+    };
+  }
   const busy = new Set();
   function database() {
     if (db) return db;
@@ -212,7 +263,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     ];
     let steps;
     try {
-      steps = parsePlan(await runResource('model', () => generate(messages,null,PLAN_FORMAT)));
+      steps = parsePlan(await runResource('model', () => generate(messages,null,PLAN_FORMAT,recordPlacement)));
     } catch (error) {
       if (error.publicMessage) throw error;
       return output(isChinese ? '暂时无法生成任务步骤。请检查本机 Ollama。' :
@@ -612,7 +663,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     const message = {role:'user',content:Array.isArray(frame) ? cameraPrompt + text : text};
     const messages = Array.isArray(frame) ? [message] : [system,...history,message];
     let reply;
-    try { reply = await runResource('model', () => generate(messages,frame)); }
+    try { reply = await runResource('model', () => generate(messages,frame,undefined,recordPlacement)); }
     catch (error) {
       if (error.publicMessage) throw error;
       throw failure(503, 'Local Ollama model unavailable. Check that Ollama is running and the model is installed.');
@@ -621,7 +672,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return output(reply,frame ? 'image' : 'llm');
   }
 
-  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory,
+  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory, modelRuntime,
     close() { transcriber?.close(); alertSpeaker?.close(); db?.close(); },
     remove(kind,id) { return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0; },
     async synthesize(text, priority) {

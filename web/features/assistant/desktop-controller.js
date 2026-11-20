@@ -1,4 +1,5 @@
 import { connectAlerts } from "../alerts/alerts-controller";
+import { connectModelCompute } from "./model-compute";
 import { connectConversation } from "./conversation-controller";
 import { createScope } from "../../shared/scope";
 import { createAccessibility } from "../../shared/accessibility";
@@ -670,6 +671,7 @@ export function mountDesktop(root, voicePresentation) {
       button.disabled = false;
     }
   });
+  connectModelCompute({$, scope, agentRequest});
   connectAlerts({$, scope, agentRequest, transcriptionLanguage, isAssist:() => currentPage === 'assist',
     isConversationBusy:segment => Boolean(pendingTurn || speech || reviewing || confirmation ||
       (segment === 'chunks' ? voiceSession?.segment?.chunks.length : voiceSession?.segment?.onset)),

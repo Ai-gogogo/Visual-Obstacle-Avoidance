@@ -35,6 +35,10 @@ Ollama 需要在本机 127.0.0.1:11434 运行。建议在启动 Ollama 的环境
 
 ## Dashboard 演示流程
 
+桌面顶部的 **YOLO** 显示工作进程上报的设备和精度。**Agent** 显示当前加载的文字或视觉模型及显存比例。看图模型可能在回答后卸载，此时可看 **Last observed**。**Idle** 表示项目使用的模型当前未加载。
+
+本机 GPU 测试用的是视觉 Instruct 版。安装命令为 `ollama pull qwen3-vl:2b-instruct-q4_K_M`。启动 Dashboard 前可将 `VISIONASSIST_VISION_MODEL` 设为该模型名。
+
 | 操作 | 示例 |
 |---|---|
 | 普通对话 | 输入「你好」，或点一次麦克风开启连续对话。每句话后停顿约一秒，等它回答后继续说。再次点击麦克风或按 Esc 结束 |

@@ -31,7 +31,8 @@ class CameraWorker:
     def __init__(
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
-        item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False
+        item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False,
+        inference_device=None, half=False
     ):
         self.side = side
         self.stereo = stereo
@@ -44,6 +45,11 @@ class CameraWorker:
         self.model = model
         self.infer = infer
         self.http = session
+        self.runtime_headers = {
+            "X-CV-Camera": side,
+            "X-CV-Device": inference_device,
+            "X-CV-Precision": "fp16" if half else "fp32",
+        } if inference_device else None
 
         # Optional SigLIP2 encoder; None keeps HSV.
         self.item_encoder = item_encoder
@@ -55,7 +61,8 @@ class CameraWorker:
         self.ids = count(1)
 
     def poll(self):
-        sources = self.http.get(self.api + "/sources", timeout=3)
+        options = {"headers": self.runtime_headers} if self.runtime_headers else {}
+        sources = self.http.get(self.api + "/sources", timeout=3, **options)
         sources.raise_for_status()
         active = {
             s["source_id"]: s.get("frame_id")
@@ -463,7 +470,9 @@ def main():
                 item_encoder=item_encoder,
                 road=road if side == "A" else None,
                 corridor=corridor if side == "A" else None,
-                allow_webrtc_stereo=args.allow_webrtc_stereo
+                allow_webrtc_stereo=args.allow_webrtc_stereo,
+                inference_device=device,
+                half=args.half
             )
             for side, infer in zip(sides, predictors)
         ]
