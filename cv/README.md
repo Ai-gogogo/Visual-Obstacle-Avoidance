@@ -39,7 +39,7 @@ On the example photo, the CPU run found a bus at center and four people (two lef
 
 The CV suite checks the two position boundaries, box normalization, annotation coordinates, real detections on the bus photo and an empty prediction on a rotated blank JPEG. Confidence scores can vary slightly by runtime.
 
-## Live cameras A and B
+## Live Camera A detection and Camera B stereo
 
 Use the same environment and weights as the single-image detector. From the repository root, start the Web server in one terminal and the CV worker in another:
 
@@ -54,7 +54,9 @@ python cv/live_camera.py
 
 Open the dashboard at `http://localhost:8765/`, generate independent pairing codes for **Camera A** and **Camera B**, then open `/camera` on each device and enter its code. Either camera can run alone. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
 
-In Voice assistant, select **Camera A** or **Camera B** and ask “What is in front of me?” Each camera has a separate polling thread and HTTP session. CPU mode uses independent YOLO models. CUDA mode shares one resident model between the two cameras. Its frame cache is scoped to the dashboard source. Each result is submitted with the camera ID and the ETag of the JPEG actually processed. An unchanged frame skips inference. An empty prediction clears the object list. The Agent answers from the most recent accepted detection within the server’s five-second freshness window. Newer preview frames can arrive while inference runs. Re-pairing replaces the old camera slot. Leave the worker running to pick up the new stream, or stop it with Ctrl+C.
+The worker runs YOLO on Camera A by default. Camera B supplies the second view when stereo is enabled. Use `--dual-yolo` when both cameras need independent detections. In that mode each camera has a separate polling thread and HTTP session. CPU mode uses independent YOLO models. CUDA mode shares one resident model between the two cameras.
+
+Each result includes the camera ID and the ETag of the JPEG actually processed. An unchanged frame skips inference. The worker emits optional `preview_objects` when a lower-confidence detection on the same frame continues a recently confirmed track. These observations are available to compatible dashboard overlays. Standard objects, alerts and Agent input keep the existing confidence thresholds. Re-pairing replaces the prior camera stream and resets its tracks.
 
 The live integration tests in `test_live_camera.py` replay JPEGs through the actual Node server and Agent with real YOLO weights. They exercise the running CLI, a camera change during inference, unchanged and expired frames, simultaneous feeds, B disconnecting while A continues, and re-pairing. Run them with the CV environment active and Node available:
 

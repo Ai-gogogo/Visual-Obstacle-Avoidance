@@ -230,7 +230,7 @@ class LiveCameraTests(unittest.TestCase):
 
     def test_dual_cli_keeps_frames_and_answers_separate_after_b_disconnects(self):
         process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("live_camera.py")),
-                                    "--server", self.base])
+                                    "--dual-yolo", "--server", self.base])
         self.addCleanup(process.wait, 5)
         self.addCleanup(process.terminate)
         phones = {side: self.pair(side) for side in "AB"}

@@ -75,8 +75,8 @@ def assign_relative_depth(objects):
             obj["relative_depth"] = "far"
 
 
-def detect(model, image, *, device="cpu", imgsz=640, half=False):
-    result = model.predict(image, device=device, imgsz=imgsz, half=half, conf=0.4, iou=0.7,
+def detect(model, image, *, device="cpu", imgsz=640, half=False, confidence=.4):
+    result = model.predict(image, device=device, imgsz=imgsz, half=half, conf=confidence, iou=0.7,
                            max_det=40, verbose=False)[0]
     boxes = result.boxes.cpu()
     objects = [

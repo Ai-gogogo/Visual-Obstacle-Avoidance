@@ -1,5 +1,5 @@
 
-"""Publish live Camera A and B detections to the local VisionAssist server."""
+"""Detect on Camera A and use Camera B for optional stereo depth."""
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -104,10 +104,11 @@ class CameraWorker:
                 )
                 return
 
-            objects = (
+            candidates = (
                 self.infer(image)
-                if self.infer else detect(self.model, image)
+                if self.infer else detect(self.model, image, confidence=.25)
             )
+            objects = [obj for obj in candidates if obj["confidence"] >= .4]
             payload = {
                 "frame_id": etag.strip('"'),
                 "objects": objects
@@ -132,6 +133,10 @@ class CameraWorker:
                     )
                     self.risk_assessments[source] = RiskAssessment()
                 tracker.update(objects, stamp)
+                candidates = [obj for obj in candidates if .25 <= obj["confidence"] < .4]
+                weak = tracker.preview_continuations(candidates, stamp, {obj["track_id"] for obj in objects})
+                if weak:
+                    payload["preview_objects"] = weak
             right_stream = payload.get("stereo", {}).pop("partner_stream", None)
             capture_ms = frame.headers.get("X-CV-Sample-Ms")
             if self.corridor and depth is not None and stream and right_stream and capture_ms:
@@ -354,6 +359,8 @@ def main():
         help="VisionAssist server URL on this computer"
     )
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
+    parser.add_argument("--dual-yolo", action="store_true",
+                        help="Also run independent YOLO on Camera B")
     parser.add_argument(
         "--stereo-config", type=Path, default=DEFAULT_CONFIG
     )
@@ -432,17 +439,19 @@ def main():
     options = dict(
         device=torch.device(device),
         imgsz=args.imgsz,
-        half=args.half
+        half=args.half,
+        confidence=.25
     )
 
-    if device == "cpu":
+    sides = "AB" if args.dual_yolo else "A"
+    if device == "cpu" or not args.dual_yolo:
         predictors = [
             partial(
                 detect,
                 YOLO(str(args.weights), task="detect"),
                 **options
             )
-            for _ in "AB"
+            for _ in sides
         ]
     else:
         predictor = partial(
@@ -494,12 +503,12 @@ def main():
                 road=road if side == "A" else None,
                 corridor=corridor if side == "A" else None
             )
-            for side, infer in zip("AB", predictors)
+            for side, infer in zip(sides, predictors)
         ]
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
             print(
-                f"YOLO loaded. Watching cameras A and B "
+                f"YOLO loaded for {sides} "
                 f"on {device} at {args.server}. "
                 f"Item encoder: {args.item_encoder}. "
                 "Ctrl+C to stop.",

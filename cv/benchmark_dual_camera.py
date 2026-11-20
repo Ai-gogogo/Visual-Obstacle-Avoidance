@@ -60,7 +60,7 @@ def measure(temp, args, device):
             streams.append(({"Authorization": "Bearer " + phone, "Content-Type": "image/jpeg"}, jpeg.getvalue()))
 
         log = temp / "worker.csv"
-        command = [sys.executable, "cv/live_camera.py", "--server", base, "--metrics", str(log),
+        command = [sys.executable, "cv/live_camera.py", "--dual-yolo", "--server", base, "--metrics", str(log),
                    "--device", device, "--imgsz", str(args.imgsz), "--cpu-threads", str(args.cpu_threads),
                    "--poll-ms", str(args.poll_ms)]
         if args.half:
