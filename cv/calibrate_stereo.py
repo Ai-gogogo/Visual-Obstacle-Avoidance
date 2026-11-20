@@ -43,8 +43,9 @@ def capture(args):
                         folder = args.pairs / left.headers["ETag"].strip('"')
                         if not folder.exists():
                             folder.mkdir()
-                            (folder / "A.jpg").write_bytes(left.content)
-                            (folder / "B.jpg").write_bytes(right.content)
+                            for side, frame in zip("AB", (left,right)):
+                                extension = "png" if frame.headers.get("Content-Type") == "image/png" else "jpg"
+                                (folder / f"{side}.{extension}").write_bytes(frame.content)
                             print("Saved", folder)
                             break
                 time.sleep(.15)
@@ -65,7 +66,10 @@ def solve(args):
             continue
         points = []
         for side in "AB":
-            image = cv2.imread(str(folder / f"{side}.jpg"), cv2.IMREAD_GRAYSCALE)
+            path = folder / f"{side}.png"
+            if not path.is_file():
+                path = folder / f"{side}.jpg"
+            image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
             if image is None:
                 break
             if size is None:

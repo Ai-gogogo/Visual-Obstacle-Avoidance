@@ -111,11 +111,13 @@ class LiveStereoTests(unittest.TestCase):
         worker.road = RoadEdge(json.loads(DEFAULT_ROAD_CONFIG.read_text()), worker.stereo,
                                lambda image, confidence: (road_mask, ~road_mask))
 
-        def upload(phone, image, stamp):
-            headers = {"Content-Type": "image/jpeg"}
+        def upload(phone, image, stamp, lossless=False):
+            headers = {"Content-Type": "image/png" if lossless else "image/jpeg"}
             if stamp is not None:
                 headers.update({"X-Sample-Ms": str(stamp), "X-Clock-Error-Ms": "3"})
-            request("PUT", "/api/frame", phone, headers=headers, data=cv2.imencode(".jpg", image)[1].tobytes())
+            frame = cv2.imencode(".png" if lossless else ".jpg", image)[1].tobytes()
+            request("PUT", "/api/frame", phone, headers=headers, data=frame)
+            return frame
 
         def read():
             example = dict(label="chair", confidence=.9, position="center", bbox=[.3,.2,.7,.8])
@@ -127,11 +129,14 @@ class LiveStereoTests(unittest.TestCase):
         upload(b, right, now-180)
         upload(a, left, now)
         self.assertEqual(read()["stereo_status"], "waiting_for_pair")
-        upload(b, right, now)
+        upload(b, right, now, lossless=True)
         upload(b, right*0, now+160)  # The newer B frame is a worse match.
-        upload(a, left, now+5)
+        original = upload(a, left, now+5, lossless=True)
         measured = read()
+        self.assertEqual(base64.b64decode(measured["png"]), original)
+        self.assertNotIn("jpeg", measured)
         self.assertEqual(measured["stereo_status"], "ready")
+        self.assertGreater(measured["depth_valid_fraction"], .5)
         self.assertAlmostEqual(measured["objects"][0]["depth_m"], 2, delta=.05)
         png = np.frombuffer(base64.b64decode(measured["depth_preview"]), np.uint8)
         self.assertGreater(cv2.imdecode(png, cv2.IMREAD_GRAYSCALE).max(), 0)
@@ -152,6 +157,7 @@ class LiveStereoTests(unittest.TestCase):
         self.assertEqual(cleared.json()["frame_id"], ready_preview.json()["frame_id"])
         self.assertEqual(cleared.json()["stereo_status"], "waiting_for_pair")
         self.assertNotIn("depth_preview", cleared.json())
+        self.assertNotIn("depth_valid_fraction", cleared.json())
         self.assertNotIn("depth_m", cleared.json()["objects"][0])
         upload(a, left, None)
         old_phone = read()

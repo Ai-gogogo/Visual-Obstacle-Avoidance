@@ -238,7 +238,8 @@ class CameraWorker:
             if z is not None:
                 obj["depth_m"] = z
 
-        if not np.isfinite(depth).any():
+        valid_fraction = np.count_nonzero(np.isfinite(depth)) / depth.size
+        if not valid_fraction:
             return {"status": "no_matches"}, None
 
         preview = self.stereo.preview(depth)
@@ -257,6 +258,7 @@ class CameraWorker:
             "partner_id": partner.headers["X-Partner-Id"],
             "partner_stream": partner.headers.get("X-Partner-Stream"),
             "preview": base64.b64encode(png).decode("ascii"),
+            "valid_fraction": valid_fraction,
             "range_m": [self.stereo.min_m, self.stereo.max_m]
         }, depth
 
