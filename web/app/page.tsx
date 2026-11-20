@@ -14,6 +14,8 @@ export default function DesktopPage() {
       <DesktopHeader />
       <main id="main" className="shell" tabIndex={-1}>
         <p className="obstacle-alert" id="obstacle-alert" role="alert" />
+        <p className="toast" id="warning-audio-status" role="status" />
+        <p className="toast" id="warning-timing" hidden />
         <p className="connection-alert" id="connection-alert" role="alert" />
         <p className="toast" id="ui-feedback" role="status" />
         <MonitorPanel />

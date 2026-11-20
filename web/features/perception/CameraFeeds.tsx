@@ -27,6 +27,8 @@ export function CameraFeeds() {
             aria-label="Live camera A preview with YOLO detections"
             hidden
           ></canvas>
+          <video className="live-frame rtc-preview" aria-label="Live video from Camera A" autoPlay muted playsInline hidden />
+          <span className="analysis-frame-label" hidden>Matched analysis frame</span>
           <p className="no-feed" hidden>
             Waiting for Camera A
           </p>
@@ -35,6 +37,8 @@ export function CameraFeeds() {
         <footer>
           <span className="frame-size" hidden></span>
           <span className="feed-summary">2 sample detections</span>
+          <button className="quiet rtc-toggle" type="button" aria-pressed="false" hidden>Live video</button>
+          <span className="rtc-status" role="status"></span>
         </footer>
       </article>
       <article className="feed" data-camera="B">
@@ -63,6 +67,7 @@ export function CameraFeeds() {
             aria-label="Live camera B preview"
             hidden
           ></canvas>
+          <video className="live-frame rtc-preview" aria-label="Live video from Camera B" autoPlay muted playsInline hidden />
           <p className="no-feed" hidden>
             Waiting for Camera B
           </p>
@@ -71,6 +76,8 @@ export function CameraFeeds() {
         <footer>
           <span className="frame-size" hidden></span>
           <span className="feed-summary">2 sample detections</span>
+          <button className="quiet rtc-toggle" type="button" aria-pressed="false" hidden>Live video</button>
+          <span className="rtc-status" role="status"></span>
         </footer>
       </article>
       <article className="feed" id="stereo-view" hidden>

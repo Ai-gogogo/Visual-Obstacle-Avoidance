@@ -36,3 +36,12 @@ class TrackingTests(unittest.TestCase):
         ids = self.ids(220, [object_at(.10, "bottle"), object_at(.75)])
         self.assertTrue(set(initial).isdisjoint(ids))
         self.assertEqual(len(set(ids)), 2)
+
+    def test_weak_box_can_only_continue_a_recent_unmatched_track(self):
+        first, second = self.ids(0, [object_at(.1), object_at(.65)])
+        self.ids(140, [object_at(.12)])
+        candidates = [object_at(.13), object_at(.66), object_at(.4), object_at(.66, "bottle")]
+        observed = self.tracker.preview_continuations(candidates, 140, {first})
+        self.assertEqual([box["track_id"] for box in observed], [second])
+        self.assertEqual(observed[0]["bbox"], candidates[1]["bbox"])
+        self.assertEqual(self.tracker.preview_continuations(candidates, 600, set()), [])

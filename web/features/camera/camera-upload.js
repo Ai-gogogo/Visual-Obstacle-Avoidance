@@ -1,4 +1,5 @@
 import { requestError } from "../../shared/accessibility";
+import { exchangeVideoOffer } from "../../services/rtc-client";
 
 export function createCameraUpload(video, report) {
   const canvas = document.createElement('canvas');
@@ -11,6 +12,8 @@ export function createCameraUpload(video, report) {
   let lensDescription = '';
   let lastDetails = '';
   let originalPixels = false;
+  let rtcPeer;
+  let rtcAbort;
 
   // Estimate server time on the phone's monotonic clock. Retain the lowest RTT
   // sample for one minute, and account for uncertainty when pairing the views.
@@ -28,6 +31,9 @@ export function createCameraUpload(video, report) {
     lastDetails = '';
     clock = undefined;
     clearTimeout(timer);
+    rtcAbort?.abort();
+    rtcPeer?.close();
+    rtcAbort = rtcPeer = undefined;
     const previousToken = token;
     token = undefined;
     stream?.getTracks().forEach(track => track.stop());
@@ -100,8 +106,10 @@ export function createCameraUpload(video, report) {
   }
 
   // An ultrawide physical lens can report 1× relative to itself.
-  async function openWideCamera(devices) {
-    const resolution = originalPixels ? {width:{ideal:1920},height:{ideal:1080}} : {};
+  async function openWideCamera(devices, rtcMode) {
+    const resolution = originalPixels ? {width:{ideal:1920},height:{ideal:1080}} :
+      rtcMode === 'hd' ? {width:{ideal:1280,max:1280},height:{ideal:720,max:1280},frameRate:{ideal:24,max:30}} :
+        rtcMode ? {width:{ideal:640,max:640},height:{ideal:480,max:640},frameRate:{ideal:30,max:30}} : {};
     const open = video => devices.getUserMedia({video:{...resolution,...video},audio:false});
     const rear = {facingMode:{ideal:'environment'}};
     const ultra = label => /ultra[ -]?wide|超广角|超廣角/i.test(label) &&
@@ -139,6 +147,93 @@ export function createCameraUpload(video, report) {
     }
   }
 
+  async function streamVideo(currentRun, rtcMode) {
+    const controller = rtcAbort = new AbortController();
+    const peer = rtcPeer = new RTCPeerConnection({iceServers:[]});
+    const auth = {Authorization:'Bearer '+token};
+    const offerPath = '/api/webrtc/offer'+(rtcMode === 'hd' ? '?quality=hd' : '');
+    const started = performance.now();
+    let received = false;
+    let clockRefreshAt = 0;
+
+    async function syncRtcClock() {
+      const options = {headers:auth,signal:AbortSignal.any([controller.signal,AbortSignal.timeout(1200)])};
+      let best;
+      for (let i=0; i<4; i++) {
+        const start = performance.now();
+        const sent = Date.now();
+        const response = await fetch('/api/webrtc/clock',options);
+        const received = Date.now();
+        const elapsed = performance.now()-start;
+        if (!response.ok) return;
+        const {server_ms} = await response.json();
+        if (Math.abs(received-sent-elapsed) <= 5 && received >= sent && (!best || elapsed < best.elapsed)) {
+          best = {server_ms,sent_ms:sent,received_ms:received,elapsed};
+        }
+      }
+      if (best) await fetch('/api/webrtc/clock',{
+        ...options,method:'POST',headers:{...auth,'Content-Type':'application/json'},body:JSON.stringify(best)
+      });
+    }
+
+    async function useJpeg() {
+      if (rtcPeer !== peer || run !== currentRun) return;
+      rtcPeer = undefined;
+      controller.abort();
+      peer.close();
+      try {
+        const response = await fetch('/api/webrtc/offer',{method:'DELETE',headers:auth,signal:AbortSignal.timeout(3000)});
+        if (!response.ok) throw new Error('Camera session ended.');
+        if (run !== currentRun) return;
+        lensDescription += ' · WebRTC unavailable, using JPEG';
+        nextFrame(currentRun);
+      } catch {
+        if (run === currentRun) stop('Camera connection interrupted. Pair again to reconnect.');
+      }
+    }
+
+    async function checkReceiver() {
+      if (rtcPeer !== peer || run !== currentRun) return;
+      try {
+        const response = await fetch('/api/webrtc/status',{headers:auth,
+          signal:AbortSignal.any([controller.signal,AbortSignal.timeout(2500)])});
+        if (!response.ok) throw new Error('Receiver unavailable.');
+        const state = await response.json();
+        if (rtcPeer !== peer || run !== currentRun) return;
+        if (!state.receiving && (received || performance.now()-started > 8000)) return useJpeg();
+        if (state.receiving) {
+          received = true;
+          if (performance.now() >= clockRefreshAt) {
+            clockRefreshAt = performance.now()+5000;
+            void syncRtcClock().catch(() => {});
+          }
+          const fps = state.decoded_fps ? ' · '+state.decoded_fps+' FPS at receiver' : '';
+          const size = state.width && state.height ? ' · '+state.width+' × '+state.height+' px' : '';
+          const timing = state.capture_timing_available ? ' · Stereo timing ready' : ' · Waiting for stereo timing';
+          report({phase:'connected',lens:lensDescription+' · WebRTC'+size+fps+timing});
+        }
+        timer = setTimeout(checkReceiver,1000);
+      } catch {
+        await useJpeg();
+      }
+    }
+
+    try {
+      const {sender} = peer.addTransceiver(stream.getVideoTracks()[0],{
+        direction:'sendonly',sendEncodings:[{maxBitrate:rtcMode === 'hd' ? 4_000_000 : 2_000_000,scaleResolutionDownBy:1}]
+      });
+      const parameters = sender.getParameters();
+      parameters.degradationPreference = 'maintain-resolution';
+      await sender.setParameters(parameters).catch(() => {});
+      peer.addEventListener('connectionstatechange', () => {
+        if (peer.connectionState === 'failed') void useJpeg();
+      });
+      await exchangeVideoOffer(peer,offerPath,token,controller.signal);
+      await checkReceiver();
+    } catch {
+      await useJpeg();
+    }
+  }
 
   async function start(code, format) {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -149,7 +244,13 @@ export function createCameraUpload(video, report) {
     originalPixels = format === 'png';
     report({phase:'connecting', message:'Allow camera access to connect.'});
     try {
-      const {media,description} = await openWideCamera(navigator.mediaDevices);
+      const requestedRtc = format === 'webrtc-hd' ? 'hd' : format === 'webrtc' ? 'standard' : null;
+      const rtcMode = typeof RTCPeerConnection === 'undefined' ? null : requestedRtc;
+      const {media,description} = await openWideCamera(navigator.mediaDevices,rtcMode)
+        .catch(error => {
+          if (!rtcMode || error.name !== 'OverconstrainedError') throw error;
+          return openWideCamera(navigator.mediaDevices,rtcMode === 'hd' ? 'standard' : null);
+        });
       if (run !== currentRun) { media.getTracks().forEach(track => track.stop()); return; }
       stream = media;
       const sent = performance.now();
@@ -171,6 +272,13 @@ export function createCameraUpload(video, report) {
       lensDescription = description;
       report({phase:'connected', lens:description});
       await video.play();
+      if (run !== currentRun) return;
+      if (rtcMode && result.webrtc) {
+        report({phase:'connected',lens:description+' · Connecting WebRTC'});
+        void streamVideo(currentRun,rtcMode);
+        return;
+      }
+      if (requestedRtc) lensDescription += ' · WebRTC unavailable, using JPEG';
       nextFrame(currentRun);
     } catch (error) {
       if (run === currentRun) {

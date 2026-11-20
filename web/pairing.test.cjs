@@ -85,3 +85,52 @@ test('desktop and two phones pair independently and stale frames are withheld', 
   t.mock.timers.tick(5100);
   assert.equal((await call('/api/frame/B','GET',desk,undefined,{'If-None-Match':'"unknown"'})).status,204);
 });
+
+test('weak same-frame boxes are visual only and fresh hazards wake the waiting dashboard', async t => {
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const call = (path, method, token, body, extra = {}, signal) => fetch(base+path,{
+    method,body,headers:{...(token ? {Authorization:'Bearer '+token} : {}),...extra},signal
+  });
+  const json = {'Content-Type':'application/json'};
+  const {token:desk} = await (await call('/api/session','POST')).json();
+  const {code} = await (await call('/api/pair/A','POST',desk)).json();
+  const {token:phone} = await (await call('/api/join','POST',undefined,JSON.stringify({code}),json)).json();
+  await call('/api/agent/alerts','GET',desk);
+  const jpeg = Buffer.from([255,216,42,255,217]);
+  const box = {label:'chair',bbox:[.2,.2,.6,.8],position:'center',track_id:'A-1',risk:'urgent'};
+  async function upload() {
+    const sample = Date.now()-40;
+    assert.equal((await call('/api/frame','PUT',phone,jpeg,{
+      'Content-Type':'image/jpeg','X-Sample-Ms':sample,'X-Clock-Error-Ms':4
+    })).status,204);
+    const {sources:[source]} = await (await call('/api/cv/sources')).json();
+    const query = '?camera_id=A&source_id='+source.source_id;
+    const frame = await call('/api/cv/frame'+query);
+    return {sample,query,frame_id:frame.headers.get('etag').slice(1,-1)};
+  }
+  async function publish(input, objects, preview_objects = []) {
+    const response = await call('/api/cv/detections'+input.query,'POST',undefined,
+      JSON.stringify({frame_id:input.frame_id,objects,preview_objects}),json);
+    assert.equal(response.status,204);
+    return response;
+  }
+  const weak = await upload();
+  await publish(weak,[],[{...box,confidence:.32}]);
+  const preview = await (await call('/api/preview/A','GET',desk)).json();
+  assert.equal(preview.frame_id,weak.frame_id);
+  assert.equal(preview.preview_objects[0].track_id,'A-1');
+  assert.deepEqual(preview.objects,[]);
+  assert.equal((await (await call('/api/agent/alerts','GET',desk)).json()).alerts.length,0);
+  const pending = call('/api/agent/alerts?wait=1&after=0','GET',desk,undefined,{},AbortSignal.timeout(850));
+  const strong = await upload();
+  const result = await publish(strong,[{...box,confidence:.78}]);
+  assert.ok(result.headers.has('x-cv-capture-latency-ms'));
+  const {alerts:[alert]} = await (await pending).json();
+  assert.equal(alert.capture_ms,strong.sample);
+  assert.equal(alert.capture_error_ms,4);
+  assert.ok(alert.judged_ms >= alert.capture_ms);
+});

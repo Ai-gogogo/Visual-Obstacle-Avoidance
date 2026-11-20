@@ -6,3 +6,4 @@ __pycache__/
 /web/.next/
 /web/next-env.d.ts
 /web/*.tsbuildinfo
+.venv-rtc/

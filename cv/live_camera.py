@@ -31,10 +31,11 @@ class CameraWorker:
     def __init__(
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
-        item_encoder=None, road=None, corridor=None
+        item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False
     ):
         self.side = side
         self.stereo = stereo
+        self.allow_webrtc_stereo = allow_webrtc_stereo
         self.road = road
         self.corridor = corridor
         self.intrusions = {}
@@ -104,10 +105,11 @@ class CameraWorker:
                 )
                 return
 
-            objects = (
+            candidates = (
                 self.infer(image)
-                if self.infer else detect(self.model, image)
+                if self.infer else detect(self.model, image, confidence=.25)
             )
+            objects = [obj for obj in candidates if obj["confidence"] >= .4]
             payload = {
                 "frame_id": etag.strip('"'),
                 "objects": objects
@@ -116,7 +118,10 @@ class CameraWorker:
             depth = None
             if self.side == "A":
                 if self.stereo is not None:
-                    payload["stereo"], depth = self.measure_depth(params, payload, image)
+                    if frame.headers.get("X-CV-Transport") == "webrtc" and not self.allow_webrtc_stereo:
+                        payload["stereo"] = {"status": "transport_unvalidated"}
+                    else:
+                        payload["stereo"], depth = self.measure_depth(params, payload, image)
                 if self.road is not None:
                     payload["road_edge"] = self.road(image, depth)
 
@@ -132,6 +137,10 @@ class CameraWorker:
                     )
                     self.risk_assessments[source] = RiskAssessment()
                 tracker.update(objects, stamp)
+                candidates = [obj for obj in candidates if .25 <= obj["confidence"] < .4]
+                weak = tracker.preview_continuations(candidates, stamp, {obj["track_id"] for obj in objects})
+                if weak:
+                    payload["preview_objects"] = weak
             right_stream = payload.get("stereo", {}).pop("partner_stream", None)
             capture_ms = frame.headers.get("X-CV-Sample-Ms")
             if self.corridor and depth is not None and stream and right_stream and capture_ms:
@@ -200,7 +209,8 @@ class CameraWorker:
                     source,
                     etag.strip('"'),
                     int(result.headers["X-CV-Accepted-Ms"]),
-                    int(result.headers["X-CV-Latency-Ms"])
+                    int(result.headers["X-CV-Latency-Ms"]),
+                    result.headers.get("X-CV-Capture-Latency-Ms", "")
                 )
 
         self.etags[source] = etag
@@ -329,6 +339,8 @@ def main():
     parser.add_argument("--dual-yolo", action="store_true",
                         help="Also run independent YOLO on B (legacy dual-camera benchmark)")
     parser.add_argument("--stereo-config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--allow-webrtc-stereo", action="store_true",
+                        help="Enable metric depth from verified WebRTC rig geometry")
     parser.add_argument("--metrics", type=Path, help="New CSV file for accepted frames from both cameras")
     # New option. HSV stays the default.
     parser.add_argument(
@@ -397,7 +409,7 @@ def main():
         from siglip_features import SigLIPExtractor
         item_encoder = SigLIPExtractor()
 
-    options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half)
+    options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half, confidence=.25)
     sides = "AB" if args.dual_yolo else "A"
     if device == "cpu" or not args.dual_yolo:
         # Independent predictors let both camera threads use the CPU concurrently.
@@ -429,7 +441,7 @@ def main():
             writer = csv.writer(output)
             writer.writerow([
                 "camera", "source_id", "frame_id",
-                "accepted_ms", "latency_ms"
+                "accepted_ms", "latency_ms", "capture_latency_ms"
             ])
             output.flush()
             lock = Lock()
@@ -450,7 +462,8 @@ def main():
                 infer=infer,
                 item_encoder=item_encoder,
                 road=road if side == "A" else None,
-                corridor=corridor if side == "A" else None
+                corridor=corridor if side == "A" else None,
+                allow_webrtc_stereo=args.allow_webrtc_stereo
             )
             for side, infer in zip(sides, predictors)
         ]

@@ -76,6 +76,22 @@ function createAgentRoutes(options, sessions, read, respond) {
   const asJSON = async (req, max) => JSON.parse((await read(req,max)).toString('utf8'));
   const error = (res, status, message) => respond(res,status,{error:message});
 
+  function waitForAlert(session, response) {
+    session.alertWaiter?.();
+    return new Promise(resolve => {
+      const timeout = setTimeout(done,1000);
+      function done() {
+        clearTimeout(timeout);
+        response.off('close',done);
+        if (session.alertWaiter === done) delete session.alertWaiter;
+        resolve();
+      }
+      session.alertWaiter = done;
+      response.once('close',done);
+      if (response.destroyed) done();
+    });
+  }
+
   function cvResponse(req,res,route,requestURL) {
     if (!loopback(req.socket.remoteAddress) || req.headers.origin || req.headers['sec-fetch-site']) {
       return error(res,403,'The CV adapter is available to local processes.');
@@ -100,10 +116,14 @@ function createAgentRoutes(options, sessions, read, respond) {
       for (const [id, item] of slot.cvFrames) if (!recent(item)) slot.cvFrames.delete(id);
       const id = slot.etag.slice(1,-1);
       const frameType = slot.frameType ?? 'image/jpeg';
-      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{frame:slot.frame,frameType,stamp:slot.stamp,sample:slot.sample});
+      const transport = slot.rtcID ? 'webrtc' : 'image';
+      if (!slot.cvFrames.has(id)) slot.cvFrames.set(id,{
+        frame:slot.frame,frameType,stamp:slot.stamp,sample:slot.sample,transport,quality:slot.rtcQuality
+      });
       const retain = frameType === 'image/png' ? 3 : 8;
       while (slot.cvFrames.size > retain) slot.cvFrames.delete(slot.cvFrames.keys().next().value);
       return res.writeHead(200,{'Content-Type':frameType,ETag:slot.etag,
+        'X-CV-Transport':transport,
         ...(slot.sample ? {'X-CV-Sample-Ms':slot.sample.ms} : {}),
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
@@ -112,12 +132,14 @@ function createAgentRoutes(options, sessions, read, respond) {
       const limit = Number(requestURL.searchParams.get('max_skew_ms'));
       if (!Number.isInteger(limit) || limit <= 0 || limit > 250) return error(res,400,'Invalid time tolerance.');
       if (!recent(left) || !left.sample) return res.writeHead(204).end();
+      const pairLimit = left.transport === 'webrtc' ? Math.min(limit,65) : limit;
       const right = session.slots.B;
       let best;
       let smallest = Infinity;
       for (const candidate of right.history ?? []) {
         const difference = Math.abs(candidate.sample.ms - left.sample.ms) + candidate.sample.error + left.sample.error;
-        if (recent(candidate) && difference <= limit && difference < smallest) {
+        if (candidate.transport === left.transport && candidate.quality === left.quality &&
+            recent(candidate) && difference <= pairLimit && difference < smallest) {
           best = candidate;
           smallest = difference;
         }
@@ -125,7 +147,8 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (!best) return res.writeHead(204).end();
       left.partner = {id:best.id, stream:right.streamID, stamp:best.stamp};
       return res.writeHead(200,{'Content-Type':best.frameType ?? 'image/jpeg', 'X-Partner-Id':best.id,
-        'X-Partner-Stream':right.streamID}).end(best.frame);
+        'X-Partner-Stream':right.streamID,'X-Partner-Skew-Ms':Math.abs(best.sample.ms-left.sample.ms),
+        'X-Partner-Skew-Bound-Ms':smallest}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
     return error(res,404,'Unknown CV route.');
@@ -133,7 +156,8 @@ function createAgentRoutes(options, sessions, read, respond) {
     async function publish() {
       const payload = await asJSON(req,600_000 + 128_000);
       const objects = parseObjects(payload?.objects);
-      if (!objects || typeof payload.frame_id !== 'string') return error(res,400,'Invalid detections.');
+      const weak = parseObjects(payload?.preview_objects ?? []);
+      if (!objects || !weak || typeof payload.frame_id !== 'string') return error(res,400,'Invalid detections.');
       const versioned = ['schema_version','camera_id','timestamp_ms'].some(key => Object.hasOwn(payload,key));
       if (versioned && (payload.schema_version !== DETECTION_SCHEMA_VERSION ||
           payload.camera_id !== camera || !Number.isSafeInteger(payload.timestamp_ms))) {
@@ -150,11 +174,14 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (slot.detection?.frame_id === payload.frame_id) return res.writeHead(204).end();
       slot.detection = {
         schema_version:DETECTION_SCHEMA_VERSION, camera_id:camera, frame_id:payload.frame_id,
-        timestamp_ms:captured.stamp, objects, frame:captured.frame, frameType:captured.frameType
+        timestamp_ms:captured.stamp, objects, frame:captured.frame, frameType:captured.frameType,
+        previewObjects:weak.filter(obj => obj.track_id && obj.confidence >= .25 && obj.confidence < .4)
+          .map(({label,position,bbox,confidence,track_id}) => ({label,position,bbox,confidence,track_id,weak:true})),
+        capture_ms:captured.sample?.ms
       };
       const partner = captured.partner;
       if (camera === 'A' && payload.stereo) {
-        slot.detection.stereoStatus = ['size_mismatch','no_matches','unavailable'].includes(payload.stereo.status)
+        slot.detection.stereoStatus = ['size_mismatch','no_matches','unavailable','transport_unvalidated'].includes(payload.stereo.status)
           ? payload.stereo.status : 'waiting_for_pair';
       }
       const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
@@ -186,6 +213,7 @@ function createAgentRoutes(options, sessions, read, respond) {
         }
       }
       const now = Date.now();
+      const previousSequence = session.alertSeq;
       for (const [id,stamp] of session.alertCooldown) if (now-stamp > 5000) session.alertCooldown.delete(id);
       const hazards = objects.filter(object => object.risk !== 'normal' && object.confidence >= 0.5)
         .sort((a,b) => Number(b.risk === 'urgent')-Number(a.risk === 'urgent'));
@@ -213,8 +241,20 @@ function createAgentRoutes(options, sessions, read, respond) {
         if (paired) slot.detection.partnerStream = partner.stream;
       }
       session.alerts = session.alerts.slice(-20);
+      if (session.alertSeq !== previousSequence) {
+        for (const alert of session.alerts) {
+          if (alert.id <= previousSequence) continue;
+          alert.judged_ms = now;
+          if (captured.sample) {
+            alert.capture_ms = captured.sample.ms;
+            alert.capture_error_ms = captured.sample.error;
+          }
+        }
+        session.alertWaiter?.();
+      }
       // Measured on one clock, from server receipt of the JPEG to acceptance of CV results.
-      return res.writeHead(204, {'X-CV-Accepted-Ms':now, 'X-CV-Latency-Ms':now-captured.stamp}).end();
+      return res.writeHead(204, {'X-CV-Accepted-Ms':now, 'X-CV-Latency-Ms':now-captured.stamp,
+        ...(captured.sample ? {'X-CV-Capture-Latency-Ms':Math.max(0,now-captured.sample.ms)} : {})}).end();
     }
   }
 
@@ -235,6 +275,10 @@ function createAgentRoutes(options, sessions, read, respond) {
     const method = req.method;
     if (route === '/api/agent/alerts' && method === 'GET') {
       const after = Number(requestURL.searchParams.get('after') || 0);
+      if (requestURL.searchParams.get('wait') === '1' && after === session.alertSeq) {
+        await waitForAlert(session,res);
+        if (res.destroyed) return;
+      }
       const remindersEnabled = requestURL.searchParams.get('reminders') === '1';
       const reminder = remindersEnabled ? agent.cameraReminder(session) : null;
       const active = session.alerts.filter(alert => {

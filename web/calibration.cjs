@@ -35,6 +35,7 @@ async function calibration(session, action, id) {
     session.calibration = {streams, poses:[], batch:require('node:crypto').randomUUID()};
   const state = session.calibration;
   const count = state.poses.length;
+  if (A.rtcID || B.rtcID) return {count,message:'Reconnect both cameras in lossless PNG mode for calibration.'};
   const tip = ['Center the board.', 'Move it left.', 'Move it right.', 'Move it higher.',
     'Move it lower.', 'Tilt the top toward the cameras.', 'Tilt the left edge toward the cameras.', 'Change the distance.'][count % 8];
   if (state.busy) return {message:'Please wait.', count};

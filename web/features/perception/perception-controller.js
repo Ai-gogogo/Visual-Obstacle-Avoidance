@@ -1,9 +1,12 @@
 import { createPerceptionView } from "./perception-view";
+import { createRtcPreview } from "./rtc-preview";
 
 export function createPerceptionController({$, scope, root, session, isMonitor, onModeChange}) {
   const {listen} = scope;
   const VisionPerceptionView = createPerceptionView($);
-  const feeds = [...root.querySelectorAll('[data-camera]')].map(node => ({node, side:node.dataset.camera}));
+  const feeds = [...root.querySelectorAll('[data-camera]')].map(node => ({
+    node,side:node.dataset.camera,rtc:createRtcPreview(node,node.dataset.camera,scope,session)
+  }));
   let sampleMode = true;
   let pollVersion = 0;
 
@@ -14,8 +17,9 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     const status = node.querySelector('.feed-status');
     status.textContent = sampleMode ? 'Sample feed' : connected ? 'Receiving' : 'Offline';
     status.classList.toggle('live', !sampleMode && connected);
+    if (sampleMode || !connected) feed.rtc.update(false);
     const image = node.querySelector('.live-frame');
-    image.hidden = sampleMode || !connected;
+    if (!feed.rtc.playing) image.hidden = sampleMode || !connected;
     const frame = image.parentElement;
     const size = node.querySelector('.frame-size');
     size.hidden = sampleMode || !connected;
@@ -28,16 +32,21 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
         VisionPerceptionView.showDepth(null, null, sampleMode);
       }
       feed.etag = undefined;
+      scope.cancelDelay(feed.expiry);
+      feed.rtc.updateAnalysis(false);
       image.getContext('2d').clearRect(0,0,image.width,image.height);
       delete image.dataset.frameId;
       const hadObjects = feed.objects != null;
       feed.objects = null;
       if (feed.side === 'A' || hadObjects) VisionPerceptionView.renderDetections(sampleMode, feeds);
     } else {
-      const aspect = image.width + ' / ' + image.height;
+      const video = feed.rtc.playing && node.querySelector('.rtc-preview');
+      const width = video?.videoWidth || image.width;
+      const height = video?.videoHeight || image.height;
+      const aspect = width + ' / ' + height;
       frame.style.setProperty('--camera-aspect', aspect);
-      if (feed.side === 'A') $('#stereo-map').parentElement.style.setProperty('--camera-aspect', aspect);
-      size.textContent = image.width + ' × ' + image.height + ' px';
+      if (feed.side === 'A') $('#stereo-map').parentElement.style.setProperty('--camera-aspect',image.width+' / '+image.height);
+      size.textContent = width + ' × ' + height + ' px';
     }
     const empty = node.querySelector('.no-feed');
     empty.hidden = sampleMode || connected;
@@ -69,13 +78,32 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
       await Promise.all([image.decode(), depth?.decode()]);
       if (version !== pollVersion) return;
-      VisionPerceptionView.paintCamera(feed.node.querySelector('canvas'), image, snapshot);
+      const canvas = feed.node.querySelector('canvas');
+      scope.cancelDelay(feed.expiry);
+      const expires = snapshot.analysis_expires_ms;
+      const hasBoxes = Boolean(snapshot.objects?.length || snapshot.preview_objects?.length || snapshot.road_edge);
+      const hasAnalysis = Number.isFinite(expires) && expires > Date.now();
+      const unannotated = {frame_id:snapshot.frame_id};
+      VisionPerceptionView.paintCamera(canvas,image,hasAnalysis ? snapshot : unannotated);
       feed.etag = response.headers.get('etag');
       const hasDetections = feed.objects != null || snapshot.objects != null;
-      feed.objects = snapshot.objects;
-      if (feed.side === 'A') VisionPerceptionView.showDepth(snapshot, depth, sampleMode);
+      feed.objects = hasAnalysis ? snapshot.objects : null;
+      if (feed.side === 'A') VisionPerceptionView.showDepth(hasAnalysis ? snapshot : null,hasAnalysis ? depth : null,sampleMode);
+      feed.rtc.update(Boolean(snapshot.webrtc));
+      feed.rtc.updateAnalysis(hasAnalysis && hasBoxes);
       setFeed(feed,true);
+      if (hasAnalysis) feed.expiry = scope.delay(() => {
+        if (version !== pollVersion) return;
+        VisionPerceptionView.paintCamera(canvas,image,unannotated);
+        feed.rtc.updateAnalysis(false);
+        feed.objects = null;
+        if (feed.side === 'A') VisionPerceptionView.showDepth(null,null,sampleMode);
+        VisionPerceptionView.renderDetections(sampleMode,feeds);
+      },Math.max(0,expires-Date.now()));
       if (snapshot.png) feed.node.querySelector('.frame-size').textContent += ' · Lossless PNG';
+      if (snapshot.webrtc?.decoded_fps) {
+        feed.node.querySelector('.frame-size').textContent += ' · '+snapshot.webrtc.decoded_fps+' FPS at receiver';
+      }
       if (snapshot.analysis_delayed) {
         feed.node.querySelector('.feed-summary').textContent = 'Live preview · analysis catching up';
       } else if (snapshot.road_edge?.point) {
@@ -99,7 +127,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       if (version !== pollVersion) return;
       if (!session.token) { setFeed(feed,false,'Pair the phone again.'); return; }
       await readFrame(feed,version);
-      if (version === pollVersion) scope.delay(() => poll(feed),feed.side === 'A' ? 150 : 220);
+      if (version === pollVersion) scope.delay(() => poll(feed),feed.side === 'A' ? 100 : feed.rtc.playing ? 450 : 220);
     }
     feeds.forEach(poll);
   }
@@ -126,5 +154,8 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   });
   VisionPerceptionView.makeAnnotations(feeds);
   VisionPerceptionView.renderDetections(sampleMode, feeds);
-  return {refreshPolling, stopPolling() { ++pollVersion; }, paired() { if (sampleMode) renderMode(false); else refreshPolling(); }};
+  return {refreshPolling, stopPolling() {
+    ++pollVersion;
+    feeds.forEach(feed => feed.rtc.update(false));
+  }, paired() { if (sampleMode) renderMode(false); else refreshPolling(); }};
 }

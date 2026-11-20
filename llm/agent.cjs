@@ -43,9 +43,9 @@ function localWorker(mode, data) {
   });
 }
 
-function createTranscriber() {
+function createSpeechWorker(mode, resultField, timeoutMs) {
   let child, pending, idle;
-  const failure = () => new Error('Local transcription worker failed.');
+  const failure = () => new Error('Local speech worker failed.');
 
   function close(error = failure()) {
     clearTimeout(idle);
@@ -60,7 +60,7 @@ function createTranscriber() {
   }
 
   function start() {
-    const process = spawn(localPython(),['-X','utf8',path.join(__dirname,'agent_worker.py'),'stt-session'],
+    const process = spawn(localPython(),['-X','utf8',path.join(__dirname,'agent_worker.py'),mode],
       {windowsHide:true});
     child = process;
     process.stderr.resume();
@@ -72,7 +72,7 @@ function createTranscriber() {
       if (child !== process || !pending) return;
       let result;
       try { result = JSON.parse(line); } catch { return failed(); }
-      if (!result || typeof result.text !== 'string') return failed();
+      if (!result || typeof result[resultField] !== 'string') return failed();
       const reply = pending;
       pending = undefined;
       clearTimeout(reply.timeout);
@@ -86,14 +86,14 @@ function createTranscriber() {
   return {
     close,
     request(data) {
-      // The Agent admits a single transcription at a time.
+      // The Agent admits one request per speech worker at a time.
       clearTimeout(idle);
       const process = child || start();
       return new Promise((resolve,reject) => {
         const timeout = setTimeout(() => {
           close();
           process.kill();
-        },55_000);
+        },timeoutMs);
         pending = {resolve,reject,timeout};
         process.stdin.write(JSON.stringify(data)+'\n');
       });
@@ -120,7 +120,8 @@ async function ollama(messages, image, format) {
 }
 
 function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now } = {}) {
-  const transcriber = worker === localWorker ? createTranscriber() : null;
+  const transcriber = worker === localWorker ? createSpeechWorker('stt-session','text',55_000) : null;
+  const alertSpeaker = worker === localWorker ? createSpeechWorker('tts-session','audio',15_000) : null;
   let db;
   const busy = new Set();
   function database() {
@@ -621,13 +622,14 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   }
 
   return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory,
-    close() { transcriber?.close(); db?.close(); },
+    close() { transcriber?.close(); alertSpeaker?.close(); db?.close(); },
     remove(kind,id) { return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0; },
     async synthesize(text, priority) {
       if (typeof text !== 'string' || !text.trim() || text.length > 650) throw failure(400, 'Give a short reply to speak.');
       try {
+        const payload = {text,language:cn(text) ? 'zh' : 'en'};
         const {audio} = await runResource(priority ? 'alert-tts' : 'tts',
-          () => worker('tts',{text,language:cn(text) ? 'zh' : 'en'}));
+          () => priority && alertSpeaker ? alertSpeaker.request(payload) : worker('tts',payload));
         return Buffer.from(audio,'base64');
       } catch (error) {
         if (error.publicMessage) throw error;

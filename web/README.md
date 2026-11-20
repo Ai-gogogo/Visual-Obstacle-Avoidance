@@ -16,6 +16,30 @@
 
 本地服务用低频 JPEG 帧预览。Agent 的 YOLO 问答和个人物品识别依赖 CV 程序通过本机接口提交同帧检测。Qwen 单帧问答和亲友识别可以读取已经配对的相机帧。Judge view 的样例照片和距离为演示数据。
 
+## 双手机 WebRTC
+
+安装媒体接收依赖并指定 Python 解释器。以下在 `web` 下使用 PowerShell：
+
+```powershell
+python -m venv .venv-rtc
+.\.venv-rtc\Scripts\python.exe -m pip install -r ..\cv\rtc-requirements.txt
+$env:VISIONASSIST_RTC_PYTHON = (Resolve-Path .\.venv-rtc\Scripts\python.exe).Path
+npm run build
+npm start -- "证书路径.pem" "私钥路径.pem"
+```
+
+两台手机选择 **Low latency · WebRTC** 后分别配对。电脑和手机需要在可互访的局域网，防火墙需允许接收进程的 WebRTC UDP 媒体。此模式使用局域网直连 ICE。手机显示接收帧率，首次连接或媒体中断失败时自动切换 JPEG。桌面各相机的 **Live video** 按钮可播放原始视频，再点一次回到同帧分析画面。
+
+需要看清小物体时，可选 **Sharper video · WebRTC 720p**。手机请求 1280 × 720、约 24 FPS，上传码率上限 4 Mbps，桌面 HD 下行优先协商 H.264。取景状态显示实际收到的分辨率和帧率。HD 的分析快照长边最多 960 px。双目配对要求两台手机使用相同档位，启用 HD 测深前需要按实收尺寸核对标定。
+
+Camera A 的实时画面旁会保留同帧分析小窗。虚线表示当前帧中的弱检测延续了已有轨迹，弱检测只用于显示。分析超过有效期后，桌面清除检测框和深度小窗。点击 **Enable warning audio** 可测试并启用本地语音告警。告警直接来自 CV 规则，桌面分别显示判断、通知和浏览器开始播放语音的时间。有校正采集时钟时显示采集估算及其误差，其他情况以服务器收到画面为起点。
+
+接收进程持续读取视频轨道，保留每路最新解码帧，并最多每秒生成 10 张兼容快照用于现有 YOLO 和 Agent。桌面原始视频通过独立下行媒体轨道播放。CV worker 默认只对 Camera A 运行 YOLO。WebRTC 双目配对使用 RTCP 发送端报告和手机时钟校正估计采集时刻。估算不可靠时，相机页会显示 **Waiting for stereo timing**，A 路检测继续工作。
+
+使用原图 PNG 标定，再按照 [CV 实测步骤](../cv/README.md) 对比 JPEG 和 WebRTC。用同一支架、镜头、方向和标定分辨率完成实测后，可以用 `--allow-webrtc-stereo` 为该机位启用 WebRTC 深度。
+
+运行 `.\.venv-rtc\Scripts\python.exe ..\cv\test_rtc_transport.py` 可验证两路合成视频、桌面下行和 JPEG 回退。真机对照需用同两台手机和同一网络记录帧率、冻结、恢复时间和端到端延迟；页面显示的是解码帧率。
+
 ## 验证接口
 
 运行 `npm test` 检查配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。运行 `npm run typecheck` 检查 TypeScript。完成 `npm run build` 后，运行 `npm run test:frontend` 验证生产服务的两个页面、静态资源和同源配对接口。

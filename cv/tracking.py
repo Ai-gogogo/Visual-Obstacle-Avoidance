@@ -6,6 +6,8 @@ from scipy.optimize import linear_sum_assignment
 
 MAX_GAP_MS = 1200
 MIN_IOU = 0.20
+PREVIEW_GAP_MS = 350
+PREVIEW_MIN_IOU = .5
 
 
 def overlap(a, b):
@@ -47,6 +49,20 @@ class FrameTracker:
         self.side = side
         self.ids = ids
         self.tracks = []
+
+    def preview_continuations(self, candidates, stamp, occupied):
+        """Use current-frame evidence to display weak detections on established tracks."""
+        matches = []
+        used = set(occupied)
+        for obj in sorted(candidates, key=lambda candidate: candidate.get("confidence", 0), reverse=True):
+            scores = [(overlap(track.predict(stamp), obj["bbox"]), track.id)
+                      for track in self.tracks if track.id not in used and track.label == obj["label"]
+                      and 0 <= stamp - track.stamp <= PREVIEW_GAP_MS]
+            score, track_id = max(scores, default=(0, ""))
+            if score >= PREVIEW_MIN_IOU:
+                used.add(track_id)
+                matches.append({**obj, "track_id": track_id})
+        return matches
 
     def update(self, objects, stamp):
         self.tracks = [t for t in self.tracks if 0 <= stamp - t.stamp <= MAX_GAP_MS]
