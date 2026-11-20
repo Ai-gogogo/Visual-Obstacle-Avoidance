@@ -6,6 +6,7 @@
   <title>VisionAssist</title>
   <link rel="stylesheet" href="ui.css">
   <script src="desktop.js" defer></script>
+  <script src="calibration.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -22,7 +23,7 @@
     <section id="monitor" data-page>
       <div class="page-head">
         <div><h1 tabindex="-1">Live perception</h1><p>Inspect Camera A detections and their stereo depth.</p></div>
-        <div class="toolbar"><button class="quiet" id="mode">Show live cameras</button><button class="primary" id="pair">Pair a phone</button></div>
+        <div class="toolbar"><button class="quiet" id="open-calibration">Stereo calibration</button><button class="quiet" id="mode">Show live cameras</button><button class="primary" id="pair">Pair a phone</button></div>
       </div>
       <div class="feed-grid">
         <article class="feed" data-camera="A">
@@ -115,6 +116,14 @@
       <button type="button" class="primary" data-pair="B">Code for Camera B</button>
     </div>
     <div id="pair-result" role="status"></div>
+  </dialog>
+<dialog id="calibration-dialog" aria-labelledby="cal-title">
+    <h2 id="cal-title" tabindex="-1" autofocus>Stereo calibration</h2>
+    <p>Keep both cameras fixed. Hold the board still, then capture with the button or Space.</p>
+    <div class="feed-grid"><div>Camera A<canvas aria-label="Camera A checkerboard"></canvas></div><div>Camera B<canvas aria-label="Camera B checkerboard"></canvas></div></div>
+    <p id="cal-status" role="status"></p><p id="cal-count"></p>
+    <button class="primary" id="cal-save" disabled>Capture Stereo Pair</button>
+    <button class="quiet" id="cal-close">Close</button>
   </dialog>
 </body>
 </html>
