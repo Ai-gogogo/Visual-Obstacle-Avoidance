@@ -47,14 +47,14 @@
     }
     if (version === generation) timer = setTimeout(() => update('preview',version),action === 'capture' ? 1100 : 650);
   }
-  document.querySelector('#open-calibration').onclick = () => {
-    dialog.showModal();
+  document.querySelector('#open-calibration').onclick = event => {
+    VisionAccessibility.openDialog(dialog,event);
     status.textContent = 'Checking cameras…';
     update('preview',++generation);
   };
   save.onclick = () => update('capture',generation);
   dialog.addEventListener('keydown',event => {
-    if (event.code === 'Space' && event.target.id !== 'cal-close') {
+    if (event.code === 'Space' && !event.target.closest('button,input,select,a')) {
       event.preventDefault();
       if (!event.repeat && !save.disabled) save.click();
     }

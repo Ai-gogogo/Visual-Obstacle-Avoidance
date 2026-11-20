@@ -28,6 +28,7 @@ function updateClock(response, sent, received) {
 }
 
 function stop(message = '') {
+  const wasConnected = Boolean(token);
   run += 1;
   clock = undefined;
   clearTimeout(timer);
@@ -40,7 +41,9 @@ function stop(message = '') {
   lensStatus.hidden = true;
   card.hidden = false;
   connect.disabled = false;
+  form.removeAttribute('aria-busy');
   status.textContent = message;
+  if (message && wasConnected) codeField.focus();
   if (previousToken) fetch('/api/frame', {method:'DELETE', headers:{Authorization:'Bearer '+previousToken}, keepalive:true}).catch(() => {});
 }
 
@@ -99,7 +102,7 @@ async function upload(currentRun, sampleTime) {
       timer = setTimeout(() => nextFrame(currentRun),delay);
     }
   } catch (error) {
-    if (run === currentRun) stop(error.name === 'TimeoutError' ? 'Connection timed out. Pair again to reconnect.' : error.message);
+    if (run === currentRun) stop(VisionAccessibility.requestError(error,'Connection interrupted. Pair again to reconnect.'));
   }
 }
 
@@ -146,7 +149,13 @@ async function openWideCamera(devices) {
 form.addEventListener('submit', async event => {
   event.preventDefault();
   const code = codeField.value.replace(/[\s-]/g,'');
-  if (!/^\d{6}$/.test(code)) { status.textContent = 'Enter the six-digit code.'; codeField.focus(); return; }
+  if (!/^\d{6}$/.test(code)) {
+    codeField.setAttribute('aria-invalid','true');
+    status.textContent = 'Enter the six-digit code.';
+    codeField.focus();
+    return;
+  }
+  codeField.removeAttribute('aria-invalid');
   if (!navigator.mediaDevices?.getUserMedia || location.protocol === 'file:') {
     status.textContent = 'Open the camera site from the local server. A phone on the network needs HTTPS.';
     return;
@@ -155,6 +164,7 @@ form.addEventListener('submit', async event => {
   const currentRun = ++run;
   originalPixels = quality.value === 'png';
   connect.disabled = true;
+  form.setAttribute('aria-busy','true');
   status.textContent = 'Allow camera access to connect.';
   try {
     const {media,description} = await openWideCamera(navigator.mediaDevices);
@@ -168,7 +178,10 @@ form.addEventListener('submit', async event => {
       if (result.token) fetch('/api/frame',{method:'DELETE',headers:{Authorization:'Bearer '+result.token}}).catch(() => {});
       return;
     }
-    if (!response.ok) throw new Error(result.error);
+    if (!response.ok) {
+      if (response.status === 404) codeField.setAttribute('aria-invalid','true');
+      throw new Error(result.error);
+    }
     token = result.token;
     updateClock(response, sent, received);
     stream.getVideoTracks().forEach(track => track.addEventListener('ended', () => stop('Camera stopped. Enter a new code to reconnect.')));
@@ -179,9 +192,23 @@ form.addEventListener('submit', async event => {
     lensStatus.textContent = description;
     lensStatus.hidden = false;
     await video.play();
+    if (run === currentRun) video.focus();
     nextFrame(currentRun);
   } catch (error) {
-    if (run === currentRun) stop(error.name === 'NotAllowedError' ? 'Camera access was denied. Allow it in your browser and try again.' : error.message);
+    if (run === currentRun) {
+      stop(error.name === 'NotAllowedError'
+        ? 'Camera access was denied. Allow it in your browser and try again.'
+        : VisionAccessibility.requestError(error,'Could not reach the pairing service.'));
+      if (codeField.hasAttribute('aria-invalid')) codeField.focus();
+    }
   }
+});
+codeField.addEventListener('input', () => {
+  if (!codeField.hasAttribute('aria-invalid')) return;
+  codeField.removeAttribute('aria-invalid');
+  status.textContent = '';
+});
+window.addEventListener('offline', () => {
+  if (stream) stop('Network connection lost. Reconnect, then enter a new code.');
 });
 window.addEventListener('pagehide', () => stop());

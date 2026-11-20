@@ -1,12 +1,10 @@
 const $ = selector => document.querySelector(selector);
-const sample = [
-  {label:'Chair', camera:'A', distance:1.4, position:'Center', box:[36,22,33,77]},
-  {label:'Desk', camera:'A', distance:2.3, position:'Right', box:[78,32,22,65], align:'right'},
-  {label:'Backpack', camera:'B', distance:1.8, position:'Left', box:[17,41,21,43]},
-  {label:'Water bottle', camera:'B', distance:2.1, position:'Right', box:[65,36,7,24]}
-];
-
 const feeds = [...document.querySelectorAll('[data-camera]')].map(node => ({node, side:node.dataset.camera}));
+const replySources = new Map([
+  ['history','Historical observation'], ['memory','Saved memory'],
+  ['yolo','Current detection'], ['camera','Recent camera frame'],
+  ['unavailable','Unavailable']
+]);
 let token;
 let sessionRequest;
 let sampleMode = true;
@@ -34,128 +32,6 @@ function showPage() {
   document.title = (page === 'monitor' ? 'Judge view' : 'Voice assistant') + ' · VisionAssist';
   if (page === 'assist') scrollConversation();
   refreshPolling();
-}
-
-function makeAnnotations() {
-  for (const object of sample) {
-    const overlay = document.createElement('div');
-    overlay.className = 'box';
-    overlay.dataset.kind = object.camera === 'A' ? 'obstacle' : 'object';
-    overlay.dataset.align = object.align || 'left';
-    ['left','top','width','height'].forEach((key,index) => { overlay.style[key] = object.box[index] + '%'; });
-    const label = document.createElement('span');
-    label.textContent = object.label + ' · ' + object.distance + ' m';
-    overlay.append(label);
-    feeds.find(feed => feed.side === object.camera).node.querySelector('.overlays').append(overlay);
-  }
-}
-
-function trackedLabel(object) {
-  return object.track_id ? object.label + ' #' + object.track_id : object.label;
-}
-
-function renderDetections() {
-  const stereo = !sampleMode && !$('#stereo-view').hidden;
-  $('#metric-heading').hidden = !stereo;
-  const list = sampleMode ? sample : feeds.flatMap(feed =>
-    (feed.objects ?? []).map(object => ({...object, camera:feed.side})));
-  const waiting = !sampleMode && feeds.every(feed => feed.objects == null);
-  const rows = list.map(object => {
-    const row = document.createElement('tr');
-    const value = sampleMode ? object.distance + ' m' : Math.round(object.confidence * 100) + '%';
-    const cells = [trackedLabel(object), 'Camera ' + object.camera, value, object.position];
-    if (!sampleMode) cells.push(object.relative_depth ?? 'unknown');
-    if (stereo) cells.push(Number.isFinite(object.depth_m) ? object.depth_m.toFixed(2) + ' m' : '—');
-    for (const text of cells) {
-      const cell = document.createElement('td');
-      cell.textContent = text;
-      row.append(cell);
-    }
-    return row;
-  });
-  $('#detection-rows').replaceChildren(...rows);
-  $('#depth-heading').hidden = sampleMode;
-  $('#detection-measure').textContent = sampleMode ? 'Distance' : 'Confidence';
-  $('#detection-count').textContent = waiting ? 'Waiting' :
-    list.length + (list.length === 1 ? ' object' : ' objects');
-  $('.table-wrap').hidden = !list.length;
-  $('#empty-detections').hidden = Boolean(list.length);
-  $('#empty-detections').textContent = waiting ? 'Waiting for camera detections.' :
-    'No objects detected in the processed views.';
-}
-
-function showDepth(snapshot, preview) {
-  const status = snapshot?.stereo_status ?? (snapshot?.objects ? 'uncalibrated' : 'waiting_for_a');
-  const messages = {
-    waiting_for_a:'Waiting for a processed Camera A frame.',
-    uncalibrated:'Load the calibration for this phone pair to measure depth.',
-    size_mismatch:'Depth unavailable · check both phones’ image dimensions against calibration.',
-    waiting_for_pair:'Depth waiting for two time-matched camera frames.',
-    unavailable:'Depth processing is unavailable. Camera A is still detecting objects.',
-    no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
-  };
-  $('#stereo-view').hidden = sampleMode;
-  $('#stereo-caption').textContent = messages[status] ?? '';
-  const canvas = $('#stereo-map');
-  canvas.hidden = !preview;
-  $('#stereo-caption').hidden = Boolean(preview);
-  const size = $('#depth-preview-size');
-  size.hidden = !preview;
-  const coverage = $('#depth-coverage');
-  const fraction = snapshot?.depth_valid_fraction;
-  coverage.hidden = !preview || !Number.isFinite(fraction);
-  if (!coverage.hidden) coverage.textContent = (100 * fraction).toFixed(1) + '% valid depth';
-  const [near, far] = snapshot?.depth_range_m ?? [];
-  $('#depth-scale').textContent = preview
-    ? (near ? 'Bright ' + near + ' m · dark ' + far + ' m' : 'Near is bright, far is dark') + ' · black is unknown'
-    : '';
-  if (preview) {
-    canvas.width = preview.naturalWidth;
-    canvas.height = preview.naturalHeight;
-    size.textContent = canvas.width + ' × ' + canvas.height + ' px preview';
-    canvas.getContext('2d').drawImage(preview, 0, 0);
-    canvas.dataset.frameId = snapshot.frame_id;
-  } else {
-    delete canvas.dataset.frameId;
-  }
-}
-
-function paintCamera(canvas, image, snapshot) {
-  const width = canvas.width = image.naturalWidth;
-  const height = canvas.height = image.naturalHeight;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(image,0,0);
-  const fontSize = Math.max(12, Math.round(Math.max(width,height) / 42));
-  ctx.font = '600 ' + fontSize + 'px system-ui';
-  ctx.lineWidth = Math.max(2, width / 240);
-  ctx.textBaseline = 'top';
-  for (const object of snapshot.objects ?? []) {
-    const {bbox:[x1,y1,x2,y2], confidence, position} = object;
-    const x = x1 * width, y = y1 * height;
-    ctx.strokeStyle = '#8ce9ff';
-    ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
-    let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
-      (Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
-    if (object.intrusion && object.intrusion.expires > Date.now()) {
-      caption += ' · may cross from '+object.intrusion.from_side+' (~'+object.intrusion.eta_s.toFixed(1)+' s)';
-    }
-    const labelWidth = Math.min(width, Math.ceil(ctx.measureText(caption).width) + 8);
-    const left = Math.min(x, width-labelWidth);
-    const top = Math.max(0, y-fontSize-6);
-    ctx.fillStyle = '#8ce9ff';
-    ctx.fillRect(left, top, labelWidth, fontSize+6);
-    ctx.fillStyle = '#102031';
-    ctx.fillText(caption, left+4, top+2, Math.max(1,labelWidth-8));
-  }
-  const edge = snapshot.road_edge;
-  if (edge?.point) {
-    const [u,v] = edge.point;
-    ctx.strokeStyle = '#ffd44c';
-    ctx.beginPath();
-    ctx.arc(u*width,v*height,Math.max(5,width/65),0,2*Math.PI);
-    ctx.stroke();
-  }
-  canvas.dataset.frameId = snapshot.frame_id;
 }
 
 async function api(path, method, auth) {
@@ -192,14 +68,14 @@ function setFeed(feed, connected, message) {
     if (sampleMode) frame.style.removeProperty('--camera-aspect');
     if (feed.side === 'A') {
       if (sampleMode) $('#stereo-map').parentElement.style.removeProperty('--camera-aspect');
-      showDepth(null);
+      VisionPerceptionView.showDepth(null, null, sampleMode);
     }
     feed.etag = undefined;
     image.getContext('2d').clearRect(0,0,image.width,image.height);
     delete image.dataset.frameId;
     const hadObjects = feed.objects != null;
     feed.objects = null;
-    if (feed.side === 'A' || hadObjects) renderDetections();
+    if (feed.side === 'A' || hadObjects) VisionPerceptionView.renderDetections(sampleMode, feeds);
   } else {
     const aspect = image.width + ' / ' + image.height;
     frame.style.setProperty('--camera-aspect', aspect);
@@ -235,11 +111,11 @@ async function readFrame(feed, version) {
     if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
     await Promise.all([image.decode(), depth?.decode()]);
     if (version !== pollVersion) return;
-    paintCamera(feed.node.querySelector('canvas'), image, snapshot);
+    VisionPerceptionView.paintCamera(feed.node.querySelector('canvas'), image, snapshot);
     feed.etag = response.headers.get('etag');
     const hasDetections = feed.objects != null || snapshot.objects != null;
     feed.objects = snapshot.objects;
-    if (feed.side === 'A') showDepth(snapshot,depth);
+    if (feed.side === 'A') VisionPerceptionView.showDepth(snapshot, depth, sampleMode);
     setFeed(feed,true);
     if (snapshot.png) feed.node.querySelector('.frame-size').textContent += ' · Lossless PNG';
     if (snapshot.analysis_delayed) {
@@ -249,7 +125,7 @@ async function readFrame(feed, version) {
       feed.node.querySelector('.feed-summary').textContent = Number.isFinite(meters)
         ? 'Road edge ahead · '+meters.toFixed(1)+' m' : 'Possible road ahead · distance unavailable';
     }
-    if (feed.side === 'A' || hasDetections) renderDetections();
+    if (feed.side === 'A' || hasDetections) VisionPerceptionView.renderDetections(sampleMode, feeds);
   } catch {
     if (version !== pollVersion) return;
     setFeed(feed,false,'Connection interrupted');
@@ -276,7 +152,6 @@ function renderMode(demo) {
   $('#camera-feeds').toggleAttribute('data-live', !demo);
   $('#pixel-preview').hidden = demo;
   $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
-  $('#assist-mode').textContent = demo ? 'Sample scene' : 'Live preview mode';
   $('#detection-note').textContent = demo ? 'Sample annotations · distances are illustrative.' : 'Relative depth compares ground contacts. Forward depth is measured from Camera A using both phones.';
   $('#voice-message').textContent = '';
   feeds.forEach(feed => setFeed(feed,false));
@@ -296,12 +171,8 @@ let warningActive = false;
 let pendingReminder;
 
 function setVoiceState(title, prompt, label) {
-  $('#voice-state').textContent = title;
-  $('#voice-prompt').textContent = prompt;
-  const mic = $('#mic');
-  mic.setAttribute('aria-label',label);
-  mic.toggleAttribute('data-can-stop',label !== 'Start conversation');
-  $('#stop').hidden = !(speech && voiceSession);
+  VisionVoiceView.render(title, prompt, label, Boolean(speech || pendingTurn));
+  $('#stop').textContent = speech ? 'Stop playback' : pendingTurn ? 'Cancel request' : 'Stop playback';
 }
 
 function ready() { setVoiceState('Ready','Tap to start a conversation','Start conversation'); }
@@ -372,8 +243,8 @@ function stopPlayback(message = '') {
   if (!voiceSession) ready();
   else if (reviewing) setVoiceState('Review','Review the transcription before sending','End conversation');
   else if (!voiceSession.capture) setVoiceState('Starting','Waiting for the microphone','End conversation');
+  else if (pendingTurn) setVoiceState('Processing','Waiting for the local assistant…','Cancel request');
   else resumeListening();
-  $('#stop').hidden = true;
   if (restoreFocus) $('#mic').focus();
   if (message) $('#voice-message').textContent = message;
 }
@@ -430,9 +301,9 @@ async function agentFetch(path, method, body, contentType = 'application/json', 
   const response = await fetch(path,{method,body,headers:{Authorization:'Bearer '+auth,
     ...(body ? {'Content-Type':contentType} : {})},signal:signal ? AbortSignal.any([signal,timeout]) : timeout});
   if (!response.ok) {
-    const result = await response.json();
+    const result = await response.json().catch(() => ({}));
     if (response.status === 401 && token === auth) token = undefined;
-    throw Object.assign(new Error(result.error),{status:response.status});
+    throw Object.assign(new Error(result.error || 'Local assistant unavailable. Try again.'),{status:response.status});
   }
   return response;
 }
@@ -455,7 +326,7 @@ function renderReply(result, turn) {
   $('#confirm-memory').hidden = !confirmation;
   $('#confirmation-summary').textContent = confirmation?.summary || '';
   $('#voice-message').textContent = '';
-  addMessage('assistant',result.reply_text);
+  addMessage('assistant',result.reply_text,result.source);
   if (turn) {
     turn.textMs = Math.round(performance.now()-turn.startedAt);
     renderTiming(turn);
@@ -477,7 +348,15 @@ function appendMessage(message) {
   const body = document.createElement('p');
   speaker.textContent = message.role === 'user' ? 'You' : 'VisionAssist';
   body.textContent = message.text;
-  row.append(speaker,body);
+  row.append(speaker);
+  const source = replySources.get(message.source);
+  if (message.role === 'assistant' && source) {
+    const label = document.createElement('span');
+    label.className = 'status message-source';
+    label.textContent = source;
+    row.append(label);
+  }
+  row.append(body);
   $('#conversation-log').append(row);
 }
 
@@ -486,8 +365,8 @@ function scrollConversation() {
   log.scrollTop = log.scrollHeight;
 }
 
-function addMessage(role,text) {
-  const message = {role,text};
+function addMessage(role,text,source) {
+  const message = {role,text,source};
   conversation.push(message);
   appendMessage(message);
   const log = $('#conversation-log');
@@ -658,8 +537,8 @@ function beginTurn(prompt, startedAt = performance.now()) {
   pendingTurn = {controller:new AbortController(),startedAt};
   latestTiming = pendingTurn;
   $('#response-timing').hidden = true;
-  if (voiceSession && !warningActive) setVoiceState('Processing',prompt,'End conversation');
-  $('#voice-message').textContent = prompt;
+  if (!warningActive) setVoiceState('Processing',prompt,'Cancel request');
+  $('#voice-message').textContent = warningActive ? prompt : '';
   return pendingTurn;
 }
 
@@ -688,7 +567,7 @@ async function answer(question, speak = false, mode) {
   const turn = beginTurn('Waiting for the local assistant…');
   try { await sendQuestion(turn,question,speak,mode); }
   catch (error) {
-    if (pendingTurn === turn) $('#voice-message').textContent = error.message;
+    if (pendingTurn === turn) showServiceError(error);
   } finally { completeTurn(turn); }
 }
 
@@ -751,12 +630,13 @@ async function transcribeTurn(active, chunks, sampleRate, startedAt) {
     $('#voice-message').textContent = '';
     await sendQuestion(turn,text,true);
   } catch (error) {
-    if (pendingTurn === turn) $('#voice-message').textContent = error.message;
+    if (pendingTurn === turn) showServiceError(error);
   } finally { completeTurn(turn); }
 }
 
 function readMicrophone(active, {samples,rms}) {
   if (voiceSession !== active || !active.listening) return;
+  VisionVoiceView.updateWave(rms);
   const segment = active.segment;
   const speaking = rms >= Math.max(0.006,segment.floor*2.7);
   if (speaking) segment.lastVoiceAt = performance.now();
@@ -787,9 +667,17 @@ function readMicrophone(active, {samples,rms}) {
 
 function showMicrophoneError(english, chinese) {
   stopAudio();
+  setVoiceState('Error','Microphone unavailable. Try again or type your question.','Retry microphone');
   $('#mic-error').textContent = transcriptionLanguage() === 'zh' ? chinese : english;
   $('#keyboard-input').open = true;
   $('#question').focus();
+}
+
+function showServiceError(error) {
+  stopAudio();
+  const message = VisionAccessibility.requestError(error, 'Could not reach the local assistant. Check the server and try again.');
+  $('#voice-message').textContent = message;
+  setVoiceState('Error','The request did not finish','Start conversation');
 }
 
 function endConversation() {
@@ -798,6 +686,8 @@ function endConversation() {
 }
 
 async function startVoice(waitingForWakeWord = false) {
+  if (!waitingForWakeWord && speech) { stopPlayback('Playback stopped.'); return; }
+  if (!waitingForWakeWord && pendingTurn) { cancelRequest(); return; }
   if (voiceSession && (!waitingForWakeWord || voiceSession.waitingForWakeWord)) {
     endConversation();
     return;
@@ -861,6 +751,16 @@ async function startVoice(waitingForWakeWord = false) {
   }
 }
 
+function cancelRequest() {
+  if (!pendingTurn) return;
+  const restoreFocus = document.activeElement === $('#stop');
+  interruptTurn();
+  if (voiceSession) resumeListening();
+  else ready();
+  if (restoreFocus) $('#mic').focus();
+  $('#voice-message').textContent = 'Request cancelled.';
+}
+
 async function finishConfirmation(accepted) {
   if (!confirmation || pendingTurn) return;
   const selected = confirmation;
@@ -886,76 +786,7 @@ async function finishConfirmation(accepted) {
   }
 }
 
-async function refreshMemory() {
-  const kind = $('#memory-kind').value;
-  const list = $('#memory-list');
-  try {
-    const {records} = await agentRequest('/api/memory/'+kind,'GET');
-    if (kind !== $('#memory-kind').value) return;
-    const rows = records.map(record => {
-      const row = document.createElement('li');
-      const button = document.createElement('button');
-      button.className = 'quiet';
-      button.type = 'button';
-      button.textContent = 'Delete';
-      button.setAttribute('aria-label','Delete '+record.name);
-      button.onclick = async () => {
-        if (!window.confirm('Delete '+record.name+'?')) return;
-        button.disabled = true;
-        try {
-          await agentRequest('/api/memory/'+kind+'/'+record.id,'DELETE');
-          $('#memory-status').textContent = 'Deleted '+record.name+'.';
-          $('#memory-kind').focus();
-          await refreshMemory();
-          await loadPreferences();
-        } catch (error) { $('#memory-status').textContent = error.message; button.disabled = false; }
-      };
-      const edit = document.createElement('button');
-      edit.type = 'button';
-      edit.className = 'quiet';
-      edit.textContent = 'Edit';
-      edit.setAttribute('aria-label','Edit '+record.name);
-      edit.onclick = async () => {
-        const name = window.prompt('Edit saved record',record.name)?.trim();
-        if (!name || name === record.name) return;
-        try {
-          await agentRequest('/api/memory/'+kind+'/'+record.id,'PATCH',JSON.stringify({name}));
-          $('#memory-kind').focus();
-          await refreshMemory();
-          await loadPreferences();
-          $('#memory-status').textContent = 'Saved '+name+'.';
-        } catch (error) { $('#memory-status').textContent = error.message; }
-      };
-      row.append(record.name+(kind === 'people' && record.label ? ' · '+record.label : '')+' ',edit,button);
-      if (kind === 'items') {
-        const history = document.createElement('button');
-        history.type = 'button';
-        history.className = 'quiet';
-        history.textContent = 'History';
-        history.setAttribute('aria-label','History for '+record.name);
-        history.onclick = async () => {
-          try {
-            const {observations} = await agentRequest('/api/memory/items/'+record.id+'/history','GET');
-            const entries = observations.map(({time,camera,position}) =>
-              new Date(time).toLocaleString()+' · Camera '+camera+' · '+position);
-            $('#memory-status').textContent = entries.length
-              ? 'Possible matches for '+record.name+'. '+entries.join(' / ') : 'No observations saved.';
-          } catch (error) { $('#memory-status').textContent = error.message; }
-        };
-        row.append(history);
-      }
-      return row;
-    });
-    list.replaceChildren(...rows);
-    if (!rows.length) {
-      const empty = document.createElement('li');
-      empty.textContent = 'No saved records.';
-      list.append(empty);
-    }
-  } catch (error) {
-    if (kind === $('#memory-kind').value) $('#memory-status').textContent = error.message;
-  }
-}
+const {refresh:refreshMemory} = createVisionMemoryView({agentRequest, loadPreferences});
 
 async function loadPreferences() {
   const form = $('#preferences-form');
@@ -973,6 +804,9 @@ async function loadPreferences() {
 
 let pendingRoadAlert;
 let activeWarningRisk;
+let lastCameraStates;
+const lostCameras = new Set();
+const receivingCamera = value => value === 'live' || value === 'detecting';
 function updateCameraReadiness(cameras) {
   const status = $('#camera-readiness');
   const labels = {offline:'offline',waiting:'waiting for video',live:'live',detecting:'detecting objects'};
@@ -980,6 +814,20 @@ function updateCameraReadiness(cameras) {
     ? ['A','B'].map(side => 'Camera '+side+' · '+(labels[cameras[side]] || 'unknown')).join('  /  ')
     : 'Camera status unavailable';
   if (status.textContent !== text) status.textContent = text;
+  let warning = '';
+  if (cameras) {
+    for (const side of ['A','B']) {
+      if (receivingCamera(cameras[side])) lostCameras.delete(side);
+      else if (receivingCamera(lastCameraStates?.[side])) lostCameras.add(side);
+    }
+    lastCameraStates = cameras;
+    warning = [...lostCameras].map(side =>
+      'Camera ' + side + (cameras[side] === 'offline' ? ' disconnected.' : ' lost its video feed.')).join(' ');
+  } else if (lastCameraStates && Object.values(lastCameraStates).some(receivingCamera)) {
+    warning = 'Camera connection could not be checked. Reconnect and check the feeds.';
+  }
+  const alert = $('#connection-alert');
+  if (alert.textContent !== warning) alert.textContent = warning;
 }
 
 async function pollAlerts() {
@@ -987,7 +835,7 @@ async function pollAlerts() {
     const allowReminder = currentPage === 'assist';
     const {sequence,alerts,reminder,cameras} = await agentRequest('/api/agent/alerts?after='+alertSequence+
       (allowReminder ? '&reminders=1' : ''),'GET');
-    if (allowReminder) updateCameraReadiness(cameras);
+    updateCameraReadiness(cameras);
     if (reminder && allowReminder) pendingReminder = {text:reminder,until:Date.now()+15_000};
     if (!allowReminder || pendingReminder?.until < Date.now()) pendingReminder = undefined;
     alertSequence = sequence;
@@ -1025,7 +873,7 @@ async function pollAlerts() {
       speakLocal(message);
     }
   } catch (error) {
-    if (currentPage === 'assist') updateCameraReadiness();
+    updateCameraReadiness();
     if (error.status === 403 || location.protocol === 'file:') return;
     if (error.status === 401) {
       alertSequence = 0;
@@ -1037,12 +885,15 @@ async function pollAlerts() {
 }
 const dialog = $('#pair-dialog');
 const pairButtons = [...document.querySelectorAll('[data-pair]')];
-function openPairDialog() {
+const copyCode = $('#copy-code');
+function openPairDialog(event) {
   $('#phone-address').textContent = location.protocol === 'file:'
     ? 'Start the local server to enable pairing. See README.md.'
     : new URL('/camera',location.href).href;
   $('#pair-result').textContent = '';
-  dialog.showModal();
+  $('#copy-status').textContent = '';
+  copyCode.hidden = true;
+  VisionAccessibility.openDialog(dialog,event);
 }
 $('#pair').addEventListener('click',openPairDialog);
 $('#assist-pair').addEventListener('click',openPairDialog);
@@ -1050,6 +901,8 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
   const version = ++pairingVersion;
   const result = $('#pair-result');
   pairButtons.forEach(control => { control.disabled = true; });
+  copyCode.hidden = true;
+  $('#copy-status').textContent = '';
   result.textContent = 'Generating code…';
   try {
     if (location.protocol === 'file:') throw new Error('Start the local server before generating a pairing code.');
@@ -1066,18 +919,31 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
     code.className = 'pair-code';
     code.textContent = codeResponse.code.replace(/^(...)/,'$1 ');
     result.replaceChildren('Camera '+side+' · expires in five minutes',code);
+    copyCode.dataset.code = codeResponse.code;
+    copyCode.hidden = !navigator.clipboard?.writeText;
     if (currentPage === 'monitor') {
       if (sampleMode) renderMode(false);
       else refreshPolling();
     }
   } catch (error) {
-    if (version === pairingVersion) result.textContent = error.message;
+    if (version === pairingVersion) result.textContent = VisionAccessibility.requestError(error,'Could not reach the pairing service.');
   } finally {
     pairButtons.forEach(control => { control.disabled = false; });
     if (version === pairingVersion && dialog.open) button.focus();
   }
 }));
-dialog.addEventListener('close', () => { pairingVersion += 1; });
+copyCode.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(copyCode.dataset.code);
+    $('#copy-status').textContent = 'Pairing code copied.';
+  } catch {
+    $('#copy-status').textContent = 'Could not copy. Enter the displayed code on the phone.';
+  }
+});
+dialog.addEventListener('close', () => {
+  pairingVersion += 1;
+  delete copyCode.dataset.code;
+});
 $('#mode').addEventListener('click', () => renderMode(!sampleMode));
 $('#pixel-preview').addEventListener('click', event => {
   const active = $('#camera-feeds').toggleAttribute('data-actual-pixels');
@@ -1125,7 +991,10 @@ $('#conversation-empty').hidden = Boolean(conversation.length);
 $('#export-conversation').disabled = !conversation.length;
 $('#replay').disabled = !conversation.some(message => message.role === 'assistant');
 $('#replay').addEventListener('click',readAnswer);
-$('#stop').addEventListener('click', () => stopPlayback('Playback stopped.'));
+$('#stop').addEventListener('click', () => {
+  if (speech) stopPlayback('Playback stopped.');
+  else cancelRequest();
+});
 $('#question-form').addEventListener('submit', event => {
   event.preventDefault();
   const question = $('#question').value.trim();
@@ -1133,15 +1002,18 @@ $('#question-form').addEventListener('submit', event => {
   else $('#question').focus();
 });
 document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || dialog.open || (!voiceSession && !speech)) return;
-  if (voiceSession) endConversation();
-  else stopPlayback('Playback stopped.');
+  if (event.key !== 'Escape' || $('dialog[open]')) return;
+  if (speech) stopPlayback('Playback stopped.');
+  else if (pendingTurn) cancelRequest();
+  else if (voiceSession) endConversation();
 });
+window.addEventListener('offline', () => VisionAccessibility.toast('Network connection lost. The local server may still be reachable.'));
+window.addEventListener('online', () => VisionAccessibility.toast('Network connection restored.'));
 window.addEventListener('pagehide', () => { stopAudio(); pollVersion += 1; });
 window.addEventListener('pageshow', event => { if (event.persisted) refreshPolling(); });
 window.addEventListener('hashchange',showPage);
-makeAnnotations();
-renderDetections();
+VisionPerceptionView.makeAnnotations(feeds);
+VisionPerceptionView.renderDetections(sampleMode, feeds);
 showPage();
 
 $('#confirm-save').addEventListener('click',() => finishConfirmation(true));

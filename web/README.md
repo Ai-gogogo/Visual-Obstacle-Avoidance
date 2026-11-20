@@ -20,6 +20,21 @@
 
 运行 `node --test pairing.test.cjs ../llm/agent.test.cjs`。覆盖配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。
 
+## 前端分层
+
+| 层 | 入口 |
+| --- | --- |
+| 设计变量 | `styles/tokens.css` 定义语义色、控件尺寸和动效时长 |
+| 通用组件 | `styles/components.css` 管理按钮、输入框、状态和弹窗 |
+| 页面布局 | `index.html`、`camera.html` 与 `styles/layout.css` |
+| 功能视图 | `perception-view.js`、`voice-view.js`、`memory-view.js` 与 `styles/features.css` |
+| 交互与状态 | `desktop.js` 管理相机轮询、会话和请求，`camera.js` 和 `calibration.js` 管理各自流程 |
+| 无障碍与动效 | `accessibility.js`、`styles/motion.css` 与各页面的原生表单和状态区 |
+
+使用 Tab 移动焦点，Enter 激活链接和按钮，Escape 关闭弹窗、停止播报或取消当前请求。**Reduce motion** 与系统的减少动态效果设置都能关闭动效。声波只用录音模块提供的真实麦克风 RMS。系统原生选择菜单保留平台交互，150 ms 动效用于页面内展开面板。
+
+显式断开相机时，下一次相机状态轮询就会公告；突然失联时，等待服务判定画面已过期。**Saved memory** 中的历史观察保留相机、时间与位置，回答也会标明来源。
+
 ## Camera A 检测与双目深度图
 
 相机配对页的 **Original pixels · lossless PNG** 按浏览器实际采集尺寸上传无损帧，目标节拍为每秒一帧。**Standard** 沿用长边最多 640 px 的 JPEG。实时页默认按帧的宽高比显示，可点 **Actual pixels** 按接收到的像素 1:1 查看。做双目标定时，两台设备应选择相同模式，保持镜头、方向和采集尺寸固定。标定工具可读取保存的 PNG 和 JPEG 帧。
