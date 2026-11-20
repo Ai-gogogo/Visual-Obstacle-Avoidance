@@ -195,7 +195,13 @@ function createAgentRoutes(options, sessions, read, respond) {
     const method = req.method;
     if (route === '/api/agent/alerts' && method === 'GET') {
       const after = Number(requestURL.searchParams.get('after') || 0);
-      return respond(res,200,{sequence:session.alertSeq, alerts:session.alerts.filter(alert => alert.id > after && recent(alert))});
+      const remindersEnabled = requestURL.searchParams.get('reminders') === '1';
+      const reminder = remindersEnabled ? agent.cameraReminder(session) : null;
+      return respond(res,200,{sequence:session.alertSeq, alerts:session.alerts.filter(alert => alert.id > after && recent(alert)), reminder});
+    }
+    if (route === '/api/agent/preferences') {
+      if (method === 'GET') return respond(res,200,agent.preferences());
+      if (method === 'PUT') return respond(res,200,agent.savePreferences(await asJSON(req,1024) || {}));
     }
     if (route === '/api/agent/transcribe' && method === 'POST') {
       if (!/^(audio\/(webm|mp4|ogg|wav))(\s*;|$)/i.test(req.headers['content-type'] || '')) {

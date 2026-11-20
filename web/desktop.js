@@ -232,6 +232,7 @@ let alertSequence = 0;
 let warningUntil = 0;
 let activeWarningRisk;
 let warningActive = false;
+let pendingReminder;
 
 function setVoiceState(title, prompt, label) {
   $('#voice-state').textContent = title;
@@ -267,7 +268,11 @@ function resumeListening() {
   active.segment = {lead:[], chunks:[], onset:0, voiced:0, quiet:0, floor:0.002};
   active.stream.getAudioTracks().forEach(track => { track.enabled = true; });
   active.listening = true;
-  setVoiceState('Listening','Speak, then pause for a reply','End conversation');
+  if (active.waitingForWakeWord) {
+    setVoiceState('Wake word','Say “Hey VisionAssist” or “你好，视觉助手”','Stop wake-word listening');
+  } else {
+    setVoiceState('Listening','Speak, then pause for a reply','End conversation');
+  }
 }
 
 function interruptTurn() {
@@ -283,6 +288,8 @@ function stopAudio() {
   setReview(false);
   const active = voiceSession;
   voiceSession = undefined;
+  $('#wake-voice').setAttribute('aria-pressed','false');
+  $('#wake-voice').textContent = 'Enable wake word';
   active?.stream?.getTracks().forEach(track => track.stop());
   active?.capture?.port.close();
   if (active && active.context.state !== 'closed') active.context.close().catch(() => {});
@@ -615,13 +622,30 @@ function wavRecording(chunks, sampleRate) {
   return new Blob([header,...chunks],{type:'audio/wav'});
 }
 
-async function transcribeTurn(chunks, sampleRate) {
+function wakeCommand(transcript) {
+  const phrase = /^(?:(?:hey|hi|hello)[,\s]+vision\s*assist\b|(?:你好|您好)[，,\s]*(?:视觉助手|視覺助手|vision\s*assist\b))/iu;
+  const text = transcript.trim();
+  const match = phrase.exec(text);
+  return match ? text.slice(match[0].length).replace(/^[\s,.!?:，。！？：]+/u,'') : null;
+}
+
+async function transcribeTurn(active, chunks, sampleRate) {
   const turn = beginTurn('Transcribing locally…');
   try {
     const audio = wavRecording(chunks,sampleRate);
-    const language = transcriptionLanguage();
-    const {text} = await agentRequest('/api/agent/transcribe?language='+language,'POST',audio,audio.type,turn.signal);
+    const language = active.waitingForWakeWord ? 'auto' : transcriptionLanguage();
+    let {text} = await agentRequest('/api/agent/transcribe?language='+language,'POST',audio,audio.type,turn.signal);
     if (pendingTurn !== turn) return;
+    if (active.waitingForWakeWord) {
+      const command = wakeCommand(text || '');
+      $('#voice-message').textContent = '';
+      if (command === null) return;
+      active.waitingForWakeWord = false;
+      $('#wake-voice').setAttribute('aria-pressed','false');
+      $('#wake-voice').textContent = 'Enable wake word';
+      if (!command) return;
+      text = command;
+    }
     if (!text?.trim()) {
       $('#voice-message').textContent = 'No speech recognized. Try again.';
       return;
@@ -662,12 +686,13 @@ function readMicrophone(active, {samples,rms}) {
   segment.chunks.push(samples);
   if (speaking) { segment.voiced += 1; segment.quiet = 0; }
   else segment.quiet += 1;
-  if (segment.quiet < 30 && segment.chunks.length < 780) return;
+  const maxChunks = active.waitingForWakeWord ? 250 : 780;
+  if (segment.quiet < 30 && segment.chunks.length < maxChunks) return;
   if (segment.voiced < 5) {
     active.segment = {lead:[],chunks:[],onset:0,voiced:0,quiet:0,floor:segment.floor};
     return;
   }
-  transcribeTurn(segment.chunks, active.context.sampleRate);
+  transcribeTurn(active, segment.chunks, active.context.sampleRate);
 }
 
 function showMicrophoneError(english, chinese) {
@@ -682,11 +707,12 @@ function endConversation() {
   $('#voice-message').textContent = 'Conversation ended.';
 }
 
-async function startVoice() {
-  if (voiceSession) {
+async function startVoice(waitingForWakeWord = false) {
+  if (voiceSession && (!waitingForWakeWord || voiceSession.waitingForWakeWord)) {
     endConversation();
     return;
   }
+  if (voiceSession) stopAudio();
   if (speech) {
     stopPlayback('Playback stopped.');
     return;
@@ -699,8 +725,12 @@ async function startVoice() {
   interruptTurn();
   let active;
   try {
-    active = {context:new AudioContext({sampleRate:16000})};
+    active = {context:new AudioContext({sampleRate:16000}),waitingForWakeWord};
     voiceSession = active;
+    if (waitingForWakeWord) {
+      $('#wake-voice').setAttribute('aria-pressed','true');
+      $('#wake-voice').textContent = 'Stop wake-word listening';
+    }
     setVoiceState('Starting','Waiting for the microphone','End conversation');
     $('#mic-error').textContent = '';
     $('#voice-message').textContent = '';
@@ -797,9 +827,27 @@ async function refreshMemory() {
   }
 }
 
+async function loadPreferences() {
+  const form = $('#preferences-form');
+  form.querySelector('button').disabled = true;
+  const [preferences,{records}] = await Promise.all([
+    agentRequest('/api/agent/preferences','GET'),agentRequest('/api/memory/habits','GET')
+  ]);
+  const select = $('#reminder-habit');
+  select.replaceChildren(new Option('Off',''),...records.map(row => new Option(row.name,row.id)));
+  select.value = preferences.habit ?? '';
+  $('#reply-length').value = preferences.concise ? 'short' : 'detail';
+  $('#reminder-interval').value = preferences.interval_minutes;
+  form.querySelector('button').disabled = false;
+}
+
 async function pollAlerts() {
   try {
-    const {sequence,alerts} = await agentRequest('/api/agent/alerts?after='+alertSequence,'GET');
+    const allowReminder = currentPage === 'assist';
+    const {sequence,alerts,reminder} = await agentRequest('/api/agent/alerts?after='+alertSequence+
+      (allowReminder ? '&reminders=1' : ''),'GET');
+    if (reminder && allowReminder) pendingReminder = {text:reminder,until:Date.now()+15_000};
+    if (!allowReminder || pendingReminder?.until < Date.now()) pendingReminder = undefined;
     alertSequence = sequence;
     const warning = alerts.findLast(alert => alert.risk === 'urgent') || alerts.at(-1);
     if (warning && (Date.now() >= warningUntil ||
@@ -812,6 +860,13 @@ async function pollAlerts() {
       setTimeout(() => {
         if ($('#obstacle-alert').textContent === warning.text && Date.now() >= warningUntil) $('#obstacle-alert').textContent = '';
       },3400);
+    } else if (pendingReminder && currentPage === 'assist' && !pendingTurn &&
+        !speech && !reviewing && !confirmation && !voiceSession?.segment?.onset && Date.now() >= warningUntil) {
+      const prefix = transcriptionLanguage() === 'zh' ? '提醒：' : 'Reminder: ';
+      const message = prefix + pendingReminder.text;
+      pendingReminder = undefined;
+      $('#voice-message').textContent = message;
+      speakLocal(message);
     }
   } catch (error) {
     if (error.status === 403 || location.protocol === 'file:') return;
@@ -860,7 +915,8 @@ pairButtons.forEach(button => button.addEventListener('click', async () => {
 dialog.addEventListener('close', () => { pairingVersion += 1; });
 $('#mode').addEventListener('click', () => renderMode(!sampleMode));
 $('#contrast').addEventListener('click', () => setContrast(!document.documentElement.hasAttribute('data-contrast')));
-$('#mic').addEventListener('click',startVoice);
+$('#mic').addEventListener('click',() => startVoice());
+$('#wake-voice').addEventListener('click',() => startVoice(true));
 $('#describe').addEventListener('click', () => {
   if ($('#agent-camera').value === 'both') answer('Compare the views from Camera A and Camera B.',true,'image');
   else answer('Describe surroundings',true,'scene');
@@ -904,4 +960,26 @@ $('#confirm-save').addEventListener('click',() => finishConfirmation(true));
 $('#confirm-cancel').addEventListener('click',() => finishConfirmation(false));
 $('#memory-kind').addEventListener('change',refreshMemory);
 $('#memory-panel').addEventListener('toggle',event => { if (event.target.open) refreshMemory(); });
+$('#preferences-panel').addEventListener('toggle',event => {
+  if (!event.target.open) return;
+  $('#preferences-status').textContent = '';
+  loadPreferences().catch(error => { $('#preferences-status').textContent = error.message; });
+});
+$('#preferences-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = event.target.querySelector('button');
+  button.disabled = true;
+  try {
+    await agentRequest('/api/agent/preferences','PUT',JSON.stringify({
+      concise:$('#reply-length').value === 'short',
+      habit:Number($('#reminder-habit').value) || null,
+      interval_minutes:Number($('#reminder-interval').value)
+    }));
+    $('#preferences-status').textContent = 'Preferences saved.';
+  } catch (error) {
+    $('#preferences-status').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 pollAlerts();
