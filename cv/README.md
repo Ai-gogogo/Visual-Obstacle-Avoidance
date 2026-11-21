@@ -99,10 +99,9 @@ Steps, raised surfaces, camera roll and occlusion can invalidate the contact cue
 
 To log accepted detections (A by default, both with `--dual-yolo`), use `python cv/live_camera.py --metrics /path/to/new.csv`. Each row identifies the source, camera and frame. Both timestamps used for latency come from the server: from receipt of the complete JPEG to acceptance of the matching detection. This includes waiting for the worker to poll, decoding, inference and result submission. Phone capture, upload to the server and browser rendering occur outside this interval. Duplicate submissions do not add samples.
 
-On an Apple Silicon Mac with a compatible PyTorch installation, pass `--device mps` to run YOLO on the Apple GPU. Use FP32 in this mode. The `--cpu-threads` setting still applies to CPU work, including RAFT-Stereo.
-
-The live worker defaults to `--device auto`, which selects CUDA when the
-installed PyTorch can use it and otherwise selects CPU. The default input size
+The live worker defaults to `--device auto`, which selects CUDA first, then
+Apple MPS, and falls back to CPU when the installed PyTorch reports neither GPU.
+MPS uses FP32. CPU threads still apply to CPU work, including RAFT-Stereo. The default input size
 is 640. CPU mode defaults to up to four PyTorch intra-op threads for Camera A
 alone and one thread per predictor with `--dual-yolo`. Override with
 `--cpu-threads` to suit the machine. Use

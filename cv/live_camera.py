@@ -396,7 +396,9 @@ def resolve_device(requested):
     import torch
 
     if requested == "auto":
-        return "cuda:0" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda:0"
+        return "mps" if torch.backends.mps.is_available() else "cpu"
     if requested == "cpu" or (requested == "mps" and torch.backends.mps.is_available()):
         return requested
     if requested == "cuda":
@@ -417,7 +419,8 @@ def resolve_device(requested):
 
 
 def inference_options(parser, *, default_cpu_threads=1):
-    parser.add_argument("--device", default="auto", help="auto, cpu, mps, cuda, or cuda:N")
+    parser.add_argument("--device", default="auto",
+                        help="auto (CUDA, then Apple MPS, then CPU), cpu, mps, cuda, or cuda:N")
     parser.add_argument("--imgsz", type=int, default=640, help="YOLO input size, a multiple of 32")
     parser.add_argument("--half", action="store_true", help="Opt in to FP16 on CUDA")
     parser.add_argument("--cpu-threads", type=int, default=default_cpu_threads,

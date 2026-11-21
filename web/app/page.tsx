@@ -18,6 +18,26 @@ export default function DesktopPage() {
         <p className="toast" id="warning-timing" hidden />
         <p className="connection-alert" id="connection-alert" role="alert" />
         <p className="toast" id="ui-feedback" role="status" />
+        <div className="voice-options model-compute">
+          <div className="toolbar">
+            <label htmlFor="spoken-alert-mode">Spoken alerts</label>
+            <select id="spoken-alert-mode" defaultValue="desk" aria-describedby="spoken-alert-help spoken-alert-status">
+              <option value="desk">Desk · quiet</option>
+              <option value="stationary">Stationary monitoring · fixed rig</option>
+              <option value="walking">Walking alerts · moving rig</option>
+            </select>
+          </div>
+          <p id="spoken-alert-help">
+            Controlled testing only. Stationary mode monitors the first 1.5 m of the fixed rig’s forward corridor.
+            Walking mode requires a calibrated rig aligned with your direction of travel. Select Desk when you stop.
+          </p>
+          <p id="spoken-alert-status" role="status">Automatic alert speech is off.</p>
+          <div>
+            <button className="quiet" id="warning-audio" type="button" aria-describedby="warning-audio-status">
+              Test warning audio
+            </button>
+          </div>
+        </div>
         <aside className="model-compute" aria-label="Model compute">
           <p><strong>YOLO</strong> <span id="yolo-compute">Checking worker…</span></p>
           <p><strong>Agent</strong> <span id="agent-compute">Checking loaded models…</span></p>

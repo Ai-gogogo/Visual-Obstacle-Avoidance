@@ -20,7 +20,7 @@ class Replay:
         self.predictor = IntrusionPredictor(CAMERA, Corridor.load(DEFAULT_ROAD_CONFIG))
         self.tracker = FrameTracker("A", "A", count(1))
 
-    def frame(self, x, yaw=0., dx=0., z=3., label="bicycle", pitch=0., roll=0.):
+    def frame(self, x, yaw=0., dx=0., z=3., label="bicycle", pitch=0., roll=0., half_width=.21):
         rotation = cv2.Rodrigues(np.radians([pitch, yaw, roll]))[0]
         translation = rotation @ [-dx, 0., 0.]
         plane = K @ (rotation + np.outer(translation, [0., 0., 1/5])) @ np.linalg.inv(K)
@@ -30,7 +30,7 @@ class Replay:
         depth = (5 / (rays @ rotation[:, 2])).astype(np.float32)
         center = rotation @ [x, .1, z] + translation
         u, v = (K @ center)[:2]/center[2]
-        half_w, half_h = 240*np.array([.21, .38])/center[2]
+        half_w, half_h = 240*np.array([half_width, .38])/center[2]
         box = np.array([u-half_w, v-half_h, u+half_w, v+half_h])
         x1,y1,x2,y2 = box.astype(int)
         gray[max(0,y1):y2,max(0,x1):x2] = 110
@@ -50,6 +50,16 @@ class Replay:
 
 
 class IntrusionTests(unittest.TestCase):
+    def test_stationary_zone_requires_nearby_crossing_and_stable_camera(self):
+        for depth, yaw, expected in [(1.35, 0., True), (3., 0., False), (1.35, -1.2, False)]:
+            replay = Replay()
+            start, step, width = (.76, .07, .10) if depth < 2 else (1.6, .16, .21)
+            predictions = [replay.step(i, start-i*step,
+                                       yaw=i*yaw, z=depth, half_width=width)
+                           for i in range(3)]
+            self.assertIsNotNone(predictions[-1], (depth, yaw))
+            self.assertEqual(predictions[-1].get('stationary_zone', False), expected)
+
     def test_both_sides_and_user_turning_while_bicycle_crosses(self):
         for side, sign in [('left', -1), ('right', 1)]:
             replay = Replay()

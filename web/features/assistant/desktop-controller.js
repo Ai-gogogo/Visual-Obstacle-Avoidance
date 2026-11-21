@@ -59,10 +59,11 @@ export function mountDesktop(root, voicePresentation) {
   let latestTiming;
   let reviewing = false;
   let confirmation;
-  let deferredReply;
   let warningActive = false;
-  let warningAudioEnabled = false;
   let latestWarning;
+  let alertAudioContext;
+  const preparedAlerts = new Map();
+  let alertPreparation = Promise.resolve();
 
   function setVoiceState(title, prompt, label) {
     voicePresentation.publish({title, prompt, label, stopLabel:speech ? 'Stop playback' : pendingTurn ? 'Cancel request' : 'Stop playback',
@@ -78,6 +79,11 @@ export function mountDesktop(root, voicePresentation) {
     speech = undefined;
     output.controller.abort();
     output.audio?.pause();
+    if (output.source) {
+      output.source.onended = null;
+      output.source.stop();
+      output.source.disconnect();
+    }
     if (output.url) URL.revokeObjectURL(output.url);
     warningActive = false;
   }
@@ -128,7 +134,6 @@ export function mountDesktop(root, voicePresentation) {
   function interruptTurn() {
     pendingTurn?.controller.abort();
     pendingTurn = undefined;
-    deferredReply = undefined;
     pauseListening();
     clearTimeout(recoveryTimer);
     releaseSpeech();
@@ -149,15 +154,9 @@ export function mountDesktop(root, voicePresentation) {
   function stopPlayback(message = '') {
     if (!speech) return;
     const restoreFocus = document.activeElement === $('#stop');
-    const reply = warningActive && !message ? deferredReply : undefined;
-    deferredReply = undefined;
     clearTimeout(recoveryTimer);
     pauseListening();
     releaseSpeech();
-    if (reply) {
-      void speakLocal(reply.text,false,reply.turn);
-      return;
-    }
     if (!voiceSession) ready();
     else if (!voiceSession.capture) setVoiceState('Starting','Waiting for the microphone','End conversation');
     else if (pendingTurn) setVoiceState('Processing','Waiting for the local assistant…','Cancel request');
@@ -166,14 +165,33 @@ export function mountDesktop(root, voicePresentation) {
     if (message) $('#voice-message').textContent = message;
   }
 
-  async function speakLocal(text, warning = false, turn, event) {
-    if (!warning && warningActive) {
-      deferredReply = {text,turn};
-      return;
+  function unlockAlertAudio() {
+    if (!window.AudioContext) return;
+    alertAudioContext ??= new AudioContext();
+    void alertAudioContext.resume().catch(() => {});
+  }
+
+  function prepareAlert(text) {
+    if (!preparedAlerts.has(text)) {
+      const loading = alertPreparation
+        .then(() => agentFetch('/api/agent/speech','POST',JSON.stringify({text,priority:true}),
+          'application/json',scope.signal))
+        .then(response => response.arrayBuffer())
+        .then(bytes => alertAudioContext.decodeAudioData(bytes))
+        .catch(error => {
+          preparedAlerts.delete(text);
+          throw error;
+        });
+      preparedAlerts.set(text,loading);
+      alertPreparation = loading.catch(() => {});
     }
+    return preparedAlerts.get(text);
+  }
+
+  async function speakLocal(text, warning = false, turn, canPlay) {
     pauseListening();
     clearTimeout(recoveryTimer);
-    const output = {controller:new AbortController(),ocr:turn?.ocr,warningEvent:event};
+    const output = {controller:new AbortController(), automaticWarning:Boolean(canPlay),ocr:turn?.ocr};
     speech = output;
     warningActive = warning;
     const label = voiceSession ? 'End conversation' : 'Stop playback';
@@ -184,28 +202,28 @@ export function mountDesktop(root, voicePresentation) {
     }
     recoveryTimer = setTimeout(() => finish('Local audio did not finish.'),30000);
     try {
+      if (warning && alertAudioContext) {
+        const buffer = await prepareAlert(text);
+        if (speech !== output) return;
+        if (canPlay && !canPlay()) return finish();
+        if (alertAudioContext.state !== 'running') throw new DOMException('Warning audio is paused','NotAllowedError');
+        const source = alertAudioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(alertAudioContext.destination);
+        source.onended = () => finish();
+        source.start();
+        output.source = source;
+        return;
+      }
       const result = await agentFetch('/api/agent/speech','POST',
         JSON.stringify({text:text.slice(0,650),priority:warning}),'application/json',output.controller.signal);
       const audio = await result.blob();
       if (speech !== output) return;
-      if (event && Date.now() >= event.deadline) {
-        $('#warning-audio-status').textContent = 'The alert expired before speech was ready.';
-        finish();
-        return;
-      }
+      if (canPlay && !canPlay()) return finish();
       output.url = URL.createObjectURL(audio);
       output.audio = new Audio(output.url);
       output.audio.onended = () => finish();
       output.audio.onerror = () => finish('Local playback failed. The text is still available.');
-      if (warning) output.audio.addEventListener('playing',() => {
-        if (speech !== output) return;
-        if (event && Date.now() >= event.deadline) {
-          $('#warning-audio-status').textContent = 'The alert expired before speech was ready.';
-          finish();
-          return;
-        }
-        if (event) renderWarningTiming(event,Date.now());
-      },{once:true});
       await output.audio.play();
       if (!warning && speech === output) listenForInterrupt(output,'stop');
       if (turn && speech === output) {
@@ -219,13 +237,12 @@ export function mountDesktop(root, voicePresentation) {
         $('#warning-audio-status').textContent = error.name === 'NotAllowedError'
           ? 'Browser blocked warning audio. Select Test warning audio to try again.' :
           'Warning audio unavailable. Alerts remain visible.';
-        if (error.name === 'NotAllowedError' && event) setWarningAudio(false);
       }
       finish(error.name === 'NotAllowedError' ? 'Playback was blocked by the browser. Use Read aloud to enable audio.' : error.message);
     }
   }
 
-  function renderWarningTiming(event, started) {
+  function renderWarningTiming(event) {
     if (event !== latestWarning || !Number.isFinite(event.judged_ms)) return;
     const timing = $('#warning-timing');
     const capture = Number.isFinite(event.capture_ms);
@@ -234,25 +251,12 @@ export function mountDesktop(root, voicePresentation) {
     const uncertainty = capture ? ' (±'+event.capture_error_ms+' ms)' : '';
     timing.hidden = false;
     timing.textContent = source + ' to judgment ' + Math.max(0,event.judged_ms-origin) + ' ms' + uncertainty +
-      ' · judgment to dashboard ' + Math.max(0,event.received-event.judged_ms) + ' ms' +
-      (started ? ' · ' + source.toLowerCase() + ' to speech start '+Math.max(0,started-origin)+' ms' : '');
-  }
-
-  function setWarningAudio(enabled) {
-    warningAudioEnabled = enabled;
-    const toggle = $('#warning-audio');
-    toggle.setAttribute('aria-pressed',String(enabled));
-    toggle.textContent = enabled ? 'Disable warning audio' : 'Enable warning audio';
-    $('#warning-mode').textContent = enabled ? 'Visual and spoken alerts' : 'Desk mode · Visual alerts only';
+      ' · judgment to dashboard ' + Math.max(0,event.received-event.judged_ms) + ' ms';
   }
 
   listen($('#warning-audio'),'click',() => {
-    setWarningAudio(!warningAudioEnabled);
-    if (!warningAudioEnabled && speech?.warningEvent) stopPlayback();
-  });
-
-  listen($('#warning-audio-test'),'click',() => {
     if (speech || pendingTurn) return;
+    unlockAlertAudio();
     $('#warning-audio-status').textContent = '';
     const chinese = transcriptionLanguage() === 'zh';
     void speakLocal(chinese ? '这是告警音频测试。' : 'This is a warning audio test.',true);
@@ -852,7 +856,6 @@ export function mountDesktop(root, voicePresentation) {
   });
   listen($('#agent-camera'), 'change', () => {
     cameraSelectionVersion++;
-    if (deferredReply?.turn?.ocr) deferredReply = undefined;
     if (speech?.ocr) stopPlayback();
     syncVoiceSettings();
   });
@@ -916,23 +919,29 @@ export function mountDesktop(root, voicePresentation) {
   connectAlerts({$, scope, agentRequest, transcriptionLanguage, isAssist:() => currentPage === 'assist',
     isConversationBusy:segment => Boolean(pendingTurn || speech || reviewing || confirmation ||
       (segment === 'chunks' ? voiceSession?.segment?.chunks.length : voiceSession?.segment?.onset)),
-    speakWarning(text,warning,canSpeak) {
+    showWarningTiming(warning) {
       const received = Date.now();
-      const event = latestWarning = {...warning,received,
-        deadline:Math.min(warning.expires ?? Infinity,warning.judged_ms+1800,
-          (warning.capture_ms ?? warning.stamp)+2500)};
-      renderWarningTiming(event);
-      if (!canSpeak || !warningAudioEnabled || received >= event.deadline) return;
+      latestWarning = {...warning,received};
+      renderWarningTiming(latestWarning);
+    },
+    prepareSpokenAlerts(texts) {
+      unlockAlertAudio();
+      if (alertAudioContext) void Promise.all(texts.map(prepareAlert)).catch(() => {});
+    },
+    playSpokenAlert(text, urgent, canPlay) {
+      if (warningActive || (!urgent && (speech || pendingTurn))) return;
+      if (urgent && (speech || pendingTurn)) interruptTurn();
       $('#warning-audio-status').textContent = '';
-      pauseListening();
-      clearTimeout(recoveryTimer);
-      releaseSpeech();
-      void speakLocal(text,true,undefined,event);
+      void speakLocal(text,true,undefined,canPlay);
+    },
+    cancelSpokenAlert() {
+      if (speech?.automaticWarning) stopPlayback();
     }
   });
   return () => {
     scope.dispose();
     perception.stopPolling();
     stopAudio();
+    void alertAudioContext?.close().catch(() => {});
   };
 }

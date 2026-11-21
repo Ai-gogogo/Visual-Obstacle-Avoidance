@@ -7,7 +7,7 @@ main.shell{padding-block:clamp(1.35rem,3vw,2.7rem) 2.5rem}
 .masthead{flex-wrap:wrap}
 .display-controls{margin-inline-start:auto}
 .page-head>div{min-width:0}
-@media(min-width:1060px){#camera-feeds[data-live]{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(min-width:1060px){#camera-feeds[data-live]:not(:has(>#camera-b-feed[hidden])){grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:760px){.masthead{padding-block:.65rem}.page-head{align-items:flex-start;flex-direction:column}.feed-grid,.assist-grid{grid-template-columns:minmax(0,1fr)}.masthead nav{order:1;width:100%}}
 @media(max-width:400px){th,td{padding:.5rem}.feed header,.feed footer{padding:.65rem}}
 @media(max-width:400px){.input-row{grid-template-columns:minmax(0,1fr)}.masthead,.display-controls{justify-content:flex-start}.display-controls{margin-inline-start:0}.section-head{flex-wrap:wrap}}

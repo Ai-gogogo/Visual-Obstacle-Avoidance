@@ -1,10 +1,64 @@
-export function connectAlerts({$, scope, agentRequest, isAssist, isConversationBusy, transcriptionLanguage, speakWarning}) {
+const spokenMessages = {
+  road: ['Caution. Road edge ahead.', '小心，前方有车行道边缘。'],
+  stationary: ['Caution. Movement nearby.', '小心，有物体正在靠近。'],
+  walking: ['Caution. Possible crossing ahead.', '小心，前方可能有横穿目标。']
+};
+
+export function connectAlerts({$, scope, agentRequest, isAssist, isConversationBusy, transcriptionLanguage,
+  showWarningTiming, prepareSpokenAlerts, playSpokenAlert, cancelSpokenAlert}) {
   let alertSequence = 0;
   let warningUntil = 0;
   let pendingReminder;
   let pendingRoadAlert;
   let activeWarningRisk;
   let lastCameraStates;
+  const modeControl = $('#spoken-alert-mode');
+  const audioStatus = $('#spoken-alert-status');
+  let mode = 'desk';
+  let modeSince = 0;
+  let stereoFeedsOnline = false;
+  modeControl.value = mode;
+
+  function updateAudioStatus(cameras) {
+    stereoFeedsOnline = cameras?.A === 'detecting' && receivingCamera(cameras?.B);
+    if (!stereoFeedsOnline) cancelSpokenAlert();
+    const text = mode === 'desk' ? 'Automatic alert speech is off.' :
+      !stereoFeedsOnline ? 'Spoken alerts paused. Waiting for both camera feeds and analysis on Camera A.' :
+        mode === 'stationary' ? 'Stationary monitoring selected. Only verified nearby movement can trigger speech.' :
+          'Walking alerts selected. Only timely stereo crossing and measured road-edge events can trigger speech.';
+    if (audioStatus.textContent !== text) audioStatus.textContent = text;
+  }
+
+  scope.listen(modeControl,'change',() => {
+    mode = modeControl.value;
+    modeSince = Date.now();
+    cancelSpokenAlert();
+    updateAudioStatus(lastCameraStates);
+    if (mode !== 'desk') {
+      const language = transcriptionLanguage() === 'zh' ? 1 : 0;
+      prepareSpokenAlerts(mode === 'walking'
+        ? [spokenMessages.walking[language],spokenMessages.road[language]]
+        : [spokenMessages.stationary[language]]);
+    }
+  });
+
+  function handleSpokenAlerts(alerts) {
+    const selectedMode = mode;
+    const canSpeak = alert => selectedMode !== 'desk' && mode === selectedMode && stereoFeedsOnline &&
+      alert.stamp >= modeSince &&
+      Date.now() < Math.min(alert.expires ?? Infinity, alert.stamp + 1500);
+    const crossing = alerts.filter(alert => alert.kind === 'path_intrusion' && canSpeak(alert) &&
+      (mode === 'walking' || alert.stationary_zone === true))
+      .sort((a,b) => a.expires-b.expires)[0];
+    const road = mode === 'walking' && alerts.findLast(alert => alert.kind === 'road_edge' &&
+      alert.metric === true && canSpeak(alert));
+    const alert = road?.risk === 'urgent' ? road : crossing || road;
+    if (!alert) return;
+    const urgent = alert.risk === 'urgent' || (crossing === alert && alert.expires-Date.now() <= 1200);
+    if (!urgent && isConversationBusy('chunks')) return;
+    const messages = spokenMessages[alert.kind === 'road_edge' ? 'road' : mode];
+    playSpokenAlert(messages[transcriptionLanguage() === 'zh' ? 1 : 0],urgent,() => canSpeak(alert));
+  }
   const lostCameras = new Set();
   const receivingCamera = value => value === 'live' || value === 'detecting';
   function updateCameraReadiness(cameras) {
@@ -20,7 +74,6 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
         if (receivingCamera(cameras[side])) lostCameras.delete(side);
         else if (receivingCamera(lastCameraStates?.[side])) lostCameras.add(side);
       }
-      lastCameraStates = cameras;
       warning = [...lostCameras].map(side =>
         'Camera ' + side + (cameras[side] === 'offline' ? ' disconnected.' : ' lost its video feed.')).join(' ');
     } else if (lastCameraStates && Object.values(lastCameraStates).some(receivingCamera)) {
@@ -28,6 +81,8 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
     }
     const alert = $('#connection-alert');
     if (alert.textContent !== warning) alert.textContent = warning;
+    lastCameraStates = cameras;
+    updateAudioStatus(cameras);
   }
 
   async function pollAlerts() {
@@ -37,6 +92,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
         '&wait=1'+(allowReminder ? '&reminders=1' : ''),'GET');
       if (scope.signal.aborted) return;
       updateCameraReadiness(cameras);
+      handleSpokenAlerts(alerts);
       if (reminder && allowReminder) pendingReminder = {text:reminder,until:Date.now()+15_000};
       if (!allowReminder || pendingReminder?.until < Date.now()) pendingReminder = undefined;
       alertSequence = sequence;
@@ -55,7 +111,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
         const text = transcriptionLanguage() === 'zh' && warning.text_zh ? warning.text_zh : warning.text;
         warningUntil = Date.now()+3000;
         $('#obstacle-alert').textContent = text;
-        speakWarning(text,warning,warning.risk === 'urgent' || !isConversationBusy('chunks'));
+        showWarningTiming(warning);
         scope.delay(() => {
           if ($('#obstacle-alert').textContent === text && Date.now() >= warningUntil) $('#obstacle-alert').textContent = '';
         },3400);

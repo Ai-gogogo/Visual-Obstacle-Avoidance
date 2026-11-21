@@ -151,9 +151,8 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   await call('/api/agent/alerts','GET',desk);
   const jpeg = Buffer.from([255,216,42,255,217]);
   const box = {label:'chair',bbox:[.2,.2,.6,.8],position:'center',track_id:'A-1',risk:'urgent'};
-  async function upload() {
-    const sample = Date.now()-40;
-    assert.equal((await call('/api/frame','PUT',phone,jpeg,{
+  async function upload(sample = Date.now()-40, token = phone) {
+    assert.equal((await call('/api/frame','PUT',token,jpeg,{
       'Content-Type':'image/jpeg','X-Sample-Ms':sample,'X-Clock-Error-Ms':4
     })).status,204);
     const {sources:[source]} = await (await call('/api/cv/sources')).json();
@@ -161,9 +160,9 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
     const frame = await call('/api/cv/frame'+query);
     return {sample,query,frame_id:frame.headers.get('etag').slice(1,-1)};
   }
-  async function publish(input, objects, preview_objects = []) {
+  async function publish(input, objects, preview_objects = [], extra = {}) {
     const response = await call('/api/cv/detections'+input.query,'POST',undefined,
-      JSON.stringify({frame_id:input.frame_id,objects,preview_objects}),json);
+      JSON.stringify({frame_id:input.frame_id,objects,preview_objects,...extra}),json);
     assert.equal(response.status,204);
     return response;
   }
@@ -182,4 +181,25 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   assert.equal(alert.capture_ms,strong.sample);
   assert.equal(alert.capture_error_ms,4);
   assert.ok(alert.judged_ms >= alert.capture_ms);
+
+  const {code:rightCode} = await (await call('/api/pair/B','POST',desk)).json();
+  const {token:rightPhone} = await (await call('/api/join','POST',undefined,JSON.stringify({code:rightCode}),json)).json();
+  async function publishCrossing(stationary_zone) {
+    const sample = Date.now()-40;
+    await upload(sample,rightPhone);
+    const frame = await upload(sample);
+    const partner = await call('/api/cv/stereo-partner'+frame.query+'&max_skew_ms=65&frame_id='+frame.frame_id);
+    assert.equal(partner.status,200);
+    await publish(frame,[{...box,label:'person',risk:'normal',confidence:.78,depth_m:1.3,
+      intrusion:{from_side:'left',eta_s:1.5,stationary_zone}}],[],
+      {stereo:{partner_id:partner.headers.get('x-partner-id')}});
+  }
+  async function crossingAlert() {
+    const data = await (await call('/api/agent/alerts?after='+alert.id,'GET',desk)).json();
+    return data.alerts.find(event => event.kind === 'path_intrusion');
+  }
+  await publishCrossing(true);
+  assert.equal((await crossingAlert()).stationary_zone,true);
+  await publishCrossing(false);
+  assert.equal((await crossingAlert()).stationary_zone,false);
 });

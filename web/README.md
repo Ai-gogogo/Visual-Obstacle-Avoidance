@@ -34,7 +34,16 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 ## 验证接口
 
-运行 `npm test` 检查配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。运行 `npm run typecheck` 检查 TypeScript。完成 `npm run build` 后，运行 `npm run test:frontend` 验证生产服务的两个页面、静态资源和同源配对接口。
+### 语音告警
+
+在桌面页的 **Spoken alerts** 选模式。每次打开页面默认 **Desk · quiet**，CV 告警仍显示在页面上。**Test warning audio** 可以单独检查输出设备和 Piper 语音。
+
+- **Stationary monitoring · fixed rig** 用于固定、已标定的双目支架。相机连续稳定、移动目标预计进入相机前方走廊的前 1.5 米时，才播报接近。
+- **Walking alerts · moving rig** 用于受控场地测试。将已标定的支架朝向行进方向，开始移动时手动选此模式，停下后选回 Desk。有效横穿预测和有双目距离支持的路沿事件可以播报。路沿检测还需要 CV 启动参数 `--road-alerts`。
+
+两种模式都需要两路画面和相机 A 的分析。失流、切换模式或错过事件时限时，当前等待开播的告警会取消。行走模式目前依赖操作者切换，静态障碍仍以页面提示为主。只在受控测试中验证这些提示。
+
+运行 `npm test` 检查配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。运行 `npm run typecheck` 检查 TypeScript。完成 `npm run build` 后，运行 `npm run test:frontend` 验证告警模式、生产服务的两个页面、静态资源和同源配对接口。
 
 ## 前端分层
 

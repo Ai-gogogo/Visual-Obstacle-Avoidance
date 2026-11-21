@@ -11,6 +11,8 @@ from tracking import MAX_GAP_MS
 
 MOVING_CLASSES = {"person", "bicycle", "motorcycle", "car", "bus", "truck", "dog"}
 MIN_FEATURES = 18
+# Fixed-camera monitoring covers the first 1.5 m of the calibrated corridor.
+STATIONARY_REACH_M = 1.5
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ class IntrusionPredictor:
         self.corridor = corridor
         self.previous = None
         self.candidates = {}
+        self.was_stationary = False
 
     def position(self, obj, w, h):
         x1, y1, x2, y2 = np.asarray(obj["bbox"]) * [w, h, w, h]
@@ -133,6 +136,7 @@ class IntrusionPredictor:
         return center, (right[0]-left[0])/2
 
     def update(self, gray, depth, objects, stamp):
+        was_stationary, self.was_stationary = self.was_stationary, False
         positions = {}
         for obj in objects:
             if (obj["label"] in MOVING_CLASSES and obj.get("track_id") and obj["confidence"] >= MIN_CONFIDENCE
@@ -161,6 +165,8 @@ class IntrusionPredictor:
             return
         rotation, translation = pose
         dt = (stamp-previous.stamp)/1000
+        turn = math.degrees(np.linalg.norm(cv2.Rodrigues(rotation)[0]))
+        self.was_stationary = turn <= min(1.0, 4*dt) and np.linalg.norm(translation) <= min(.03, .12*dt)
         for obj in objects:
             key = obj.get("track_id")
             if key not in positions or key not in previous.positions:
@@ -185,9 +191,13 @@ class IntrusionPredictor:
             old_velocity = rotation @ earlier[key][1]
             if abs(velocity[0]-old_velocity[0]) > max(.45, .5*abs(velocity[0])):
                 continue
-            eta = self.entry_time(center, half_width, (velocity+old_velocity)/2)
+            velocity = (velocity+old_velocity)/2
+            eta = self.entry_time(center, half_width, velocity)
             if eta is not None:
                 obj["intrusion"] = {"from_side": "right" if sign > 0 else "left", "eta_s": round(eta, 2)}
+                if (was_stationary and self.was_stationary and
+                        0 < (center + eta*velocity) @ self.corridor.forward_axis <= STATIONARY_REACH_M):
+                    obj["intrusion"]["stationary_zone"] = True
 
     def entry_time(self, center, half_width, velocity):
         clearance = abs(center[0]) - self.corridor.half_width - half_width

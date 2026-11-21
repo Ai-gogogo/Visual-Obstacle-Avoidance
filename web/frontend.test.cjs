@@ -6,6 +6,67 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const test = require('node:test');
 
+test('spoken alerts are opt-in, use mode-specific evidence and pause on camera loss', async () => {
+  const {connectAlerts} = await import('./features/alerts/alerts-controller.js');
+  const controls = new Map();
+  const $ = id => {
+    if (!controls.has(id)) controls.set(id,Object.assign(new EventTarget(),{textContent:''}));
+    return controls.get(id);
+  };
+  const controller = new AbortController();
+  const played = [];
+  let cancelled = 0;
+  let respond;
+  let sequence = 0;
+  const cameras = {A:'detecting',B:'live'};
+  connectAlerts({$, scope:{signal:controller.signal,delay() {},listen:(target,type,handler) => target.addEventListener(type,handler)},
+    agentRequest:() => new Promise(resolve => { respond = resolve; }),
+    isAssist:() => true,isConversationBusy:() => false,transcriptionLanguage:() => 'zh',
+    showWarningTiming() {},prepareSpokenAlerts() {},playSpokenAlert:(text,urgent,canPlay) => played.push({text,urgent,canPlay}),
+    cancelSpokenAlert:() => { cancelled++; }});
+
+  function select(value) {
+    $('#spoken-alert-mode').value = value;
+    $('#spoken-alert-mode').dispatchEvent(new Event('change'));
+  }
+  async function event(fields, feeds = cameras) {
+    const now = Date.now();
+    const alert = {risk:'urgent',stamp:now,judged_ms:now,text:'Warning',...fields};
+    respond({sequence:++sequence,alerts:[alert],cameras:feeds});
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  const crossing = () => ({kind:'path_intrusion',expires:Date.now()+1100});
+  await event({...crossing(),stationary_zone:true});
+  assert.equal(played.length,0);
+  select('stationary');
+  await event(crossing());
+  await event({kind:'road_edge',metric:true});
+  assert.equal(played.length,0);
+  await event({...crossing(),stationary_zone:true});
+  assert.match(played[0].text,/正在靠近/);
+  assert.equal(played[0].canPlay(),true);
+
+  const beforeLoss = cancelled;
+  await event({...crossing(),stationary_zone:true},{A:'detecting',B:'offline'});
+  assert.equal(played.length,1);
+  assert.equal(played[0].canPlay(),false);
+  assert.ok(cancelled > beforeLoss);
+  select('walking');
+  await event({kind:'road_edge',metric:false});
+  await event({kind:'road_edge',metric:true,stamp:Date.now()-1600});
+  await event({...crossing(),expires:Date.now()-1});
+  assert.equal(played.length,1);
+  await event(crossing());
+  await event({kind:'road_edge',metric:true});
+  assert.match(played[1].text,/横穿/);
+  assert.match(played[2].text,/车行道/);
+  select('desk');
+  assert.equal(played[2].canPlay(),false);
+  controller.abort();
+  respond({sequence,alerts:[],cameras});
+});
+
 test('assistant controls accept spoken confirmation and direct page actions', async () => {
   const {matchVoiceCommand} = await import('./features/assistant/commands.js');
   const valid = [
@@ -56,7 +117,6 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Live perception/);
   assert.match(html,/Voice assistant/);
   assert.match(html,/Test warning audio/);
-  assert.match(html,/Enable warning audio/);
   assert.match(html,/Compare cameras/);
   assert.match(html,/Help me identify the text/);
   assert.match(html,/Reduce motion/);
@@ -65,6 +125,7 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/RAFT-Stereo/);
   assert.match(html,/Record A \+ B/);
   assert.match(html,/Generate depth comparison/);
+  assert.match(html,/<button[^>]*aria-pressed="true"[^>]*aria-controls="camera-b-feed"[^>]*>Show Camera B<\/button>/);
   assert.match(html,/Code for Camera A/);
   assert.match(html,/Code for Camera B/);
   const stylesheet = /<link[^>]+href="([^"]+\.css)"[^>]*>/.exec(html);

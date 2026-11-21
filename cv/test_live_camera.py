@@ -16,10 +16,19 @@ from ultralytics import YOLO
 from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
-from live_camera import CameraAWorker, CameraWorker
+from live_camera import CameraAWorker, CameraWorker, resolve_device
 from path_intrusion import Corridor
 from road_edge import DEFAULT_ROAD_CONFIG
 from stereo_depth import DEFAULT_CONFIG, StereoDepth
+
+
+class DeviceSelectionTests(unittest.TestCase):
+    def test_auto_prefers_cuda_then_mps_then_cpu(self):
+        for cuda, mps, expected in [(True, True, "cuda:0"), (False, True, "mps"),
+                                    (False, False, "cpu")]:
+            with patch("torch.cuda.is_available", return_value=cuda), patch("torch.backends.mps.is_available", return_value=mps):
+                self.assertEqual(resolve_device("auto"), expected)
+                self.assertEqual(resolve_device("cpu"), "cpu")
 
 
 def phone_jpeg(image):

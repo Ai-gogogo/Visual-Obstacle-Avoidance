@@ -223,7 +223,10 @@ function createAgentRoutes(options, sessions, read, respond) {
               ['left','right'].includes(prediction?.from_side) && Number.isFinite(prediction.eta_s) &&
               prediction.eta_s > 0 && prediction.eta_s <= 3 && captured.sample) {
             const expires = captured.sample.ms + Math.round(1000*prediction.eta_s) - captured.sample.error;
-            if (expires > Date.now()) object.intrusion = {from_side:prediction.from_side, eta_s:prediction.eta_s, expires};
+            if (expires > Date.now()) object.intrusion = {
+              from_side:prediction.from_side, eta_s:prediction.eta_s, expires,
+              stationary_zone:prediction.stationary_zone === true
+            };
           }
         }
         const preview = payload.stereo.preview;
@@ -257,8 +260,11 @@ function createAgentRoutes(options, sessions, read, respond) {
       }
       if (camera === 'A') {
         const warning = acceptRoadEdge(slot, payload.road_edge, captured.stamp, session.slots.B.streamID, paired);
-        if (warning) session.alerts.push({...warning,id:++session.alertSeq,streamID:slot.streamID,
-          partnerStream:slot.detection.road_edge?.distance_m === undefined ? undefined : partner?.stream});
+        if (warning) {
+          const metric = paired && slot.detection.road_edge?.distance_m !== undefined;
+          session.alerts.push({...warning,id:++session.alertSeq,streamID:slot.streamID,
+            metric,partnerStream:metric ? partner.stream : undefined});
+        }
         for (const obj of objects.filter(o => o.intrusion).sort((a,b) => a.intrusion.expires-b.intrusion.expires)) {
           const side = obj.intrusion.from_side;
           const id = ['intrusion',slot.streamID,partner.stream,obj.track_id,side].join(':');
@@ -266,6 +272,7 @@ function createAgentRoutes(options, sessions, read, respond) {
           session.alertCooldown.set(id,now);
           session.alerts.push({kind:'path_intrusion', id:++session.alertSeq, camera_id:'A', risk:'caution',
             stamp:captured.stamp, streamID:slot.streamID, partnerStream:partner.stream, expires:obj.intrusion.expires, track_id:obj.track_id, from_side:side,
+            stationary_zone:obj.intrusion.stationary_zone,
             text:'Caution. A '+obj.label+' may cross your path from the '+side+'.',
             text_zh:(side === 'left' ? '左侧' : '右侧')+movingLabels.get(obj.label)+'可能横穿前方，请小心。'});
         }
@@ -340,7 +347,19 @@ function createAgentRoutes(options, sessions, read, respond) {
         side, !slot.phone ? 'offline' : !recent(slot) ? 'waiting' :
           currentDetection(slot) ? 'detecting' : 'live'
       ]));
-      return respond(res,200,{sequence:session.alertSeq, alerts:active.map(({streamID, partnerStream, ...alert}) => alert), reminder,cameras});
+      const scene = currentDetection(session.slots.A);
+      const visibleAlerts = active.map(({streamID, partnerStream, ...alert}) => {
+        if (alert.kind === 'road_edge' && alert.metric) {
+          alert.metric = ['caution','urgent'].includes(scene?.road_edge?.level) &&
+            (alert.risk !== 'urgent' || scene.road_edge.level === 'urgent') &&
+            scene.partnerStream === session.slots.B.streamID;
+        } else if (alert.kind === 'path_intrusion' && alert.stationary_zone) {
+          alert.stationary_zone = Boolean(scene?.objects.some(obj => obj.track_id === alert.track_id &&
+            obj.intrusion?.from_side === alert.from_side && obj.intrusion.stationary_zone));
+        }
+        return alert;
+      });
+      return respond(res,200,{sequence:session.alertSeq, alerts:visibleAlerts, reminder,cameras});
     }
     if (route === '/api/agent/preferences') {
       if (method === 'GET') return respond(res,200,agent.preferences());
