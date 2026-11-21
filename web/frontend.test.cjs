@@ -42,7 +42,9 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Depth algorithm/);
   const planeToggle = html.match(/<input[^>]*id="depth-plane-overlay"[^>]*>/)?.[0];
   assert.ok(planeToggle);
-  assert.match(html,/<article[^>]*id="scene-view"[^>]*hidden/);
+  assert.match(html,/<article[^>]*id="scene-view"/);
+  assert.match(html,/<canvas[^>]*id="scene-mask"[^>]*hidden/);
+  assert.match(html,/Waiting for Camera A segmentation/);
   const labels = await call('/ade20k-labels.json');
   assert.equal(labels.status,200);
   assert.equal((await labels.json()).length,150);

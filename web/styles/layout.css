@@ -1,3 +1,4 @@
+html{scrollbar-gutter:stable}
 .shell{max-width:96rem;margin:auto;padding-inline:clamp(1rem,4vw,4.5rem)}
 .masthead{min-height:4.65rem;display:flex;align-items:center;justify-content:space-between;gap:.85rem;border-bottom:1px solid var(--line)}
 main.shell{padding-block:clamp(1.35rem,3vw,2.7rem) 2.5rem}

@@ -1,5 +1,5 @@
 export function createScenePreview($, getToken, signal) {
-  const panel = $('#scene-view');
+  const placeholder = $('#scene-placeholder');
   const canvas = $('#scene-mask');
   const ctx = canvas.getContext('2d', {willReadFrequently:true});
   const legend = $('#scene-legend');
@@ -19,7 +19,9 @@ export function createScenePreview($, getToken, signal) {
   function clear() {
     version++;
     clearTimeout(expiry);
-    panel.hidden = true;
+    canvas.hidden = true;
+    placeholder.hidden = false;
+    legend.replaceChildren();
     delete canvas.dataset.frameId;
     currentId = null;
   }
@@ -47,7 +49,8 @@ export function createScenePreview($, getToken, signal) {
       item.append(dot, labels[id] ?? 'Uncertain');
       return item;
     }));
-    panel.hidden = false;
+    canvas.hidden = false;
+    placeholder.hidden = true;
   }
 
   signal.addEventListener('abort',clear,{once:true});
@@ -84,9 +87,7 @@ export function createScenePreview($, getToken, signal) {
       currentId = scene.frame_id;
       paint(image,scene,labels);
       expiry = setTimeout(() => {
-        panel.hidden = true;
-        delete canvas.dataset.frameId;
-        if (current === version) currentId = null;
+        if (current === version) clear();
       },remaining);
     } catch {
       if (current === version) clear();

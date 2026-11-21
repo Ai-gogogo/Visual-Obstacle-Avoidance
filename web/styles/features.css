@@ -6,7 +6,7 @@
 .feed header,.feed footer{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.7rem .85rem;flex-wrap:wrap}
 .feed header>div,.section-head{display:flex;align-items:center;gap:.65rem}
 .camera-icon{display:grid;place-items:center;width:1.9rem;height:1.9rem;border-radius:.48rem;background:var(--tint);color:var(--accent);font-weight:750}
-.frame{aspect-ratio:var(--camera-aspect,3/2);position:relative;background:var(--frame);display:grid;place-items:center;color:#e3ecf8;overflow:hidden}
+.frame{aspect-ratio:3/2;position:relative;background:var(--frame);display:grid;place-items:center;color:#e3ecf8;overflow:hidden}
 .sample-image,.live-frame,.overlays{position:absolute;inset:0;width:100%;height:100%}
 .sample-image{background-image:url(/demo-lab.webp);background-size:200% 100%}
 .sample-b{background-position:right center}
@@ -17,7 +17,8 @@
 .depth-source-control select{max-width:100%}
 #camera-feeds{align-items:start}
 #camera-feeds .feed header{min-height:3.3rem}
-#camera-feeds[data-actual-pixels] .camera-frame[data-has-pixels]{aspect-ratio:auto;display:block;max-height:min(75vh,640px);overflow:auto}
+#camera-feeds[data-live] .frame{aspect-ratio:3/4}
+#camera-feeds[data-actual-pixels] .camera-frame[data-has-pixels]{display:block;overflow:auto}
 #camera-feeds[data-actual-pixels] .camera-frame[data-has-pixels] .live-frame{position:static;display:block;width:auto;height:auto}
 #camera-feeds .camera-frame[data-rtc-live] canvas.analysis-inset{position:absolute;inset:auto .5rem 1.9rem auto;width:min(48%,280px);height:auto;border:1px solid #8ce9ff;background:#102031;z-index:1}
 .camera-frame:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
@@ -28,7 +29,9 @@
 .box[data-align=right] span{left:auto;right:-2px}
 .feed footer,.section-head p{color:var(--muted);font-size:.91rem}
 .detections{margin-top:1rem}
-.table-wrap{overflow-x:auto}
+#monitor .table-wrap{block-size:clamp(12rem,30vh,18rem);overflow:auto;scrollbar-gutter:stable}
+#monitor .table-wrap table{min-width:32rem;table-layout:fixed}
+#monitor .table-wrap :is(th,td){overflow-wrap:anywhere}
 table{width:100%;border-collapse:collapse;text-align:left}
 th,td{padding:.58rem 1rem;border-top:1px solid var(--line)}
 th{font-size:.86rem;color:var(--muted)}
@@ -116,7 +119,41 @@ td{font-size:.94rem}
 #record-detail:empty{display:none}
 #record-video{width:100%;max-height:65vh;background:var(--frame);border-radius:.5rem}
 
-#scene-mask { display:block; width:min(100%,20rem); height:auto; margin:auto; image-rendering:pixelated; }
-#scene-legend { display:flex; flex-wrap:wrap; gap:.35rem .8rem; list-style:none; padding:.5rem 1rem; }
+#scene-view { margin-top:1rem; }
+#scene-stage { position:relative; display:grid; place-items:center; inline-size:min(100%,20rem); aspect-ratio:3/4; margin-inline:auto; background:var(--frame); color:#e3ecf8; overflow:hidden; }
+#scene-stage > * { grid-area:1 / 1; }
+#scene-mask { position:absolute; inset:0; margin:auto; display:block; width:100%; height:auto; max-height:100%; image-rendering:pixelated; }
+#scene-legend { display:flex; align-content:start; flex-wrap:wrap; gap:.35rem .8rem; list-style:none; margin:0; padding:.5rem 1rem; block-size:3.8rem; overflow:auto; scrollbar-gutter:stable; }
 #scene-legend li { display:flex; align-items:center; gap:.35rem; }
 #scene-legend li span { width:.8em; height:.8em; border-radius:2px; }
+
+
+/* Reserve rows for live metadata, even while a frame or reading is unavailable. */
+#camera-feeds [data-camera] footer { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,9rem); }
+#camera-feeds [data-camera] footer .frame-size { grid-area:1 / 1; }
+#camera-feeds [data-camera] footer .rtc-toggle { grid-area:1 / 2; justify-self:end; }
+#camera-feeds [data-camera] footer .feed-summary { grid-area:2 / 1; }
+#camera-feeds [data-camera] footer .rtc-status { grid-area:2 / 2; text-align:end; }
+#camera-feeds [data-camera] footer [hidden],
+#stereo-view :is(#depth-hold-status,footer span)[hidden] { display:block!important; visibility:hidden; }
+#camera-feeds [data-camera] footer :is(.frame-size,.feed-summary,.rtc-status),
+#stereo-view :is(#depth-hold-status,#depth-reading,footer span),
+#record-progress,.model-compute p {
+  min-width:0; line-height:1.4; block-size:1.4em; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;
+}
+#depth-hold-status { margin:0; padding-inline:.85rem; }
+#depth-reading { flex-basis:100%; }
+#stereo-view footer { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+#stereo-view footer :is(#plane-status,#depth-scale) { grid-column:1 / -1; }
+#record-progress { flex-basis:100%; }
+#record-library[open] { block-size:clamp(12rem,34vh,21rem); overflow:auto; scrollbar-gutter:stable; }
+.model-compute { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+@media(max-width:760px) { .model-compute { grid-template-columns:minmax(0,1fr); } }
+
+
+.live-notices {
+  position:fixed; z-index:5; inset-inline-end:clamp(.75rem,3vw,2rem); inset-block-end:.75rem;
+  inline-size:min(28rem,calc(100% - 1.5rem)); pointer-events:none;
+}
+.live-notices > p:empty { display:none; }
+.live-notices > p:not(:empty) { margin:.35rem 0; background:var(--surface); }

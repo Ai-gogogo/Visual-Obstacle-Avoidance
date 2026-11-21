@@ -84,7 +84,6 @@ export function createPerceptionView($, signal) {
     $('#detection-measure').textContent = sampleMode ? 'Distance' : 'Confidence';
     $('#detection-count').textContent = waiting ? 'Waiting' :
       list.length + (list.length === 1 ? ' object' : ' objects');
-    $('.table-wrap').hidden = !list.length;
     $('#empty-detections').hidden = Boolean(list.length);
     $('#empty-detections').textContent = waiting ? 'Waiting for camera detections.' :
       'No objects detected in the processed views.';

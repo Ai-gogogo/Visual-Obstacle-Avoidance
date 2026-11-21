@@ -28,10 +28,8 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     frame.toggleAttribute('data-has-pixels', !size.hidden);
     frame.tabIndex = !size.hidden && $('#camera-feeds').hasAttribute('data-actual-pixels') ? 0 : -1;
     if (!connected) {
-      if (sampleMode) frame.style.removeProperty('--camera-aspect');
       if (feed.side === 'A') {
         scene.clear();
-        if (sampleMode) $('#stereo-map').parentElement.style.removeProperty('--camera-aspect');
         VisionPerceptionView.showDepth(null, null, sampleMode);
       }
       feed.etag = undefined;
@@ -46,9 +44,6 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       const video = feed.rtc.playing && node.querySelector('.rtc-preview');
       const width = video?.videoWidth || image.width;
       const height = video?.videoHeight || image.height;
-      const aspect = width + ' / ' + height;
-      frame.style.setProperty('--camera-aspect', aspect);
-      if (feed.side === 'A') $('#stereo-map').parentElement.style.setProperty('--camera-aspect',image.width+' / '+image.height);
       size.textContent = width + ' × ' + height + ' px';
     }
     const empty = node.querySelector('.no-feed');
