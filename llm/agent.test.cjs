@@ -7,6 +7,7 @@ const {tmpdir} = require('node:os');
 const {join} = require('node:path');
 const {createAgent} = require('./agent.cjs');
 const {createServer} = require('../web/server.cjs');
+const echoOcr = async messages => JSON.parse(messages.at(-1).content).ocr_text;
 
 test('fixed OCR demo is opt-in and its labeled reply reaches speech synthesis', async () => {
   const previous = process.env.VISIONASSIST_OCR_DEMO;
@@ -35,12 +36,61 @@ test('fixed OCR demo is opt-in and its labeled reply reaches speech synthesis', 
   assert.match((await enabled.synthesize(reply.reply_text)).toString(),/^RIFF/);
 });
 
+test('spoken variations and the Quick Actions mode route directly to OCR', async () => {
+  const session = {slots:{A:{frame:Buffer.from('image'),etag:'"sign"',stamp:Date.now()}}};
+  let ocrModelCalls = 0;
+  let failModel = false;
+  const agent = createAgent({filename:':memory:', recognizeText:async () => ({text:'Library'}), generate:async messages => {
+    if (!messages[0].content.includes('verified OCR')) return 'General reply';
+    assert.equal(await echoOcr(messages),'Library');
+    ocrModelCalls++;
+    if (failModel) throw new Error('Ollama offline');
+    return 'Wrong sign';
+  }});
+  try {
+    const phrases = ['帮我读一下文字', '嗯，帮我读一下文字好吗？', '能不能帮我看看上面写了什么？',
+      '请念一下画面里的字。', 'Can you tell me what is written on this sign?', '那么我识别一下文字',
+      '那么，我想识别一下画面里的文字。'];
+    for (const text of phrases) {
+      assert.equal((await agent.chat(session,{text})).reply_text,'Library',text);
+    }
+    assert.equal((await agent.chat(session,{text:'Read camera text',mode:'read_text'})).source,'ocr');
+    assert.equal((await agent.chat(session,{text:'Please read my last reply.'})).source,'llm');
+    assert.equal((await agent.chat(session,{text:'我想了解怎么识别文字。'})).source,'llm');
+    assert.equal(ocrModelCalls,phrases.length+1);
+    failModel = true;
+    assert.equal((await agent.chat(session,{text:'帮我读文字'})).ocr_status,'model_unavailable');
+  } finally { agent.close(); }
+});
+
+test('Ollama maps indirect chat to the camera OCR action and leaves how-to questions in chat', async () => {
+  const session = {slots:{A:{frame:Buffer.from('image'),etag:'"sign"',stamp:Date.now()}}};
+  let recognitionCalls = 0;
+  const agent = createAgent({filename:':memory:', recognizeText:async () => { recognitionCalls++; return {text:'Library G17'}; },
+    generate:async (messages,image,format) => {
+      if (format?.properties?.intent) {
+        assert.equal(image,null);
+        const {utterance} = JSON.parse(messages.at(-1).content);
+        return JSON.stringify({intent:utterance.includes('门口') ? 'read_room_number' : 'none'});
+      }
+      if (messages[0].content.includes('verified OCR')) return echoOcr(messages);
+      return 'General reply';
+    }});
+  try {
+    assert.equal((await agent.chat(session,{text:'门口牌子写啥'})).reply_text,'Library G17');
+    assert.equal((await agent.chat(session,{text:'OCR 怎么识别文字？'})).source,'llm');
+    session.slots.A = {};
+    assert.equal((await agent.chat(session,{text:'门口牌子写啥'})).ocr_status,'no_frame');
+    assert.equal(recognitionCalls,1);
+  } finally { agent.close(); }
+});
+
 test('OCR speaks distinct retry messages and suppresses results from replaced or expired frames', async () => {
   const frame = (id,stamp=Date.now()) => ({frame:Buffer.from(id),etag:`"${id}"`,stamp});
   const session = {slots:{A:{},B:frame('b')}};
   const input = {text:'Help me identify the text.'};
   let recognize;
-  const agent = createAgent({recognizeText:request => recognize(request)});
+  const agent = createAgent({recognizeText:request => recognize(request),generate:echoOcr});
   const ask = () => agent.chat(session,input);
   try {
     assert.equal((await ask()).ocr_status,'no_frame');
@@ -82,7 +132,7 @@ test('Gxx room-number requests require agreement from two recent frames of the s
   const frame = (id,stamp) => ({frame:Buffer.from(id),etag:`"${id}"`,stamp});
   const session = {slots:{}};
   let nextCode, gap;
-  const agent = createAgent({recognizeText:async ({frame_id,camera_id,timestamp_ms}) => {
+  const agent = createAgent({generate:echoOcr,recognizeText:async ({frame_id,camera_id,timestamp_ms}) => {
     assert.equal(camera_id,'A');
     if (frame_id === 'first') {
       Object.assign(session.slots.A,frame('second',timestamp_ms+gap));
@@ -194,6 +244,7 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   };
   const generate = async (messages,image) => {
     generated.push({messages,image});
+    if (messages[0].content.includes('verified OCR')) return echoOcr(messages);
     return image ? 'The box looks blue.' : 'Hello.';
   };
   const server = createServer({agent:{filename:':memory:',worker,generate,recognizeText}});
@@ -350,7 +401,9 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
     image:frame(3), camera_id:'B', frame_id:previewB.frame_id, timestamp_ms:previewB.timestamp_ms
   });
   assert.deepEqual(ocrRequests[0].image,frame(9));
-  assert.equal(generated.length,modelCalls);
+  assert.equal(generated.length,modelCalls+2);
+  assert.equal(generated.at(-1).image,null);
+  assert.equal(await echoOcr(generated.at(-1).messages),'Study Room G17');
   const exported = await call('/api/agent/export',{method:'POST',token:desk,body:{
     messages:[{role:'user',text:'你好'},{role:'assistant',text:'我是 VisionAssist'}]
   }});

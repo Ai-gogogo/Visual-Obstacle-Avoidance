@@ -128,7 +128,7 @@ npm --prefix web run dev
 
 如果模型已下载到另一个工作区，启动前可用 `VISIONASSIST_MODELS` 指向现有模型目录。手机通过 WebRTC 传输时，仍需按 Web README 配置 HTTPS 和 `VISIONASSIST_RTC_PYTHON`。
 
-配对并选择有实时画面的相机，然后询问 “Help me identify the text.” 或“请帮我读一下门牌”。Agent 将请求开始时的相机画面交给本地 PaddleOCR，识别文本通过现有语音通道播报。首次识别时加载 PP-OCRv5 移动版模型，后续识别复用同一进程。
+配对并选择有实时画面的相机，然后询问 “Help me identify the text.” 或“请帮我读一下门牌”。也可以点击 Quick Actions 中的同名按钮。PaddleOCR 从画面中提取文字，Agent 将文字交给本地 Ollama 的聊天模型，然后由 Piper 播报。实时朗读需要 Ollama 在 `127.0.0.1:11434` 运行，并安装默认聊天模型 `qwen3:4b-instruct-2507-q4_K_M` 或 `VISIONASSIST_CHAT_MODEL` 指定的本地模型。Agent 只接受模型对空白的调整，避免模型改写文字或门牌号。Ollama 调用失败时会提示检查本地模型。首次识别时加载 PP-OCRv5 移动版模型，后续识别复用同一进程。
 
 可将 `PP-OCRv5_mobile_det` 和 `PP-OCRv5_mobile_rec` 的 `inference.json`、`inference.pdiparams` 和 `inference.yml` 分别下载到 `llm/models/ocr/` 下的同名子目录。没有预置模型时，PaddleOCR 会尝试下载。识别超时后可以重新发起请求。[检测模型](https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det) · [识别模型](https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec)
 

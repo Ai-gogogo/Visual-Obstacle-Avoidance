@@ -600,6 +600,8 @@ export function mountDesktop(root, voicePresentation) {
     if ($('#agent-camera').value === 'both') answer(zh ? '比较相机 A 和相机 B 的画面。' : 'Compare the views from Camera A and Camera B.',true,'image');
     else answer(zh ? '我前面有什么？' : 'What is in front of me?',true,'scene');
   });
+  listen($('#read-camera-text'), 'click', () =>
+    answer(transcriptionLanguage() === 'zh' ? '帮我读一下文字。' : 'Help me identify the text.',true,'read_text'));
   listen($('#recall-habits'), 'click', () =>
     answer(transcriptionLanguage() === 'zh' ? '我保存了哪些习惯？' : 'What habits have I saved?',true));
   root.querySelectorAll('[data-question]').forEach(button => {
