@@ -204,6 +204,84 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   assert.equal((await crossingAlert()).stationary_zone,false);
 });
 
+test('doors use distinct accepted A frames and speak meters only for a current stereo pair', async t => {
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:'+server.address().port;
+  const call = (path, method = 'GET', token, body, headers = {}) => fetch(base+path,{
+    method,body,headers:{...(token ? {Authorization:'Bearer '+token} : {}),...headers}
+  });
+  const json = {'Content-Type':'application/json'};
+  const {token:desk} = await (await call('/api/session','POST')).json();
+  async function pair(side) {
+    const {code} = await (await call('/api/pair/'+side,'POST',desk)).json();
+    return (await call('/api/join','POST',undefined,JSON.stringify({code}),json)).json();
+  }
+  const {token:a,sourceID} = await pair('A');
+  const doors = async () => (await (await call('/api/agent/alerts','GET',desk)).json()).alerts
+    .filter(alert => alert.kind === 'door');
+  const query = '?camera_id=A&source_id='+sourceID;
+  const box = [.36,.15,.65,.85];
+  await doors(); // Initialize the desktop's CV source.
+
+  async function frame(right) {
+    t.mock.timers.tick(330);
+    const headers = {'Content-Type':'image/jpeg','X-Sample-Ms':String(Date.now()),'X-Clock-Error-Ms':'2'};
+    const jpeg = Buffer.from([255,216,42,255,217]);
+    if (right) assert.equal((await call('/api/frame','PUT',right,jpeg,headers)).status,204);
+    assert.equal((await call('/api/frame','PUT',a,jpeg,headers)).status,204);
+    const raw = await call('/api/cv/frame'+query);
+    const frame_id = raw.headers.get('etag').slice(1,-1);
+    const partner = right && await call('/api/cv/stereo-partner'+query+'&max_skew_ms=65&frame_id='+frame_id);
+    if (right) assert.equal(partner.status,200);
+    return {frame_id,partner_id:partner?.headers.get('x-partner-id')};
+  }
+  async function publish(key) {
+    const result = await call('/api/cv/detections'+query,'POST',undefined,JSON.stringify({
+      frame_id:key.frame_id,objects:[],...(key.partner_id ? {stereo:{partner_id:key.partner_id}} : {})
+    }),json);
+    assert.equal(result.status,204);
+  }
+  function report(key, door) {
+    return call('/api/cv/door'+query,'POST',undefined,JSON.stringify({...key,door}),json);
+  }
+  async function observe(door, right) {
+    const key = await frame(right);
+    await publish(key);
+    assert.equal((await report(key,door)).status,204);
+    return key;
+  }
+
+  const first = await frame();
+  assert.equal((await report(first,{bbox:box})).status,409);
+  await publish(first);
+  assert.equal((await report(first,{bbox:[0,.1,0,.9]})).status,400);
+  assert.equal((await report(first,{bbox:box})).status,204);
+  assert.equal((await report(first,{bbox:box})).status,204);
+  assert.deepEqual(await doors(),[]);
+  await observe({bbox:box});
+  const [visual] = await doors();
+  assert.equal(visual.text_zh,'请小心，前方可能有门。');
+  assert.equal(visual.metric,false);
+  await observe({bbox:box});
+  assert.deepEqual((await doors()).map(alert => alert.id),[visual.id]);
+
+  const {token:b} = await pair('B');
+  await observe({bbox:box,distance_m:1.02},b);
+  assert.deepEqual(await doors(),[]);
+  const measured = await observe({bbox:box,distance_m:.98},b);
+  const [metric] = await doors();
+  assert.equal(metric.text_zh,'小心，前方约1.0米有门。');
+  assert.equal(metric.metric,true);
+  await pair('B'); // A distance measured with the replaced partner must not play.
+  assert.deepEqual(await doors(),[]);
+  t.mock.timers.tick(1600);
+  assert.equal((await report(measured,{bbox:box})).status,409);
+});
+
 test('a paused phone keeps its pairing and rejoins without a new code', async t => {
   const server = createServer();
   server.listen(0,'127.0.0.1');

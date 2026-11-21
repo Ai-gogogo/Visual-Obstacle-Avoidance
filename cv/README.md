@@ -341,6 +341,20 @@ Camera A 用 Cityscapes SegFormer-B0 分割车行道和人行道，寻找从脚�
 - [road_config.json](road_config.json) 中的 `pitch_down_deg` 默认 0，镜头从水平向下倾斜 10° 时填 10。`corridor_width_m` 是通道总宽，默认 0.9 米。`caution_m`、`urgent_m` 和 `rearm_margin_m` 分别控制两级提示和重新触发的距离余量。改完重启 worker。匹配范围还取决于 [stereo_config.json](stereo_config.json) 中的有效深度范围和标定参数。
 - 首次实机验证可用卷尺在封闭路段标出 5 米和 3 米，分别从正面、斜向接近并沿路沿平行行走。没有可见人行道、已走上车道、路口被车辆遮挡或在坡道上时，可能漏报或误报。
 
+## 前方门提示
+
+门提示使用 ADE20K SegFormer-B0 的 `door` 类。在仓库根目录下载并校验权重。
+
+```sh
+mkdir -p cv/models
+curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-1024/resolve/1e78fb9c976ebbac92d859ef6d7aae4253da869e/onnx/model.onnx -o cv/models/scene-segformer-b0.onnx
+echo '3e5c18a4be395f16646438d54c42377ddc202edfa33d5eced0c9506de75c44c2  cv/models/scene-segformer-b0.onnx' | shasum -a 256 -c -
+```
+
+保留现有的服务器和标定参数，给 `cv/live_camera.py` 加 `--door-alerts`。权重放在其他目录时可以加 `--door-model <文件路径>`。配对 Camera A 后，在桌面选 **Spoken alerts → Walking alerts**，再让门进入画面正前方。
+
+同一扇门连续两张采样帧确认后，可靠双目距离在 3 米以内时可以听到「小心，前方约1.0米有门。」只有 Camera A 或深度不足时可以听到「请小心，前方可能有门。」门分割在后台采样，测距取同帧门掩膜内部的原始深度。播报描述门的位置，不判断门是否打开或可通行。
+
 ## 预测人车从侧面进入前方通道
 
 完成 A/B 双目标定后，普通 `cv/live_camera.py` 会自动启用路径侵入预测。安装路沿分割模型是 `--road-alerts` 的要求，单独使用横穿预测只需要原有 YOLO、OpenCV 和双目标定。默认相机 A 朝向与短时间内的行走方向一致，按直线通道预测未来 2 秒内、前方 6 米范围的进入事件。

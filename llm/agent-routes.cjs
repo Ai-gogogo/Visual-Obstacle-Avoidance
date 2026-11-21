@@ -1,4 +1,5 @@
 const {createAgent, currentDetection, detectionLabelsZh, MAX_FRAME_AGE} = require('./agent.cjs');
+const {acceptDoor, SPEECH_MAX_AGE_MS} = require('./door-alerts.cjs');
 const {acceptRoadEdge} = require('./road-alerts.cjs');
 const voiceFrames = require('./voice-frames.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
@@ -66,15 +67,19 @@ function validItemFeature(feature) {
 }
 
 
+function validBox(box) {
+  return Array.isArray(box) && box.length === 4 &&
+    box.every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
+    box[0] < box[2] && box[1] < box[3];
+}
+
 function parseObjects(objects) {
   if (!Array.isArray(objects) || objects.length > 40) return null;
   const results = [];
   for (const entry of objects) {
     if (!entry || typeof entry.label !== 'string' || !/^[\p{L}\p{N} _-]{1,50}$/u.test(entry.label) ||
         !positions.has(entry.position) || !Number.isFinite(entry.confidence) || entry.confidence < 0 || entry.confidence > 1 ||
-        !Array.isArray(entry.bbox) || entry.bbox.length !== 4 ||
-        !entry.bbox.every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
-        entry.bbox[0] >= entry.bbox[2] || entry.bbox[1] >= entry.bbox[3]) return null;
+        !validBox(entry.bbox)) return null;
     const label = entry.label.toLowerCase();
     const itemFeature = label !== 'person' && entry.confidence >= 0.5 && validItemFeature(entry.item_feature)
       ? {version:entry.item_feature.version,vector:entry.item_feature.vector} : null;
@@ -193,7 +198,35 @@ function createAgentRoutes(options, sessions, read, respond) {
         'X-Partner-Skew-Bound-Ms':smallest}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
+    if (route === '/api/cv/door' && req.method === 'POST' && camera === 'A') return publishDoor();
     return error(res,404,'Unknown CV route.');
+
+    async function publishDoor() {
+      const payload = await asJSON(req,1024);
+      const door = payload?.door;
+      if (typeof payload?.frame_id !== 'string' || (door !== null && (!validBox(door?.bbox) ||
+          (door.distance_m !== undefined && (!Number.isFinite(door.distance_m) || door.distance_m <= 0))))) {
+        return error(res,400,'Invalid door observation.');
+      }
+      const captured = slot.cvFrames?.get(payload.frame_id);
+      const now = Date.now();
+      if (session.slots.A !== slot || !captured?.analyzed || now-captured.stamp >= SPEECH_MAX_AGE_MS) {
+        return error(res,409,'Door frame expired or replaced.');
+      }
+      const partner = captured.partner;
+      const right = session.slots.B;
+      const partnerStream = door?.distance_m !== undefined && recent(partner) && recent(right) &&
+        partner.id === payload.partner_id && partner.stream === right.streamID ? partner.stream : undefined;
+      const event = acceptDoor(slot,door,captured.stamp,partnerStream);
+      if (event) {
+        const id = ++session.alertSeq;
+        slot.doorState.alertId = id;
+        session.alerts = [...session.alerts.slice(-19),{...event,id,streamID:slot.streamID,judged_ms:now,
+          ...(captured.sample ? {capture_ms:captured.sample.ms,capture_error_ms:captured.sample.error} : {})}];
+        session.alertWaiter?.();
+      }
+      return res.writeHead(204).end();
+    }
 
     async function publish() {
       const payload = await asJSON(req,600_000 + 128_000);
@@ -306,6 +339,7 @@ function createAgentRoutes(options, sessions, read, respond) {
         }
         session.alertWaiter?.();
       }
+      captured.analyzed = true;
       // Measured on one clock, from server receipt of the JPEG to acceptance of CV results.
       return res.writeHead(204, {'X-CV-Accepted-Ms':now, 'X-CV-Latency-Ms':now-captured.stamp,
         ...(captured.sample ? {'X-CV-Capture-Latency-Ms':Math.max(0,now-captured.sample.ms)} : {})}).end();
@@ -354,6 +388,8 @@ function createAgentRoutes(options, sessions, read, respond) {
       const active = session.alerts.filter(alert => {
         if (alert.id <= after || !recent(alert) || session.slots[alert.camera_id].streamID !== alert.streamID ||
             (alert.partnerStream && session.slots.B.streamID !== alert.partnerStream)) return false;
+        if (alert.kind === 'door') return alert.expires > Date.now() && session.slots.A.doorState?.alertId === alert.id &&
+          (!alert.metric || recent(session.slots.B));
         if (alert.kind !== 'path_intrusion') return true;
         const scene = session.slots.A.detection;
         return alert.expires > Date.now() && scene?.partnerStream === session.slots.B.streamID &&

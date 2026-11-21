@@ -43,6 +43,8 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 静态障碍和没有距离的「前方可能是车行道」只需要相机 A 在检测；横穿和带距离的路沿需要两路画面和相机 A 的分析。路沿检测要在 CV 启动时加 `--road-alerts`。失流、切换模式或错过事件时限时，当前等待开播的告警会取消。行走模式目前依赖操作者切换。只在受控测试中验证这些提示。
 
+启动 CV 时加 `--door-alerts` 可在 Walking 模式播报前方的门。Camera A 可单独提供定性提示，有可靠双目深度时可带米数。 [门分割配置](../cv/README.md#前方门提示)
+
 运行 `npm test` 检查配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。运行 `npm run typecheck` 检查 TypeScript。完成 `npm run build` 后，运行 `npm run test:frontend` 验证告警模式、生产服务的两个页面、静态资源和同源配对接口。
 
 ## 前端分层

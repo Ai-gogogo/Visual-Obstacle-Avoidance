@@ -21,6 +21,7 @@ from PIL import Image, ImageOps
 
 from depth_filters import spatial_depth, StaticMedian
 from detect_image import DEFAULT_WEIGHTS, detect
+from door_alerts import DEFAULT_DOOR_MODEL, DoorSampler, DoorSegmenter
 from item_features import item_features
 from obstacles import is_obstacle_candidate
 from path_intrusion import Corridor, IntrusionPredictor
@@ -35,7 +36,7 @@ class CameraWorker:
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
         item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False,
-        inference_device=None, half=False
+        inference_device=None, half=False, door_sampler=None
     ):
         self.side = side
         self.stereo = stereo
@@ -47,6 +48,7 @@ class CameraWorker:
         self.rtc_reference = None
         self.verified_rtc_pair = None
         self.road = road
+        self.door_sampler = door_sampler if side == "A" else None
         self.corridor = corridor
         self.intrusions = {}
         self.record = record
@@ -120,7 +122,7 @@ class CameraWorker:
         pending = self.pending.get(source)
 
         if pending and pending[0] == etag:
-            payload = pending[1]
+            _, payload, door_frame = pending
         else:
             try:
                 with Image.open(io.BytesIO(frame.content)) as jpeg:
@@ -153,6 +155,9 @@ class CameraWorker:
                         payload["stereo"], depth = self.measure_depth(params, payload, image, retry_partner)
                 if self.road is not None:
                     payload["road_edge"] = self.road(image, depth)
+            door_frame = None
+            if self.door_sampler is not None:
+                door_frame = payload["frame_id"], image, depth, payload.get("stereo", {}).get("partner_id")
 
             stream = frame.headers.get("X-CV-Stream-Id")
             frame_stamp = frame.headers.get("X-CV-Frame-Ms")
@@ -224,7 +229,7 @@ class CameraWorker:
                     timestamp_ms=stamp
                 )
 
-            self.pending[source] = (etag, payload)
+            self.pending[source] = (etag, payload, door_frame)
 
         result = self.http.post(
             self.api + "/detections",
@@ -234,6 +239,8 @@ class CameraWorker:
         )
         if result.status_code not in (404, 409):
             result.raise_for_status()
+            if door_frame is not None:
+                self.door_sampler.offer(source, *door_frame)
             if self.record and "X-CV-Accepted-Ms" in result.headers:
                 self.record(
                     self.side,
@@ -455,6 +462,8 @@ def main():
 
     parser.add_argument("--road-alerts", action="store_true", help="Enable sidewalk-to-road warnings on Camera A")
     parser.add_argument("--road-config", type=Path, default=DEFAULT_ROAD_CONFIG)
+    parser.add_argument("--door-alerts", action="store_true", help="Enable ADE20K door alerts on Camera A")
+    parser.add_argument("--door-model", type=Path, default=DEFAULT_DOOR_MODEL)
     inference_options(parser, default_cpu_threads=None)
     args = parser.parse_args()
     if args.cpu_threads is None:
@@ -480,6 +489,7 @@ def main():
     try:
         corridor = Corridor.load(args.road_config) if stereo is not None else None
         road = RoadEdge.load(args.road_config, stereo) if args.road_alerts else None
+        door = DoorSegmenter(args.door_model) if args.door_alerts else None
     except (ImportError, KeyError, OSError, ValueError, TypeError, RuntimeError) as error:
         parser.error(f"Invalid path warning configuration: {error}")
 
@@ -561,6 +571,7 @@ def main():
                     writer.writerow(row)
                     output.flush()
 
+        door_sampler = stack.enter_context(DoorSampler(door, args.server.rstrip("/") + "/api/cv")) if door else None
         workers = [
             CameraWorker(
                 args.server,
@@ -575,7 +586,8 @@ def main():
                 corridor=corridor if side == "A" else None,
                 allow_webrtc_stereo=args.allow_webrtc_stereo,
                 inference_device=device,
-                half=args.half
+                half=args.half,
+                door_sampler=door_sampler
             )
             for side, infer in zip(sides, predictors)
         ]

@@ -7,6 +7,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 import numpy as np
@@ -16,6 +17,7 @@ from ultralytics import YOLO
 from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
+from door_alerts import DoorSampler, observe_door
 from live_camera import CameraAWorker, CameraWorker, resolve_device
 from path_intrusion import Corridor
 from road_edge import DEFAULT_ROAD_CONFIG
@@ -327,6 +329,36 @@ class LiveCameraTests(unittest.TestCase):
         self.upload(phones["B"], frame_at(40))
         b_worker.poll()
         self.assertEqual(people("B")[0], b_ids)
+
+    def test_door_segmentation_publishes_in_the_background(self):
+        phone = self.pair("A")
+        segmenting = Event()
+        release = Event()
+        mask = np.zeros((128, 128), dtype=bool)
+        mask[18:108, 43:85] = True
+
+        def segment(_image, depth):
+            segmenting.set()
+            release.wait(2)
+            return observe_door(mask, depth)
+
+        self.worker.infer = lambda _: []
+        with DoorSampler(segment, self.worker.api) as sampler:
+            self.worker.door_sampler = sampler
+            try:
+                self.upload(phone, self.blank)
+                self.worker.poll()
+                self.assertTrue(segmenting.wait(2))
+                self.upload(phone, self.bus)
+                self.worker.poll()
+                response = self.request("GET", "/api/agent/alerts", self.desk).json()
+                self.assertEqual(response["cameras"]["A"], "detecting")
+                self.assertEqual(response["alerts"], [])
+            finally:
+                release.set()
+            response = self.request("GET", "/api/agent/alerts?wait=1&after=0", self.desk).json()
+            self.assertEqual([alert["text_zh"] for alert in response["alerts"]],
+                             ["请小心，前方可能有门。"])
 
     def test_predict_crossing_before_entry_and_drop_alert_after_b_repair(self):
         phones = {side: self.pair(side) for side in "AB"}
