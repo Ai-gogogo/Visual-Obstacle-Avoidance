@@ -150,7 +150,7 @@ async function ollama(messages, image, format, onPlacement, signal) {
   const request = fetch('http://127.0.0.1:11434/api/chat', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({model, messages:input, stream:false, think:false, format,
-      keep_alive:image ? 0 : '2m', options:{num_ctx:4096,...(format === INTENT_FORMAT
+      keep_alive:image ? '45s' : '2m', options:{num_ctx:4096,...(format === INTENT_FORMAT
         ? {num_predict:75,temperature:0} : {num_predict:format ? 450 : 140})}}),
     signal:signal ? AbortSignal.any([signal,timeout]) : timeout
   });
@@ -825,7 +825,8 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     }
     const visualDetail = /什么颜色|哪种颜色|看图|画面细节|(?:这|那)(?:个|只|把)?[^，。！？]{0,12}(?:是|长)?什么样(?:子|的)?|(?:有(?:没有)?|没(?:有)?)(?:什么|一?点)?(?:花纹|条纹|图案)|(?:我|他|她|这(?:个|位)人|画面里的人).{0,12}(?:戴没戴|没戴|戴[了着]?|带[了着]?)(?:副)?眼镜|what colou?r|look at (?:the|this) (?:picture|frame)|\b(?:am i|is (?:he|she|that person)) wearing glasses|\bdoes (?:my|this|that|the) .{1,30} have (?:a pattern|stripes)\b/iu;
     const readText = route?.intent === 'read_text' || /写[的着]?(?:是)?什么(?:字|文字|内容)|写[的着]?什[么麼]|(?:上面|标签|瓶身|杯子上|牌子上).{0,10}写[的着]?(?:是)?什么|上(?:面|头)(?:的)?(?:字|文字).{0,6}写|(?:读|念|识别)(?:一下|出|一读)?(?:这|上面|标签|瓶身|画面|字|文字)|\b(?:what (?:does|is written on) (?:this|that|the (?:label|sign|bottle|package))|read (?:the |this )?(?:text|label|sign|writing))\b/iu.test(text);
-    const wantsImage = input.mode === 'image' || route?.intent === 'visual_detail' || comparison || readText || visualDetail.test(text);
+    const appearanceQuestion = /(?:衣服|上衣|衬衫|裤子|鞋子?).{0,8}(?:什么|哪种|哪样)(?:花纹|条纹|图案|样式)|\b(?:what (?:pattern|design) (?:is|do|does)|what kind of (?:pattern|design)).{0,45}\b(?:shirt|clothes|jacket|pants|shoes)\b/iu;
+    const wantsImage = input.mode === 'image' || route?.intent === 'visual_detail' || comparison || readText || visualDetail.test(text) || appearanceQuestion.test(text);
     const sceneQuestion = /(?:面前|前面|眼前|前方|周围|附近|身边|外[面边](?:[里中])?|画面[里中])(?:都)?(?:有(?:些)?|是)(?:什么|啥|哪些|哪几)|(?:看到|看见)(?:了|过)?什么|(?:播报|描述|看看|说说)(?:一下)?(?:我)?(?:面前|前面|眼前|周围|身边|附近)(?:的)?(?:(?:场景|环境|情况|物体|东西)|[吧。！!？?]*$)|in front|surroundings|what (?:can|do) you see/iu;
     if (input.mode === 'scene' || route?.intent === 'scene' || (!wantsImage && sceneQuestion.test(text))) {
       const reports = cameras.map(id => {
@@ -932,7 +933,8 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     const temporalPrompt = isChinese
       ? '两张都是本轮相机 '+imageCamera+' 的画面，第一张较早，第二张较晚。优先描述第二张。目标只在第一张清楚出现时，说明它只在较早画面可见。不要把两张图里不同的人或物当成同一个。'
       : 'Both images are from Camera '+imageCamera+' during this question, earlier first. Prefer the latest. If visible only in the earlier image, say so. Do not merge different objects or people.';
-    const followUp = frame && route && previousVisual ?
+    const refersToPrevious = /^(?:那[，, ]*)?(?:它|他|她|上面|拍到的那个|这个呢|那个呢)|^(?:(?:and|what about)\s+)?(?:it|its|he|she)\b|\b(?:is|does|was) (?:it|he|she)\b/iu.test(text);
+    const followUp = frame && previousVisual && (refersToPrevious || route) ?
       'Earlier user question for reference only. Draw all visual facts from the current images. '+JSON.stringify(previousVisual)+'\n' : '';
     const message = {role:'user',content:(temporal ? temporalPrompt : Array.isArray(frame) ? cameraPrompt : '') + followUp + (readText ? readingPrompt : '') + text};
     const messages = Array.isArray(frame) ? [message] : [system,...history,message];
@@ -944,7 +946,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       if (error.publicMessage || signal?.aborted) throw error;
       throw failure(503, 'Local Ollama model unavailable. Check that Ollama is running and the model is installed.');
     }
-    if (frame) session.lastVisualQuestion = {text,until:now()+45_000};
+    if (frame) session.lastVisualQuestion = {text:refersToPrevious && previousVisual ? previousVisual : text,until:now()+45_000};
     else {
       delete session.lastVisualQuestion;
       session.dialog = [...history,message,{role:'assistant',content:reply}].slice(-16);

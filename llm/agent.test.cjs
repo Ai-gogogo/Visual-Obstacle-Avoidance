@@ -308,6 +308,35 @@ test('equivalent surroundings questions use current YOLO detections with localiz
   } finally { agent.close(); }
 });
 
+test('explicit clothing questions skip semantic inference and visual follow-ups use a fresh frame', async () => {
+  const initialFrame = Buffer.from('first camera frame');
+  const updatedFrame = Buffer.from('updated camera frame');
+  const requests = [];
+  let classifications = 0;
+  const agent = createAgent({filename:':memory:',
+    classify:async () => { classifications++; },
+    generate:async (messages,image) => {
+      requests.push({question:messages.at(-1).content,image});
+      return 'Visual answer.';
+    }
+  });
+  const camera = {frame:initialFrame,stamp:Date.now()};
+  const session = {slots:{A:camera,B:{}}};
+  const chat = text => agent.chat(session,{text,camera_id:'A'});
+  try {
+    assert.equal((await chat('我衣服上是什么花纹？')).source,'image');
+    assert.equal(requests[0].image,initialFrame);
+    camera.frame = updatedFrame;
+    camera.stamp = Date.now();
+    assert.equal((await chat('它是什么颜色？')).source,'image');
+    assert.equal(requests[1].image,updatedFrame);
+    assert.match(requests[1].question,/Earlier user question.*衣服.*花纹/s);
+    assert.equal((await chat('我的鞋是什么颜色？')).source,'image');
+    assert.doesNotMatch(requests[2].question,/Earlier user question/);
+    assert.equal(classifications,0);
+  } finally { agent.close(); }
+});
+
 test('label reading uses the current image and asks for original text', async () => {
   const frame = Buffer.from('camera image');
   const agent = createAgent({filename:':memory:',generate:async (messages,image) => {
