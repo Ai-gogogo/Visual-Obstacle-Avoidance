@@ -10,8 +10,8 @@ from contextlib import suppress
 from aiohttp import web
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCRtpSender, RTCSessionDescription, VideoStreamTrack
 from aiortc.mediastreams import MediaStreamError
-from av import CodecContext
-from rtc_timing import CaptureTimeline, video_ssrc
+from av import CodecContext, VideoFrame
+from rtc_timing import CaptureTimeline, VIDEO_TIME_BASE, video_ssrc
 
 SNAPSHOT_PERIOD = 0.1
 FRAME_TIMEOUT = 4
@@ -41,6 +41,18 @@ class Camera:
         if self.closed:
             raise MediaStreamError
         return self.sequence, self.frame
+
+
+class ClockProbe(VideoStreamTrack):
+    """Tiny return stream so a phone's sender reports echo our RTCP clock probes."""
+    async def recv(self):
+        await asyncio.sleep(.25)
+        frame = VideoFrame(32, 32, "yuv420p")
+        for plane, value in zip(frame.planes, (16, 128, 128)):
+            plane.update(bytes([value])*plane.buffer_size)
+        frame.pts = time.monotonic_ns()*90_000//1_000_000_000
+        frame.time_base = VIDEO_TIME_BASE
+        return frame
 
 
 class Preview(VideoStreamTrack):
@@ -151,6 +163,8 @@ async def main():
                 if not camera.closed:
                     await emit(kind="frame", id=camera_id, jpeg=jpeg, decoded_at=decoded_at,
                                decoded_frames=camera.sequence, fps=fps, capture=timing,
+                               media_clock=camera.timeline.media_clock(time.monotonic_ns()/1e6),
+                               clock_diagnostics=camera.timeline.debug,
                                width=frame.width, height=frame.height)
                 await asyncio.sleep(SNAPSHOT_PERIOD)
         except MediaStreamError:
@@ -223,7 +237,13 @@ async def main():
                     raise ValueError("A sending video track is required")
                 else:
                     receiver, = peer.getReceivers()
-                    camera.timeline.attach(receiver, video_ssrc(offer["sdp"]))
+                    probe = None
+                    if "a=sendrecv" in offer["sdp"].splitlines():
+                        transceiver, = peer.getTransceivers()
+                        probe = transceiver.sender
+                        probe.replaceTrack(ClockProbe())
+                        transceiver.direction = "sendrecv"
+                    camera.timeline.attach(receiver, video_ssrc(offer["sdp"]), probe)
                 await peer.setLocalDescription(await peer.createAnswer())
             if camera.closed or (viewer and camera.viewer is not peer):
                 raise ConnectionError

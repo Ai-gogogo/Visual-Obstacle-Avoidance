@@ -7,6 +7,7 @@ import csv
 import io
 import os
 import sys
+import time
 from functools import partial
 from itertools import count
 from pathlib import Path
@@ -147,7 +148,8 @@ class CameraWorker:
                     if frame.headers.get("X-CV-Transport") == "webrtc" and not self.allow_webrtc_stereo and not (rtc_low and (self.rtc_reference is not None or self.rtc_low_stereo is not None)):
                         payload["stereo"] = {"status": "transport_unvalidated"}
                     else:
-                        payload["stereo"], depth = self.measure_depth(params, payload, image)
+                        retry_partner = rtc_low and "X-CV-Sample-Ms" in frame.headers
+                        payload["stereo"], depth = self.measure_depth(params, payload, image, retry_partner)
                 if self.road is not None:
                     payload["road_edge"] = self.road(image, depth)
 
@@ -244,7 +246,7 @@ class CameraWorker:
         self.etags[source] = etag
         del self.pending[source]
 
-    def measure_depth(self, params, payload, image):
+    def measure_depth(self, params, payload, image, retry_partner=False):
         if image.size != self.stereo.size:
             return {"status": "size_mismatch"}, None
 
@@ -255,6 +257,14 @@ class CameraWorker:
         }
         try:
             partner = self.http.get(self.api + "/stereo-partner", params=query, timeout=.25)
+            # B snapshots arrive about every 100 ms. Keep the same A frame
+            # pinned while giving a slightly later B snapshot time to arrive.
+            if retry_partner:
+                for delay in (.05, .07, .08):
+                    if partner.status_code != 204:
+                        break
+                    time.sleep(delay)
+                    partner = self.http.get(self.api + "/stereo-partner", params=query, timeout=.25)
             if partner.status_code in (204, 404):
                 return {"status": "waiting_for_pair"}, None
             partner.raise_for_status()

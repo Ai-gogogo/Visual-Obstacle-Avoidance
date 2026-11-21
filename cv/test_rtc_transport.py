@@ -13,6 +13,7 @@ try:
     from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
     from av import CodecContext, Packet, VideoFrame
     from rtc_receiver import SnapshotEncoder
+    from rtc_timing import CaptureTimeline
 except ModuleNotFoundError as error:
     raise unittest.SkipTest("Run with the environment from rtc-requirements.txt.") from error
 
@@ -27,6 +28,18 @@ class ClockedVideo(VideoStreamTrack):
 
 
 class TransportTest(unittest.IsolatedAsyncioTestCase):
+    def test_media_clock_with_separate_sender_epoch(self):
+        timeline = CaptureTimeline()
+        # Each round trip has 10 ms transit each way and a one-second
+        # wait on the phone. The media clock runs 17.7 s behind wall time.
+        for token, sent in enumerate((1000, 2500), start=1):
+            timeline.probes[token] = sent
+            timeline.note_echo(token, 65536, sent+1010-17700, sent+1020, sent+1020)
+        offset, error = timeline.media_clock(3600)
+        self.assertEqual(offset, 17700)
+        self.assertLessEqual(error, 15)
+        self.assertIsNone(timeline.media_clock(14000))
+
     def test_hd_snapshot_retains_more_pixels(self):
         frame = VideoFrame(1280, 720, "yuv420p")
         for edge, expected in ((640, (640, 360)), (960, (960, 540))):

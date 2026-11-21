@@ -290,7 +290,9 @@ function createServer(options = {}) {
             slot.frameType = 'image/jpeg';
             slot.stamp = Date.now();
             slot.etag = '"' + key() + '"';
-            const clock = slot.rtcClock;
+            const clock = event.media_clock
+              ? {offset:event.media_clock[0], error:event.media_clock[1], at:slot.stamp}
+              : slot.rtcClock;
             const [captureMs, rtpError] = event.capture ?? [];
             const corrected = Math.round(captureMs + (clock?.offset ?? 0));
             const uncertainty = (clock?.error ?? 0) + rtpError + 1;
@@ -302,6 +304,9 @@ function createServer(options = {}) {
             slot.rtcStats = {decoded_fps:event.fps, decoded_frames:event.decoded_frames,
               width:event.width,height:event.height,
               receiver_bridge_ms:Math.max(0,slot.stamp-event.decoded_at),
+              timing_source:event.media_clock ? 'rtcp-echo' : 'browser-clock',
+              clock_diagnostics:event.clock_diagnostics,
+              timing_lag_ms:Number.isFinite(corrected) ? slot.stamp-corrected : null,
               capture_timing_available:Boolean(slot.sample)};
           },
           closed() {

@@ -135,6 +135,9 @@ function createAgentRoutes(options, sessions, read, respond) {
         ...(slot.usbResolution ? {'X-USB-Resolution':slot.usbResolution} : {}),
         'X-CV-Transport':transport, ...(slot.rtcQuality ? {'X-RTC-Profile':slot.rtcQuality} : {}),
         ...(slot.sample ? {'X-CV-Sample-Ms':slot.sample.ms} : {}),
+        ...(slot.rtcStats?.timing_source ? {'X-RTC-Timing-Source':slot.rtcStats.timing_source,
+          'X-RTC-Clock-Diagnostics':JSON.stringify(slot.rtcStats.clock_diagnostics ?? {}),
+          'X-RTC-Timing-Lag-Ms':slot.rtcStats.timing_lag_ms ?? ''} : {}),
         'X-CV-Stream-Id':slot.streamID, 'X-CV-Frame-Ms':slot.stamp}).end(slot.frame);
     }
     if (route === '/api/cv/stereo-partner' && req.method === 'GET' && camera === 'A') {
