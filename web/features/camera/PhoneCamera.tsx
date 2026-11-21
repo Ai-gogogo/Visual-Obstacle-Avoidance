@@ -4,10 +4,10 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "../../components/Button";
 import { createAccessibility } from "../../shared/accessibility";
 import { createScope } from "../../shared/scope";
-import { createCameraUpload } from "./camera-upload";
+import { createCameraUpload, storedPairing } from "./camera-upload";
 
 type CameraState =
-  | { phase: "idle"; message?: string; invalid?: boolean }
+  | { phase: "idle"; message?: string; invalid?: boolean; resumable?: boolean }
   | { phase: "connecting"; message: string }
   | { phase: "connected"; lens: string };
 
@@ -22,6 +22,8 @@ export function PhoneCamera() {
   const connected = camera.phase === "connected";
   const connecting = camera.phase === "connecting";
   const invalid = camera.phase === "idle" && Boolean(camera.invalid);
+  const resumable = camera.phase === "idle" && Boolean(camera.resumable);
+  const [pairedSide, setPairedSide] = useState<string | null>(null);
 
   useEffect(() => {
     if (!video.current || !root.current) return;
@@ -40,6 +42,12 @@ export function PhoneCamera() {
       if (mounted) setCamera(state);
     });
     active.current = upload;
+    const saved = storedPairing();
+    if (saved && !code) {
+      setPairedSide(saved.slot);
+      setCamera({ phase: "idle", resumable: true,
+        message: `Camera ${saved.slot} is still paired. Tap Resume camera to continue.` });
+    }
     const onHide = () => upload.stop();
     window.addEventListener("pagehide", onHide);
     window.addEventListener("offline", upload.networkLost);
@@ -54,10 +62,23 @@ export function PhoneCamera() {
   }, []);
 
   useEffect(() => {
-    if (connected) video.current?.focus();
-    else if (invalid || wasConnected.current) codeField.current?.focus();
+    if (connected) {
+      video.current?.focus();
+      setPairedSide(storedPairing()?.slot ?? null);
+    } else if (invalid || wasConnected.current) codeField.current?.focus();
     wasConnected.current = connected;
   }, [connected, invalid]);
+
+  function resume() {
+    if (connecting || connected || !active.current) return;
+    void active.current.resume();
+  }
+
+  function forget() {
+    active.current?.forget();
+    setPairedSide(null);
+    setTimeout(() => codeField.current?.focus());
+  }
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -86,9 +107,22 @@ export function PhoneCamera() {
             </span>
             <span>VisionAssist Camera</span>
           </div>
-          <h1>{invitedSide ? `Pair Camera ${invitedSide}` : "Enter pairing code"}</h1>
-          <p>{invitedSide ? "Tap Connect camera to use this phone." : "Use the six-digit code shown on the computer."}</p>
+          <h1>{resumable && pairedSide ? `Resume Camera ${pairedSide}` :
+            invitedSide ? `Pair Camera ${invitedSide}` : "Enter pairing code"}</h1>
+          <p>{resumable ? "This phone keeps its pairing. No new code is needed." :
+            invitedSide ? "Tap Connect camera to use this phone." : "Use the six-digit code shown on the computer."}</p>
+          {resumable && (
+            <div className="phone-resume">
+              <Button variant="primary" id="resume" onClick={resume} disabled={connecting}>
+                Resume camera
+              </Button>
+              <Button id="forget" onClick={forget} disabled={connecting}>
+                Use a new pairing code
+              </Button>
+            </div>
+          )}
           <form
+            hidden={resumable}
             id="phone-form"
             onSubmit={submit}
             noValidate
@@ -151,6 +185,14 @@ export function PhoneCamera() {
         aria-label="Camera paired. Your camera preview is active."
         hidden={!connected}
       />
+      <Button
+        id="stop-camera"
+        className="phone-stop"
+        hidden={!connected}
+        onClick={() => active.current?.pause()}
+      >
+        Stop camera
+      </Button>
       <p id="lens-status" role="status" hidden={!connected}>
         {camera.phase === "connected" ? camera.lens : ""}
       </p>
