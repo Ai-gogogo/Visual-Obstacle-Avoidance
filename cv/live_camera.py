@@ -22,8 +22,9 @@ from PIL import Image, ImageOps
 from depth_filters import spatial_depth, StaticMedian
 from detect_image import DEFAULT_WEIGHTS, detect
 from item_features import item_features
-from obstacles import is_obstacle_candidate
-from path_intrusion import Corridor, IntrusionPredictor
+from obstacles import PlaneObstacles, is_obstacle_candidate, unclassified_obstacles
+from path_intrusion import Corridor, IntrusionPredictor, background_mask, deproject
+from plane_ransac import fit_support_plane, object_height_m
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from tracking import FrameTracker
@@ -35,7 +36,7 @@ class CameraWorker:
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
         item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False,
-        inference_device=None, half=False
+        inference_device=None, half=False, plane=None
     ):
         self.side = side
         self.stereo = stereo
@@ -47,6 +48,7 @@ class CameraWorker:
         self.rtc_reference = None
         self.verified_rtc_pair = None
         self.road = road
+        self.plane = plane if side == "A" else None
         self.corridor = corridor
         self.intrusions = {}
         self.record = record
@@ -144,6 +146,7 @@ class CameraWorker:
             }
 
             depth = None
+            support = None
             if self.side == "A":
                 if self.stereo is not None:
                     if frame.headers.get("X-CV-Transport") == "webrtc" and not self.allow_webrtc_stereo and not (rtc_low and (self.rtc_reference is not None or self.rtc_low_stereo is not None)):
@@ -152,7 +155,12 @@ class CameraWorker:
                         retry_partner = rtc_low and "X-CV-Sample-Ms" in frame.headers
                         payload["stereo"], depth = self.measure_depth(params, payload, image, retry_partner)
                 if self.road is not None:
-                    payload["road_edge"] = self.road(image, depth)
+                    if self.plane is not None and depth is not None:
+                        road, sidewalk = self.road.segment(image, self.road.confidence)
+                        support = road | sidewalk
+                        payload["road_edge"] = self.road.locate(road, sidewalk, depth)
+                    else:
+                        payload["road_edge"] = self.road(image, depth)
 
             stream = frame.headers.get("X-CV-Stream-Id")
             frame_stamp = frame.headers.get("X-CV-Frame-Ms")
@@ -187,8 +195,9 @@ class CameraWorker:
                     obj["bbox"]
                 )
 
+            metric_evidence = self.apply_support_plane(payload, depth, support) if self.plane else {}
             if stream and stamp is not None:
-                self.risk_assessments[source].update(objects, stamp)
+                self.risk_assessments[source].update(objects, stamp, metric_evidence=metric_evidence)
             else:
                 for obj in objects:
                     obj["risk"] = "normal"
@@ -246,6 +255,45 @@ class CameraWorker:
 
         self.etags[source] = etag
         del self.pending[source]
+
+    def apply_support_plane(self, payload, depth, support):
+        stereo = payload.setdefault("stereo", {})
+        if depth is None:
+            stereo["plane"] = {"validated": False, "reason": "depth_unavailable"}
+            return {}
+
+        objects = payload["objects"]
+        h, w = depth.shape
+        foreground = [obj for obj in objects if obj["label"] != "dining table"]
+        background = background_mask(depth.shape, foreground).astype(bool)
+        if support is None or not support.any():
+            support = np.arange(h)[:, None] >= .45 * h
+        camera = self.stereo.camera_a
+        plane = fit_support_plane(depth, camera, background & support, config=self.plane.fit)
+        stereo["plane"] = {key: getattr(plane, key) for key in
+                           ("validated", "reason", "pitch_deg", "roll_deg", "inlier_ratio", "holdout_p90_m")}
+        if not plane.validated:
+            return {}
+
+        metric_evidence = {}
+        for index, obj in enumerate(objects):
+            height = object_height_m(depth, camera, plane, obj["bbox"])
+            if height is None:
+                continue
+            median = height["median_m"]
+            obj["height_above_plane_m"] = round(median, 3)
+            z = obj.get("depth_m")
+            if z is None:
+                continue
+            left, top, right, bottom = obj["bbox"]
+            xyz = deproject([[(left+right)*w/2, (top+bottom)*h/2]], [z], camera)
+            inside, forward = self.plane.corridor_coordinates(xyz)
+            metric_evidence[index] = obj["obstacle_candidate"], bool(forward[0] <= self.plane.urgent_m)
+            obj["obstacle_candidate"] = bool(inside[0] and median >= self.plane.min_height_m)
+
+        payload["unclassified_obstacles"] = unclassified_obstacles(
+            depth, camera, plane, background, self.plane)
+        return metric_evidence
 
     def measure_depth(self, params, payload, image, retry_partner=False):
         if image.size != self.stereo.size:
@@ -451,6 +499,7 @@ def main():
     )
 
     parser.add_argument("--road-alerts", action="store_true", help="Enable sidewalk-to-road warnings on Camera A")
+    parser.add_argument("--plane-ransac", action="store_true", help="Enable metric support plane on Camera A")
     parser.add_argument("--road-config", type=Path, default=DEFAULT_ROAD_CONFIG)
     inference_options(parser, default_cpu_threads=None)
     args = parser.parse_args()
@@ -477,6 +526,7 @@ def main():
     try:
         corridor = Corridor.load(args.road_config) if stereo is not None else None
         road = RoadEdge.load(args.road_config, stereo) if args.road_alerts else None
+        plane = PlaneObstacles.load(args.road_config, force=args.plane_ransac)
     except (ImportError, KeyError, OSError, ValueError, TypeError, RuntimeError) as error:
         parser.error(f"Invalid path warning configuration: {error}")
 
@@ -572,7 +622,8 @@ def main():
                 corridor=corridor if side == "A" else None,
                 allow_webrtc_stereo=args.allow_webrtc_stereo,
                 inference_device=device,
-                half=args.half
+                half=args.half,
+                plane=plane
             )
             for side, infer in zip(sides, predictors)
         ]
