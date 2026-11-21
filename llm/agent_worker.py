@@ -44,6 +44,49 @@ def transcribe(payload):
     return {"text": text}
 
 
+WAKE_MODELS = {
+    "zh": ("vosk-model-small-cn-0.22", ("你好 视觉 助手",)),
+    "en": ("vosk-model-small-en-us-0.15", ("hey vision assist",)),
+}
+STOP_PHRASES = {
+    "zh": ("停止 播放", "停止 播报", "停止 朗读"),
+    "en": ("stop playback", "stop reading"),
+}
+CANCEL_PHRASES = {
+    "zh": ("取消 请求", "停止 生成"),
+    "en": ("cancel request", "stop generating"),
+}
+
+
+@lru_cache(maxsize=2)
+def wake_model(language):
+    from vosk import Model, SetLogLevel
+
+    SetLogLevel(-1)
+    return Model(str(MODELS / WAKE_MODELS[language][0]))
+
+
+def detect_wake(payload):
+    from vosk import KaldiRecognizer
+
+    language = payload["language"]
+    purpose = payload.get("purpose")
+    stopping = purpose in ("stop", "cancel")
+    phrases = (STOP_PHRASES if purpose == "stop" else CANCEL_PHRASES)[language] if stopping else WAKE_MODELS[language][1]
+    recording = io.BytesIO(base64.b64decode(payload["audio"], validate=True))
+    with wave.open(recording, "rb") as audio:
+        rate = audio.getframerate()
+        if (audio.getnchannels() != 1 or audio.getsampwidth() != 2 or
+                not 8000 <= rate <= 48000 or audio.getnframes() > rate * 9):
+            raise ValueError("Invalid wake recording")
+        pcm = audio.readframes(audio.getnframes())
+    recognizer = KaldiRecognizer(wake_model(language), rate, json.dumps([*phrases, "[unk]"], ensure_ascii=False))
+    recognizer.AcceptWaveform(pcm)
+    heard = json.loads(recognizer.FinalResult()).get("text", "")
+    matched = any(heard == phrase or (not stopping and heard.startswith(phrase + " ")) for phrase in phrases)
+    return {"matched": "yes" if matched else "no"}
+
+
 def export_conversation(payload):
     from docx import Document
     from docx.oxml.ns import qn
@@ -72,14 +115,15 @@ def export_conversation(payload):
     return {"document": base64.b64encode(result.getvalue()).decode("ascii")}
 
 
-def synthesize(payload):
+@lru_cache(maxsize=2)
+def speech_voice(language):
     from onnxruntime import InferenceSession, SessionOptions
     from piper import PiperConfig, PiperVoice
 
     voice_path = {
         "zh": "zh/zh_CN/huayan/medium/zh_CN-huayan-medium.onnx",
         "en": "en/en_US/lessac/medium/en_US-lessac-medium.onnx",
-    }[payload["language"]]
+    }[language]
     model_path = MODELS / "piper" / voice_path
     with model_path.with_suffix(".onnx.json").open(encoding="utf-8") as config_file:
         config = PiperConfig.from_dict(json.load(config_file))
@@ -87,7 +131,11 @@ def synthesize(payload):
     options = SessionOptions()
     options.intra_op_num_threads = 2
     session = InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
-    voice = PiperVoice(session=session, config=config)
+    return PiperVoice(session=session, config=config)
+
+
+def synthesize(payload):
+    voice = speech_voice(payload["language"])
     audio = io.BytesIO()
     with wave.open(audio, "wb") as wav:
         voice.synthesize_wav(payload["text"], wav)
@@ -118,6 +166,8 @@ def face_features(image):
 def main(mode, payload):
     if mode == "stt":
         return transcribe(payload)
+    if mode == "wake":
+        return detect_wake(payload)
     if mode == "tts":
         return synthesize(payload)
     if mode == "docx":
@@ -137,10 +187,13 @@ def main(mode, payload):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "stt-session":
+    mode = sys.argv[1]
+    sessions = {"stt-session": transcribe, "tts-session": synthesize, "wake-session": detect_wake}
+    if mode in sessions:
+        work = sessions[mode]
         for line in sys.stdin:
             try:
-                result = transcribe(json.loads(line))
+                result = work(json.loads(line))
             except Exception:
                 result = {"error": True}
             print(json.dumps(result, ensure_ascii=False), flush=True)

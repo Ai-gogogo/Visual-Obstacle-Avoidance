@@ -4,10 +4,27 @@ const { existsSync, mkdirSync } = require('node:fs');
 const { createInterface } = require('node:readline');
 const path = require('node:path');
 const {embedLocally,semanticMatches} = require('./semantic-memory.cjs');
+const {inferIntent, mayStageMemory, isMemoryOptOut, INTENT_FORMAT} = require('./intent-router.cjs');
 const {PLAN_FORMAT,routineStatement,routineObservation,parsePlan,planStep} = require('./routines.cjs');
 
 const MAX_FRAME_AGE = 5000;
 const PREVIEW_MAX_ANALYSIS_LAG_MS = 750;
+const detectionLabelsZh = new Map(Object.entries({
+  person:'人', bicycle:'自行车', car:'汽车', motorcycle:'摩托车', airplane:'飞机', bus:'公交车',
+  train:'火车', truck:'卡车', boat:'船', 'traffic light':'交通灯', 'fire hydrant':'消防栓',
+  'stop sign':'停车标志', 'parking meter':'停车计时器', bench:'长椅', bird:'鸟', cat:'猫', dog:'狗',
+  horse:'马', sheep:'羊', cow:'牛', elephant:'大象', bear:'熊', zebra:'斑马', giraffe:'长颈鹿',
+  backpack:'背包', umbrella:'雨伞', handbag:'手提包', tie:'领带', suitcase:'行李箱', frisbee:'飞盘',
+  skis:'滑雪板', snowboard:'单板滑雪板', 'sports ball':'球', kite:'风筝', 'baseball bat':'棒球棒',
+  'baseball glove':'棒球手套', skateboard:'滑板', surfboard:'冲浪板', 'tennis racket':'网球拍',
+  bottle:'瓶子', 'wine glass':'高脚杯', cup:'杯子', fork:'叉子', knife:'刀', spoon:'勺子', bowl:'碗',
+  banana:'香蕉', apple:'苹果', sandwich:'三明治', orange:'橙子', broccoli:'西兰花', carrot:'胡萝卜',
+  'hot dog':'热狗', pizza:'披萨', donut:'甜甜圈', cake:'蛋糕', chair:'椅子', couch:'沙发',
+  'potted plant':'盆栽', bed:'床', 'dining table':'餐桌', toilet:'马桶', tv:'电视', laptop:'笔记本电脑',
+  mouse:'鼠标', remote:'遥控器', keyboard:'键盘', 'cell phone':'手机', microwave:'微波炉', oven:'烤箱',
+  toaster:'烤面包机', sink:'水槽', refrigerator:'冰箱', book:'书', clock:'钟', vase:'花瓶',
+  scissors:'剪刀', 'teddy bear':'泰迪熊', 'hair drier':'吹风机', toothbrush:'牙刷'
+}));
 const cn = text => /[\u3400-\u9fff]/u.test(text);
 const clean = text => typeof text === 'string' ? text.trim().slice(0, 200) : '';
 const fresh = stamp => stamp && Date.now() - stamp <= MAX_FRAME_AGE;
@@ -43,9 +60,9 @@ function localWorker(mode, data) {
   });
 }
 
-function createTranscriber() {
+function createSpeechWorker(mode, resultField, timeoutMs) {
   let child, pending, idle;
-  const failure = () => new Error('Local transcription worker failed.');
+  const failure = () => new Error('Local speech worker failed.');
 
   function close(error = failure()) {
     clearTimeout(idle);
@@ -60,7 +77,7 @@ function createTranscriber() {
   }
 
   function start() {
-    const process = spawn(localPython(),['-X','utf8',path.join(__dirname,'agent_worker.py'),'stt-session'],
+    const process = spawn(localPython(),['-X','utf8',path.join(__dirname,'agent_worker.py'),mode],
       {windowsHide:true});
     child = process;
     process.stderr.resume();
@@ -72,7 +89,7 @@ function createTranscriber() {
       if (child !== process || !pending) return;
       let result;
       try { result = JSON.parse(line); } catch { return failed(); }
-      if (!result || typeof result.text !== 'string') return failed();
+      if (!result || typeof result[resultField] !== 'string') return failed();
       const reply = pending;
       pending = undefined;
       clearTimeout(reply.timeout);
@@ -86,14 +103,14 @@ function createTranscriber() {
   return {
     close,
     request(data) {
-      // The Agent admits a single transcription at a time.
+      // The Agent admits one request per speech worker at a time.
       clearTimeout(idle);
       const process = child || start();
       return new Promise((resolve,reject) => {
         const timeout = setTimeout(() => {
           close();
           process.kill();
-        },55_000);
+        },timeoutMs);
         pending = {resolve,reject,timeout};
         process.stdin.write(JSON.stringify(data)+'\n');
       });
@@ -101,27 +118,84 @@ function createTranscriber() {
   };
 }
 
-async function ollama(messages, image, format) {
-  const model = image ? process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b' :
+function configuredModel(image) {
+  return image ? process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b-instruct-q4_K_M' :
     process.env.VISIONASSIST_CHAT_MODEL || 'qwen3:4b-instruct-2507-q4_K_M';
+}
+
+const modelKey = name => name.split('/').at(-1).includes(':') ? name : name+':latest';
+
+async function loadedModels() {
+  try {
+    const response = await fetch('http://127.0.0.1:11434/api/ps',{signal:AbortSignal.timeout(900)});
+    if (!response.ok) return null;
+    const {models} = await response.json();
+    if (!Array.isArray(models)) return null;
+    return models.flatMap(({name,size,size_vram:vram}) => {
+      if (typeof name !== 'string' || !Number.isFinite(size) || !Number.isFinite(vram) || size <= 0 || vram < 0) return [];
+      const device = vram === 0 ? 'cpu' : vram >= size ? 'gpu' : 'mixed';
+      return [{name,device,gpu_percent:Math.min(100,Math.round(100*vram/size))}];
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function ollama(messages, image, format, onPlacement, signal) {
+  const model = configuredModel(image);
   if (/cloud/i.test(model)) throw new Error('Choose a local Ollama model.');
   const input = messages.map(message => ({...message}));
   if (image) input.at(-1).images = (Array.isArray(image) ? image : [image]).map(frame => frame.toString('base64'));
-  const response = await fetch('http://127.0.0.1:11434/api/chat', {
+  const timeout = AbortSignal.timeout(55000);
+  const request = fetch('http://127.0.0.1:11434/api/chat', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({model, messages:input, stream:false, think:false, format,
-      keep_alive:image ? 0 : '2m', options:{num_ctx:4096,num_predict:format ? 450 : 140}}),
-    signal:AbortSignal.timeout(55000)
+      keep_alive:image ? 0 : '2m', options:{num_ctx:4096,...(format === INTENT_FORMAT
+        ? {num_predict:75,temperature:0} : {num_predict:format ? 450 : 140})}}),
+    signal:signal ? AbortSignal.any([signal,timeout]) : timeout
   });
-  if (!response.ok) throw new Error('Ollama could not run the requested local model.');
-  const {message} = await response.json();
-  if (!clean(message?.content)) throw new Error('Ollama returned no answer.');
-  return message.content.trim();
+  let sampling = false;
+  let active = true;
+  async function sample() {
+    if (sampling) return;
+    sampling = true;
+    const models = await loadedModels();
+    const placement = models?.find(entry => modelKey(entry.name) === modelKey(model));
+    if (active && placement) onPlacement({...placement,observed_ms:Date.now()});
+    sampling = false;
+  }
+  const timer = onPlacement && setInterval(sample,350);
+  timer?.unref();
+  try {
+    const response = await request;
+    if (!response.ok) throw new Error('Ollama could not run the requested local model.');
+    const {message} = await response.json();
+    if (!clean(message?.content)) throw new Error('Ollama returned no answer.');
+    return message.content.trim();
+  } finally {
+    active = false;
+    clearInterval(timer);
+  }
 }
 
-function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now } = {}) {
-  const transcriber = worker === localWorker ? createTranscriber() : null;
+function createAgent({ filename, worker = localWorker, generate = ollama, embed = embedLocally, now = Date.now,
+  classify = generate === ollama ? (text, previous, signal) => inferIntent(generate,text,previous,signal) : null } = {}) {
+  const transcriber = worker === localWorker ? createSpeechWorker('stt-session','text',55_000) : null;
+  const wakeDetector = worker === localWorker ? createSpeechWorker('wake-session','matched',15_000) : null;
+  const replySpeaker = worker === localWorker ? createSpeechWorker('tts-session','audio',15_000) : null;
+  const alertSpeaker = worker === localWorker ? createSpeechWorker('tts-session','audio',15_000) : null;
   let db;
+  let lastPlacement;
+  const recordPlacement = placement => { lastPlacement = placement; };
+  async function modelRuntime() {
+    const models = await loadedModels();
+    const names = [modelKey(configuredModel(false)),modelKey(configuredModel(true))];
+    return {
+      reachable:models !== null,
+      loaded:models?.filter(entry => names.includes(modelKey(entry.name))) ?? [],
+      last_observed:lastPlacement ?? null
+    };
+  }
   const busy = new Set();
   function database() {
     if (db) return db;
@@ -201,7 +275,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       matches.map(row => row.name).join(isChinese ? '；' : '; '), 'semantic_memory');
   }
 
-  async function startPlan(session, task, isChinese) {
+  async function startPlan(session, task, isChinese, signal) {
     if (!task) return output(isChinese ? '请告诉我你想完成的日常任务。' : 'Tell me which everyday task you want to do.', 'unavailable');
     const messages = [
       {role:'system',content:'You are VisionAssist. Produce 2–6 short, actionable steps for an ordinary low-risk everyday task. ' +
@@ -211,9 +285,10 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     ];
     let steps;
     try {
-      steps = parsePlan(await runResource('model', () => generate(messages,null,PLAN_FORMAT)));
+      steps = parsePlan(await runResource('model', () => generate(messages,null,PLAN_FORMAT,recordPlacement,signal)));
+      signal?.throwIfAborted();
     } catch (error) {
-      if (error.publicMessage) throw error;
+      if (error.publicMessage || signal?.aborted) throw error;
       return output(isChinese ? '暂时无法生成任务步骤。请检查本机 Ollama。' :
         'I could not generate a usable plan. Check the local Ollama model.', 'unavailable');
     }
@@ -278,6 +353,55 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return entries.length ? entries : item.last_seen ? [JSON.parse(item.last_seen)] : [];
   }
 
+  function remove(kind,id) {
+    return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0;
+  }
+
+  function manageMemory(session,text,isChinese) {
+    const kinds = {物品:'item',亲友:'person',人物:'person',习惯:'habit',item:'item',person:'person',habit:'habit',items:'item',people:'person',habits:'habit'};
+    const listing = /^(?:查看|读出|列出|播报)(?:我)?(?:已)?保存的?(物品|亲友|人物|习惯|记忆)[？?。.!]*$/u.exec(text) ||
+      /^(?:list|read) (?:my )?saved (items|people|habits|memory)[.?!]*$/iu.exec(text);
+    if (listing) {
+      const kind = kinds[listing[1].toLowerCase()];
+      const rows = (kind ? records(kind) : ['item','person','habit'].flatMap(value => records(value)));
+      return output(rows.length ? (isChinese ? '已保存 '+rows.length+' 条。' : 'Saved records: '+rows.length+'. ')+
+        rows.slice(0,12).map(row => row.name).join(isChinese ? '、' : ', ') +
+        (rows.length > 12 ? (isChinese ? '。更多记录可按类别查看。' : '. Ask for a category to narrow the list.') : '') :
+        (isChinese ? '还没有保存记录。' : 'There are no saved records.'));
+    }
+    const history = /^(?:查看|读出|播报)(?:物品)?[：:\s]*(.+?)的(?:出现历史|观察记录|历史记录)[？?。.!]*$/u.exec(text) ||
+      /^(?:read|show) (?:the )?history for (.+?)[.?!]*$/iu.exec(text);
+    if (history) {
+      const item = find('item', clean(history[1]));
+      const entries = item && observationHistory(item.id);
+      if (!entries?.length) return output(isChinese ? '没有这件物品的观察记录。' : 'There are no saved observations for that item.','history');
+      const language = isChinese ? 'zh-CN' : 'en-US';
+      const positions = {left:'左侧',center:'中央',right:'右侧'};
+      return output(entries.slice(0,3).map(({time,camera,position}) =>
+        new Date(time).toLocaleString(language)+(isChinese ? '，相机 '+camera+' 画面'+positions[position] :
+          ', Camera '+camera+', '+position)).join(isChinese ? '；' : '; '),'history');
+    }
+    const deleting = /^(?:请|帮我)?(?:删除|移除)(?:(?:已保存的)?(物品|亲友|人物|习惯))?[：:\s]*(.+?)[。！.!]*$/u.exec(text) ||
+      /^delete(?: (item|person|habit))?[:\s]+(.+?)[.!]*$/iu.exec(text);
+    const renaming = /^(?:请|帮我)?把(?:(物品|亲友|人物|习惯)[：:\s]*)?(.+?)(?:改名为|重命名为|改成)(.+?)[。！.!]*$/u.exec(text) ||
+      /^rename(?: (item|person|habit))?[:\s]+(.+?) to (.+?)[.!]*$/iu.exec(text);
+    const request = deleting || renaming;
+    if (!request) return null;
+    const kind = request[1] && kinds[request[1].toLowerCase()];
+    const targets = (kind ? [kind] : ['item','person','habit'])
+      .map(value => find(value,clean(request[2]))).filter(Boolean);
+    if (targets.length > 1) return output(isChinese ? '有多个同名记录，请说清类别。' : 'Several records share this name. Specify the category.','unavailable');
+    if (!targets.length) return output(isChinese ? '没有找到这个名称的已保存记录。' : 'No saved record matches that name.','unavailable');
+    const target = targets[0];
+    const newName = renaming ? clean(renaming[3]) : null;
+    if (renaming && !newName) return output(isChinese ? '请说出新名称。' : 'Say the new name.','unavailable');
+    const kindZh = {item:'物品',person:'亲友',habit:'习惯'}[target.kind];
+    const summary = isChinese
+      ? (deleting ? '确认删除'+kindZh+'「'+target.name+'」？' : '确认把'+kindZh+'「'+target.name+'」改名为「'+newName+'」？')
+      : (deleting ? 'Confirm deleting '+target.kind+' '+target.name+'?' : 'Confirm renaming '+target.name+' to '+newName+'?');
+    return stage(session,{kind:target.kind,name:target.name,recordId:target.id,newName,operation:deleting ? 'delete' : 'rename',summary},isChinese);
+  }
+
   async function runResource(kind, operation) {
     if (busy.has(kind)) {
       throw failure(429, 'The local assistant is busy. Try again shortly.');
@@ -308,8 +432,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
 
   function stage(session, data, isChinese) {
     const pending = {...data, id:randomUUID(), until:Date.now()+60_000};
-    session.pending = pending;
-    const summary = data.observation
+    const summary = data.summary ?? (data.observation
       ? (isChinese ? '请确认这是你的物品：' : 'Confirm this is your item: ') + data.target
       : data.kind === 'person'
       ? (isChinese ? '确认已获本人同意，并登记' : 'Confirm the person consented and enroll ') + data.name
@@ -317,7 +440,8 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       ? (isChinese ? '确认登记相机 ' + data.camera + ' 中的物品：' : 'Confirm the item in Camera ' + data.camera + ': ') + data.name
       : data.suggestion
         ? (isChinese ? '要把这条日常习惯存下来吗？' : 'Save this as a routine? ') + data.name
-        : (isChinese ? '保存：' : 'Save: ') + data.name;
+        : (isChinese ? '保存：' : 'Save: ') + data.name);
+    session.pending = {...pending,summary};
     return output(summary, 'confirmation', {confirmation:{id:pending.id, summary}});
   }
 
@@ -329,6 +453,16 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     if (!accepted) {
       delete session.pending;
       return output(isChinese ? '已取消。' : 'Cancelled.');
+    }
+    if (pending.operation) {
+      const row = find(pending.kind,pending.name);
+      if (row?.id !== pending.recordId) throw failure(409, 'The saved record has changed. Start again.');
+      const deleting = pending.operation === 'delete';
+      if (deleting) remove(pending.kind,row.id);
+      else rename(pending.kind,row.id,pending.newName);
+      delete session.pending;
+      return output(isChinese ? (deleting ? '已删除：'+row.name : '已改名为：'+pending.newName) :
+        (deleting ? 'Deleted: '+row.name : 'Renamed to: '+pending.newName));
     }
     if (pending.observation) {
       const item = find('item',pending.name);
@@ -396,7 +530,7 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return stage(session, {kind,name,label:target.label,feature,camera:side}, isChinese);
   }
 
-  async function identify(session, side, isChinese) {
+  async function identify(session, side, isChinese, target) {
     const slot = session.slots[side];
     const stamp = slot.stamp;
     const frame = copyFrame(slot);
@@ -412,6 +546,12 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     }
     const [best, second] = rank(features[0], people);
     if (best?.score >= 0.55 && (!second || best.score-second.score >= 0.10)) {
+      if (target) {
+        if (best.row.id !== target.id) return output(isChinese ? '当前画面里无法确认' + target.name + '。' :
+          'I cannot confirm ' + target.name + ' is in the current view.', 'camera');
+        return output(isChinese ? '相机 ' + side + ' 画面里的人看起来是' + target.name + '。' :
+          'Someone in Camera ' + side + ' looks like ' + target.name + '.', 'camera');
+      }
       return output(isChinese ? '看起来是' + best.row.name + '。' : 'This looks like ' + best.row.name + '.', 'camera');
     }
     return output(isChinese ? '我无法确认这个人的身份。' : 'I could not confirm who this is.', 'camera');
@@ -467,22 +607,56 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return output([prefix,description].filter(Boolean).join(' '), 'history', {observation:last});
   }
 
-  async function chat(session, input) {
+  async function chat(session, input, signal, voiceFrames = {}, route = null) {
     const text = clean(input.text);
     const isChinese = cn(text);
     if (!text) throw failure(400, 'Enter a question.');
-    const side = input.camera_id === 'B' ? 'B' : 'A';
-    const twoCameras = input.camera_id === 'both';
+    if (!input.mode && isMemoryOptOut(text)) {
+      delete session.pending;
+      delete session.itemEnrollment;
+      return output(isChinese ? '好的，已取消保存。' : 'Okay, I won’t save that.', 'assistant');
+    }
+    const mentioned = new Set(Array.from(text.normalize('NFKC')
+      .matchAll(/(?:相机|摄像头|\bcamera)\s*([AB])(?![a-z0-9])(?:\s*(?:与|和|及|and|&)\s*([AB])(?![a-z0-9]))?/giu),
+      match => match.slice(1).filter(Boolean).map(id => id.toUpperCase())).flat());
+    const comparison = route?.intent === 'compare_cameras' || /两(?:张|路|个).*(?:不同|区别|差别)|比较.*(?:画面|相机)|(?:compare|difference).{0,32}(?:cameras?|views?|feeds?)/iu.test(text);
+    const requested = comparison ? 'both' : mentioned.size === 1 ? [...mentioned][0] : input.camera_id;
+    const side = requested === 'B' ? 'B' : 'A';
+    const twoCameras = requested === 'both';
     const oneCamera = () => output(isChinese ? '请先选定相机 A 或 B。' : 'Select Camera A or B first.', 'unavailable');
+    const personCamera = () => {
+      if (!twoCameras) return side;
+      const live = ['A','B'].filter(id => copyFrame(session.slots[id]));
+      return live.length === 1 ? live[0] : null;
+    };
     const itemCamera = () => {
       if (!twoCameras) return side;
       const live = ['A','B'].filter(id => detections(session.slots[id]));
       return live.length === 1 ? live[0] : null;
     };
+    const continueItem = /^(?:(?:我)?(?:已经|刚)?(?:把(?:它|杯子|水杯))?(?:移|挪|放|换)到(?:了)?(?:画面)?(?:的)?(?:中央|中间)(?:了)?|(?:好了|放好了|再试一次|继续登记)|continue registration|i (?:moved|put) it (?:in|to) the cent(?:er|re))[。.!！]?$/iu.test(text);
+    if (session.itemEnrollment?.until < Date.now()) delete session.itemEnrollment;
+    if (/^(?:取消(?:登记)?|cancel(?: enrollment)?)[.!。！]?$/iu.test(text) && session.itemEnrollment && !session.pending) {
+      delete session.itemEnrollment;
+      return output(isChinese ? '已取消物品登记。' : 'Item registration cancelled.');
+    }
     if (/^([确確][认認](?:保存)?|取消|yes|confirm|cancel|no)[.!。！]?$/iu.test(text) && session.pending) {
       return confirm(session, session.pending.id, /^(?:[确確][认認]|yes|confirm)/iu.test(text), isChinese);
     }
+    if (session.pending?.kind === 'item' && continueItem) {
+      const {id,summary,until} = session.pending;
+      if (until >= Date.now()) {
+        return output(summary,'confirmation',{confirmation:{id,summary}});
+      }
+    }
     delete session.pending;
+    if (!input.mode) {
+      const management = manageMemory(session,text,isChinese);
+      if (management) {
+        delete session.itemEnrollment;
+        return management;
+      }
+    }
     const introduction = text.normalize('NFKC').replace(/[\s,.!?，。！？]+/gu,'');
     if (!input.mode && /^(?:(?:你好|您好)?(?:请|請)?(?:你是[谁誰]|你叫(?:什么|什麼)(?:名字)?|你能做(?:什么|什麼)|(?:用一句(?:话|話))?(?:自我介绍|自我介紹|介绍一下自己|介紹一下自己))|whoareyou|what['’]?syourname|whatcanyoudo|introduceyourself)$/iu.test(introduction)) {
       return output(isChinese
@@ -490,25 +664,50 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
         : 'I’m VisionAssist, your local visual assistant. I can answer questions, describe camera views, and recall belongings, familiar people, and habits you choose to save.', 'assistant');
     }
     const person = /^(?:enroll person\s+|登记亲友[：:\s]*)(.+)$/iu.exec(text);
-    if (person) {
-      if (twoCameras) return oneCamera();
-      const [name,relationship] = person[1].split(/[,，]/u,2).map(clean);
-      return enroll(session,side,'person',name,isChinese,relationship);
+    const family = /^(?:(?:请)?[记記]住[，,:：\s]*)?这(?:个|位)?(?:是)?我(?:的)?(哥哥|弟弟|姐姐|妹妹|爸爸|妈妈|父亲|母亲|爷爷|奶奶|外公|外婆|丈夫|妻子|儿子|女儿|男朋友|女朋友|朋友|同学|同事)([吗嘛么])?[。.!！?？]*$/u.exec(text);
+    if (family && (family[2] || /[?？]$/u.test(text))) {
+      const target = find('person',family[1]);
+      if (!target) return output('还没有登记这位亲友。','unavailable');
+      const camera = personCamera();
+      return camera ? identify(session,camera,true,target) : oneCamera();
+    }
+    if (person || family) {
+      delete session.itemEnrollment;
+      const camera = personCamera();
+      if (!camera) return oneCamera();
+      const [name,relationship] = person ? person[1].split(/[,，]/u,2).map(clean) : [family[1]];
+      return enroll(session,camera,'person',name,isChinese,relationship);
     }
     const itemText = text.replace(/^(?:请)?[记記]住[，,:：\s]*/u,'');
+    const ownership = /^(?:这(?:个|只|把)?是我的(.+?)(?:吗|嘛|么)|哪个(.+?)是我的)[。.!！?？]*$/u.exec(text);
+    if (ownership) {
+      const name = clean(ownership[1] || ownership[2]);
+      const target = find('item',name);
+      if (!target) return output('还没有登记名为「'+name+'」的物品。','unavailable');
+      const camera = itemCamera();
+      return camera ? locate(session,camera,target,true) : oneCamera();
+    }
     const item = /^(?:register item\s+|登记物品[：:\s]*)(.+)$/iu.exec(itemText) ||
       /^(?:这个|这只|这把|这一)([^，,。.!！?？]+?)是我的[。.!！]?$/u.exec(itemText) ||
-      /^这是我的([^，,。.!！?？]+?)(?:[，,。]\s*(?:以后|下次)(?:再)?(?:帮我|提醒我)找(?:它)?)?[。.!！]?$/u.exec(itemText);
-    if (item) {
-      const camera = itemCamera();
-      if (!camera && !['A','B'].some(id => detections(session.slots[id]))) return output(isChinese
-        ? '请把物品对准相机，等画面出现检测结果后再登记。'
-        : 'Point a camera at the item and wait for detections before registering it.', 'unavailable');
-      return camera ? enroll(session,camera,'item',clean(item[1]),isChinese) : oneCamera();
+      /^这(?:个|只|把)?是我的([^，,。.!！?？]+?)(?<![吗嘛么呢])(?:[，,。]\s*(?:以后|下次)(?:再)?(?:帮我|提醒我)找(?:它)?)?[。.!！]?$/u.exec(itemText);
+    if (item || (continueItem && session.itemEnrollment)) {
+      const task = item ? {name:clean(item[1]),camera:itemCamera(),until:Date.now()+60_000} : session.itemEnrollment;
+      if (mentioned.size === 1 || !task.camera) task.camera = itemCamera();
+      session.itemEnrollment = task;
+      if (!task.camera && ['A','B'].some(id => detections(session.slots[id]))) return oneCamera();
+      const result = task.camera ? await enroll(session,task.camera,'item',task.name,isChinese) :
+        output(isChinese ? '请把物品对准相机，等画面出现检测结果后再登记。'
+          : 'Point a camera at the item and wait for detections before registering it.', 'unavailable');
+      if (result.confirmation) {
+        delete session.itemEnrollment;
+        return result;
+      }
+      return {...result,reply_text: isChinese ? '正在登记' + task.name + '。' + result.reply_text +
+        ' 准备好后说「继续登记」。' : 'Registering ' + task.name + '. ' + result.reply_text + ' Say “continue registration” when ready.'};
     }
     if (!input.mode) {
       const task = /^(?:plan(?: a task)?(?:[：:\s]+|$)|(?:帮我)?(?:制定|规划|規劃)(?:一个|一個)?(?:任务)?计划[：:\s]*|一步步教我[：:\s]*)(.*)$/iu.exec(text);
-      if (task) return startPlan(session,clean(task[1]),isChinese);
+      if (task) return startPlan(session,clean(task[1]),isChinese,signal);
       const step = text.replace(/[.!。！]+$/u,'');
       if (/^(?:next step|下一步)$/iu.test(step)) return advancePlan(session,'next',isChinese);
       if (/^(?:repeat (?:this )?step|重复(?:这一步|本步))$/iu.test(step)) return advancePlan(session,'repeat',isChinese);
@@ -517,12 +716,18 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       if (memory) return recall(clean(memory[1]),isChinese);
     }
     const habit = /^(?:[记記]住[，,:：\s]*|remember[,:\s]+)(.+)$/iu.exec(text);
-    if (habit) return stage(session,{kind:'habit',name:clean(habit[1])},isChinese);
+    if (habit && (route?.intent === 'remember_habit' || !/^[这那](?:个|位|只|把|是|件)/u.test(clean(habit[1])))) {
+      delete session.itemEnrollment;
+      return stage(session,{kind:'habit',name:clean(habit[1])},isChinese);
+    }
     const routine = !input.mode && routineStatement(text);
     if (routine) return suggestHabit(session,routine,isChinese);
     const observation = !input.mode && routineObservation(text);
     if (observation) return observeRoutine(session,observation,isChinese);
-    if (/这是谁|那是谁|who is (?:this|that|in (?:front|the frame))/iu.test(text)) return twoCameras ? oneCamera() : identify(session,side,isChinese);
+    if (/这是谁|那是谁|(?:面前|前面|前方|眼前|画面[里中])(?:的(?:人|那个人)?)?是谁|who is (?:this|that|in (?:front|the frame))/iu.test(text)) {
+      const camera = personCamera();
+      return camera ? identify(session,camera,isChinese) : oneCamera();
+    }
     const knownPerson = /^(?:who is\s+(.+?)|(.+?)是谁)[?？。!.！]*$/iu.exec(text);
     if (knownPerson) {
       const row = find('person', knownPerson[1] || knownPerson[2]);
@@ -531,6 +736,14 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     if (/登记了谁|亲友有谁|who have i enrolled|saved people/iu.test(text)) {
       const people = records('person').map(row => row.label ? row.name+' · '+row.label : row.name);
       return output(people.length ? people.join(isChinese ? '；' : '. ') : isChinese ? '还没有登记亲友。' : 'No people are enrolled.');
+    }
+    const personLookup = /^(?:(?:请)?(?:帮我)?找(?:一下|找)?(?:我的?)?(.+?)|(?:我的?)?(.+?)(?:在哪里|在哪儿|在哪)|(?:where is|find)\s+(.+?))[?？。!.！]*$/iu.exec(text);
+    if (personLookup) {
+      const target = find('person', personLookup[1] || personLookup[2] || personLookup[3]);
+      if (target) {
+        const camera = personCamera();
+        return camera ? identify(session,camera,isChinese,target) : oneCamera();
+      }
     }
     const historyOnly = /上次|最后一次|last seen|last (?:see|saw)/iu.test(text);
     if (historyOnly || /where|哪儿|哪里|在哪|找(?:一下|找)?/iu.test(text)) {
@@ -559,6 +772,44 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
         'I cannot determine whether it is safe to proceed. You can ask what was detected in the frame.', 'unavailable');
     }
     const slot = session.slots[side];
+    const cameras = twoCameras ? ['A','B'] : [side];
+    const liveCameras = cameras.filter(id => copyFrame(session.slots[id]));
+    const cameraLabel = id => (isChinese ? '相机 ' : 'Camera ') + id;
+    const cameraStatus = id => {
+      const current = session.slots[id];
+      if (copyFrame(current)) return cameraLabel(id) + (isChinese ? ' 正在接收画面。' : ' is receiving video.');
+      return cameraLabel(id) + (isChinese
+        ? (current?.phone ? ' 已配对，暂时收不到画面。' : ' 未连接。')
+        : (current?.phone ? ' is paired but has no recent video.' : ' is offline.'));
+    };
+    if (!input.mode && /^(?:你)?(?:只)?(?:用|有)(?:一台|一个)相机(?:也)?(?:能看吗|可以看吗|不能看吗)[？?。.!]*$/u.test(text)) {
+      return output('可以用一台相机。'+cameras.map(cameraStatus).join(''), liveCameras.length ? 'camera' : 'unavailable');
+    }
+    if (!input.mode && /^(?:(?:你)?(?:现在)?(?:(?:还能|能|可以)?看(?:不|得)?到|看不见)(?:相机)?(?:画面|视频)(?:吗|么|了)?|(?:相机(?:\s*[AB])?|画面)(?:断了|在线吗|有画面吗|连上了吗)|can(?:not|'t)? you see (?:the )?(?:camera|video|feed)|is (?:the )?camera (?:connected|online))[？?。.!]*$/iu.test(text)) {
+      return output(cameras.map(cameraStatus).join(isChinese ? '' : ' '),liveCameras.length ? 'camera' : 'unavailable');
+    }
+    const countPeople = route?.intent === 'people_count' || /(?:画面[里中]|附近|周围|旁边|面前|前面|前方|身边)(?:一共|总共)?有(?:几|多少)(?:个|位)?人|^(?:你)?(?:一共|总共)?(?:检测到|看到了?|有)(?:几|多少)(?:个|位)?人|\bhow many people (?:are there|are in|can you see|did you detect)\b/iu.test(text);
+    const asksPeople = route?.intent === 'people_presence' || /(?:附近|周围|旁边|面前|前面|前方|身边|画面[里中]).{0,4}(?:有没有人|有人吗|有人[?？]|有人么)|\b(?:is (?:there )?(?:anyone|someone)|are there (?:any )?people).{0,24}(?:near(?:by)?|around|ahead|in (?:the )?(?:frame|view)|in front)/iu.test(text);
+    if (!input.mode && (countPeople || asksPeople)) {
+      let available = false;
+      const reports = cameras.map(id => {
+        if (!liveCameras.includes(id)) return cameraStatus(id);
+        const scene = detections(session.slots[id]);
+        if (!scene) return cameraLabel(id) + (isChinese ? ' 有画面，正在等待物体检测。' : ' has video and is waiting for detections.');
+        available = true;
+        const people = scene.objects.filter(object => object.label === 'person' && object.confidence >= .5);
+        if (countPeople) {
+          const count = new Set(people.map(object => object.track_id ?? object)).size;
+          return cameraLabel(id) + (isChinese ? ' 的当前画面检测到 ' + count + ' 人。' :
+            ' detected ' + count + (count === 1 ? ' person' : ' people') + ' in the current frame.');
+        }
+        const found = people.length > 0;
+        return cameraLabel(id) + (isChinese
+          ? (found ? ' 的画面里检测到有人。' : ' 的当前画面里没有检测到人。')
+          : (found ? ' detected a person in view.' : ' did not detect anyone in the current view.'));
+      });
+      return output(reports.join(isChinese ? '' : ' '),available ? 'yolo' : 'unavailable');
+    }
     const depthQuestion = /(?:哪个|哪些|哪一个|谁|什么东西)(?:物体|东西|人)?(?:看起来|离我|距离我)?(?:比较|更|最|较)?(?:近|远)|\b(?:which|what)(?: object| objects| one| person)? (?:is|are|looks?|seems?) (?:the )?(?:closer|closest|nearer|nearest|farther|furthest|farthest|further)\b/iu;
     if (input.mode !== 'image' && depthQuestion.test(text)) {
       if (twoCameras) return oneCamera();
@@ -567,33 +818,100 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       const far = /远|\b(?:farther|furthest|farthest|further)\b/iu.test(text);
       const matches = scene.objects.filter(o => o.relative_depth === (far ? 'far' : 'near'));
       if (!matches.length) return output(isChinese ? '这一帧无法判断相对远近。' : 'I cannot tell the relative depth in this frame.', 'yolo');
-      const names = matches.map(o => isChinese ? o.label + '（' + {left:'左侧',center:'中央',right:'右侧'}[o.position] + '）' : o.label + ' (' + o.position + ')');
+      const names = matches.map(o => isChinese ? (detectionLabelsZh.get(o.label) ?? o.label) + '在画面' +
+        {left:'左侧',center:'中央',right:'右侧'}[o.position] : o.label + ' (' + o.position + ')');
       return output(isChinese ? '相机 ' + side + ' 中看起来较' + (far ? '远' : '近') + '的有：' + names.join('、') + '。' :
         'In Camera ' + side + ', these appear ' + (far ? 'farther' : 'closer') + ': ' + names.join(', ') + '.', 'yolo');
     }
-    const wantsImage = input.mode === 'image' || /什么颜色|哪种颜色|看图|画面细节|what colou?r|look at (?:the|this) (?:picture|frame)/iu.test(text) ||
-      (twoCameras && /画面|相机|有什么|看到|前方|周围|camera|compare|differences|in front|surroundings|what (?:can|do) you see/iu.test(text));
-    if (input.mode === 'scene' || (!wantsImage && /前面有什么|前方|周围|看到什么|in front|surroundings|what (?:can|do) you see/iu.test(text))) {
-      const scene = detections(slot);
-      if (!scene) return output(isChinese ? '当前没有可用的 YOLO 检测。' : 'There are no recent YOLO detections.', 'unavailable');
-      const visible = [...new Set(scene.objects.filter(x => x.confidence >= 0.5).map(x => x.label +
-        (isChinese ? '（' + {left:'左侧',center:'中央',right:'右侧'}[x.position] + '）' : ' (' + x.position + ')')))].slice(0,8);
-      return output(visible.length ? (isChinese ? '相机 ' + side + ' 检测到：' : 'Camera ' + side + ' detects: ') + visible.join(isChinese ? '、' : ', ') :
-        isChinese ? '这一帧没有检测到明确的物体。' : 'No confident objects were detected in this frame.', 'yolo');
+    const visualDetail = /什么颜色|哪种颜色|看图|画面细节|(?:这|那)(?:个|只|把)?[^，。！？]{0,12}(?:是|长)?什么样(?:子|的)?|(?:有(?:没有)?|没(?:有)?)(?:什么|一?点)?(?:花纹|条纹|图案)|(?:我|他|她|这(?:个|位)人|画面里的人).{0,12}(?:戴没戴|没戴|戴[了着]?|带[了着]?)(?:副)?眼镜|what colou?r|look at (?:the|this) (?:picture|frame)|\b(?:am i|is (?:he|she|that person)) wearing glasses|\bdoes (?:my|this|that|the) .{1,30} have (?:a pattern|stripes)\b/iu;
+    const readText = route?.intent === 'read_text' || /写[的着]?(?:是)?什么(?:字|文字|内容)|写[的着]?什[么麼]|(?:上面|标签|瓶身|杯子上|牌子上).{0,10}写[的着]?(?:是)?什么|上(?:面|头)(?:的)?(?:字|文字).{0,6}写|(?:读|念|识别)(?:一下|出|一读)?(?:这|上面|标签|瓶身|画面|字|文字)|\b(?:what (?:does|is written on) (?:this|that|the (?:label|sign|bottle|package))|read (?:the |this )?(?:text|label|sign|writing))\b/iu.test(text);
+    const wantsImage = input.mode === 'image' || route?.intent === 'visual_detail' || comparison || readText || visualDetail.test(text);
+    const sceneQuestion = /(?:面前|前面|眼前|前方|周围|附近|身边|外[面边](?:[里中])?|画面[里中])(?:都)?(?:有(?:些)?|是)(?:什么|啥|哪些|哪几)|(?:看到|看见)(?:了|过)?什么|(?:播报|描述|看看|说说)(?:一下)?(?:我)?(?:面前|前面|眼前|周围|身边|附近)(?:的)?(?:(?:场景|环境|情况|物体|东西)|[吧。！!？?]*$)|in front|surroundings|what (?:can|do) you see/iu;
+    if (input.mode === 'scene' || route?.intent === 'scene' || (!wantsImage && sceneQuestion.test(text))) {
+      const reports = cameras.map(id => {
+        const scene = detections(session.slots[id]);
+        const prefix = (isChinese ? '相机 ' : 'Camera ') + id;
+        if (!scene) return {text:prefix + (isChinese ? ' 暂无新检测。' : ' has no recent detections.')};
+        const visible = [...new Set(scene.objects.filter(x => x.confidence >= 0.5).map(x => isChinese
+          ? {left:'左侧',center:'中央',right:'右侧'}[x.position] + '有' + (detectionLabelsZh.get(x.label) ?? x.label)
+          : x.label + ' (' + x.position + ')'))].slice(0,twoCameras ? 4 : 8);
+        const description = visible.length
+          ? (isChinese ? ' 画面' : ' detects ') + visible.join(isChinese ? '，' : ', ')
+          : (isChinese ? ' 当前画面没有检测到明确的物体' : ' has no confident detections');
+        return {available:true,text:prefix + description + (isChinese ? '。' : '.')};
+      });
+      return output(reports.map(report => report.text).join(isChinese ? '' : ' '),
+        reports.some(report => report.available) ? 'yolo' : 'unavailable');
     }
-    let frame = wantsImage ? copyFrame(slot) : null;
-    if (wantsImage && twoCameras) {
-      const missing = ['A','B'].filter(id => !copyFrame(session.slots[id]));
-      if (missing.length) {
-        return output(isChinese ? '相机 ' + missing.join('、') + ' 当前没有新画面。' :
-          'Camera ' + missing.join(' and ') + ' has no recent frame.', 'unavailable');
+    const previousVisual = session.lastVisualQuestion?.until > now() ? session.lastVisualQuestion.text : '';
+    if (!route && !input.mode && !wantsImage && classify) {
+      let inferred;
+      try {
+        const timeout = AbortSignal.timeout(6500);
+        inferred = await runResource('model', () => classify(text,previousVisual,
+          signal ? AbortSignal.any([signal,timeout]) : timeout));
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (error?.publicMessage) throw error;
       }
-      const {A,B} = session.slots;
+      signal?.throwIfAborted();
+      if (['scene','people_count','people_presence','visual_detail','read_text','compare_cameras'].includes(inferred?.intent)) {
+        return chat(session,input,signal,voiceFrames,inferred);
+      }
+      if (inferred?.intent === 'clarify') return output(isChinese
+        ? '你想让我看画面、读字，还是查已保存的记录？'
+        : 'Should I check the camera, read text, or look up a saved record?', 'assistant');
+      if (inferred?.intent === 'search_memory') return recall(text,isChinese);
+      if (inferred?.intent === 'list_habits') {
+        const habits = records('habit').map(row => row.name);
+        return output(habits.length ? habits.join(isChinese ? '；' : '. ') :
+          isChinese ? '还没有保存习惯。' : 'No habits are saved yet.');
+      }
+      if (inferred?.intent === 'identify_person') {
+        const camera = personCamera();
+        return camera ? identify(session,camera,isChinese) : oneCamera();
+      }
+      const name = clean(inferred?.target);
+      if (name && text.toLowerCase().includes(name.toLowerCase())) {
+        if (['find_item','find_person'].includes(inferred.intent)) {
+          const person = inferred.intent === 'find_person';
+          const target = find(person ? 'person' : 'item',name);
+          if (!target) return output(isChinese ? '没有找到已登记的「'+name+'」。' :
+            'I found no registration for '+name+'.','unavailable');
+          const camera = person ? personCamera() : itemCamera();
+          if (!camera) return !person && !['A','B'].some(id => detections(session.slots[id]))
+            ? lastSeen(target,isChinese) : oneCamera();
+          return person ? identify(session,camera,isChinese,target) : locate(session,camera,target,isChinese);
+        }
+        if (mayStageMemory(text) && ['register_item','register_person','remember_habit'].includes(inferred.intent)) {
+          const prefix = {register_item:'register item ',register_person:'enroll person ',remember_habit:'remember '}[inferred.intent];
+          return chat(session,{...input,text:prefix+name,camera_id:requested},signal,voiceFrames,inferred);
+        }
+      }
+    }
+    const imageSample = id => voiceFrames[id]?.latest ?? (copyFrame(session.slots[id]) ? session.slots[id] : null);
+    const imageCameras = wantsImage ? cameras.filter(id => imageSample(id)) : [];
+    const imageCamera = imageCameras[0];
+    let frame = imageCamera ? imageSample(imageCamera).frame : null;
+    let temporal = false;
+    if (wantsImage && twoCameras && (comparison || input.mode === 'image' || imageCameras.length === 2)) {
+      const missing = cameras.filter(id => !imageCameras.includes(id));
+      if (missing.length) return output(isChinese ? '相机 ' + missing.join('、') + ' 当前没有新画面。' :
+        'Camera ' + missing.join(' and ') + ' has no recent frame.', 'unavailable');
+      const A = imageSample('A');
+      const B = imageSample('B');
       if (Math.abs(A.stamp-B.stamp) > 1500) return output(isChinese
         ? '两路画面时间相差较大。请等两台相机恢复实时后再试。' : 'The camera frames are too far apart in time. Try again when both feeds are live.', 'unavailable');
       frame = [A.frame,B.frame];
+    } else if (frame && voiceFrames[imageCamera]) {
+      const {first,spoken} = voiceFrames[imageCamera];
+      const earlier = spoken && spoken.frame !== frame ? spoken : first;
+      if (earlier && earlier.frame !== frame) {
+        frame = [earlier.frame,frame];
+        temporal = true;
+      }
     }
-    if (wantsImage && !frame) return output(isChinese ? '相机当前没有画面。' : 'The camera has no recent frame.', 'unavailable');
+    if (wantsImage && !frame) return output(cameras.map(cameraStatus).join(isChinese ? '' : ' '), 'unavailable');
     const concise = preferences().concise;
     const persona = 'Your product identity is VisionAssist, an on-device visual and memory assistant for people with low vision. ' +
       'Speak calmly and naturally. Reply in the user’s language; use simplified Chinese for Chinese replies. ' +
@@ -608,26 +926,50 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
         (concise ? '简短作答：' : '用最多四句话作答：')
       : 'The first image is Camera A and the second image is Camera B. Label each and compare only visible details. ' +
         'Never identify people or provide walking directions. ' + (concise ? 'Answer briefly: ' : 'Answer in up to four short sentences: ');
-    const message = {role:'user',content:Array.isArray(frame) ? cameraPrompt + text : text};
+    const readingPrompt = isChinese
+      ? '请逐字抄录当前照片中与问题相关、能清楚辨认的文字。保留原文语言和拼写。优先读目标上最大、最清晰的字。模糊或被遮挡的部分省略。完全看不清时回答「我看不清上面的字」。不要依据物体类别猜测字样。问题：'
+      : 'Transcribe only clearly legible text on the requested object in the current image. Preserve its original language and spelling. Prioritize the largest print. Omit unreadable or hidden text. If none is legible, say so. Do not guess from the object type. Question: ';
+    const temporalPrompt = isChinese
+      ? '两张都是本轮相机 '+imageCamera+' 的画面，第一张较早，第二张较晚。优先描述第二张。目标只在第一张清楚出现时，说明它只在较早画面可见。不要把两张图里不同的人或物当成同一个。'
+      : 'Both images are from Camera '+imageCamera+' during this question, earlier first. Prefer the latest. If visible only in the earlier image, say so. Do not merge different objects or people.';
+    const followUp = frame && route && previousVisual ?
+      'Earlier user question for reference only. Draw all visual facts from the current images. '+JSON.stringify(previousVisual)+'\n' : '';
+    const message = {role:'user',content:(temporal ? temporalPrompt : Array.isArray(frame) ? cameraPrompt : '') + followUp + (readText ? readingPrompt : '') + text};
     const messages = Array.isArray(frame) ? [message] : [system,...history,message];
     let reply;
-    try { reply = await runResource('model', () => generate(messages,frame)); }
-    catch (error) {
-      if (error.publicMessage) throw error;
+    try {
+      reply = await runResource('model', () => generate(messages,frame,undefined,recordPlacement,signal));
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (error.publicMessage || signal?.aborted) throw error;
       throw failure(503, 'Local Ollama model unavailable. Check that Ollama is running and the model is installed.');
     }
-    if (!frame) session.dialog = [...history,message,{role:'assistant',content:reply}].slice(-16);
+    if (frame) session.lastVisualQuestion = {text,until:now()+45_000};
+    else {
+      delete session.lastVisualQuestion;
+      session.dialog = [...history,message,{role:'assistant',content:reply}].slice(-16);
+    }
+    if (frame && twoCameras && imageCameras.length === 1) {
+      reply = (isChinese ? '这轮只有' + cameraLabel(imageCamera) + '的画面。' :
+        'Only ' + cameraLabel(imageCamera) + ' contributed video to this question. ') + reply;
+    }
+    if (frame && imageCameras.some(id => !liveCameras.includes(id))) {
+      reply = (isChinese ? '有相机暂时断流，以下根据本轮已收到的画面。' :
+        'A camera lost video. This uses images received during this question. ') + reply;
+    }
     return output(reply,frame ? 'image' : 'llm');
   }
 
-  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory,
-    close() { transcriber?.close(); db?.close(); },
-    remove(kind,id) { return database().prepare('DELETE FROM memory WHERE kind=? AND id=?').run(kind,id).changes > 0; },
+  return { chat, enroll, confirm, records, rename, preferences, savePreferences, cameraReminder, observationHistory, modelRuntime,
+    close() { transcriber?.close(); wakeDetector?.close(); replySpeaker?.close(); alertSpeaker?.close(); db?.close(); },
+    remove,
     async synthesize(text, priority) {
       if (typeof text !== 'string' || !text.trim() || text.length > 650) throw failure(400, 'Give a short reply to speak.');
       try {
+        const payload = {text,language:cn(text) ? 'zh' : 'en'};
+        const speaker = priority ? alertSpeaker : replySpeaker;
         const {audio} = await runResource(priority ? 'alert-tts' : 'tts',
-          () => worker('tts',{text,language:cn(text) ? 'zh' : 'en'}));
+          () => speaker ? speaker.request(payload) : worker('tts',payload));
         return Buffer.from(audio,'base64');
       } catch (error) {
         if (error.publicMessage) throw error;
@@ -638,10 +980,26 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       const {document} = await runResource('export', () => worker('docx',{messages}));
       return Buffer.from(document,'base64');
     },
+    async detectWake(bytes, language, purpose = null) {
+      try {
+        const payload = {audio:bytes.toString('base64'),language,purpose};
+        const {matched} = await runResource('wake',
+          () => wakeDetector ? wakeDetector.request(payload) : worker('wake',payload));
+        return {matched:matched === 'yes'};
+      } catch (error) {
+        if (error.publicMessage) throw error;
+        throw failure(503, 'Local wake word unavailable. Check Vosk and its local model, or tap the microphone.');
+      }
+    },
     async transcribe(bytes, language) {
       try {
         const payload = {audio:bytes.toString('base64'),language};
-        return await runResource('speech', () => transcriber ? transcriber.request(payload) : worker('stt',payload));
+        const result = await runResource('speech', () => transcriber ? transcriber.request(payload) : worker('stt',payload));
+        const text = result.text.normalize('NFKC').trim();
+        if (/^(?:(?:字[幕模]|captions?|subtitles?)\s*(?:by\s+|by)\s*[:：]?\s*[\p{L}\p{M}\p{N} .·_-]{1,24}|[嗯呃额啊唔]{1,3})[。.!！]*$/iu.test(text)) {
+          return {text:'',ignored:true};
+        }
+        return result;
       } catch (error) {
         if (error.publicMessage) throw error;
         throw failure(503, 'Local transcription unavailable. Check faster-whisper and its downloaded model.');
