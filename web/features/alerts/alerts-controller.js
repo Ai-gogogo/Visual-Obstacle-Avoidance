@@ -17,12 +17,18 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
   let mode = 'desk';
   let modeSince = 0;
   let stereoFeedsOnline = false;
+  // Static obstacles come from Camera A detection alone; crossings and road edges need the stereo pair.
+  let cameraADetecting = false;
   modeControl.value = mode;
 
   function updateAudioStatus(cameras) {
-    stereoFeedsOnline = cameras?.A === 'detecting' && receivingCamera(cameras?.B);
-    if (!stereoFeedsOnline) cancelSpokenAlert();
+    const hadStereo = stereoFeedsOnline;
+    cameraADetecting = cameras?.A === 'detecting';
+    stereoFeedsOnline = cameraADetecting && receivingCamera(cameras?.B);
+    if (!cameraADetecting || (hadStereo && !stereoFeedsOnline)) cancelSpokenAlert();
     const text = mode === 'desk' ? 'Automatic alert speech is off.' :
+      mode === 'walking' && cameraADetecting && !stereoFeedsOnline ?
+        'Walking alerts selected. Camera B is offline, so only obstacles in the walking path can trigger speech.' :
       !stereoFeedsOnline ? 'Spoken alerts paused. Waiting for both camera feeds and analysis on Camera A.' :
         mode === 'stationary' ? 'Stationary monitoring selected. Only verified nearby movement can trigger speech.' :
           'Walking alerts selected. Obstacles in the walking path, timely stereo crossings and measured road edges can trigger speech.';
@@ -44,7 +50,8 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
 
   function handleSpokenAlerts(alerts) {
     const selectedMode = mode;
-    const canSpeak = alert => selectedMode !== 'desk' && mode === selectedMode && stereoFeedsOnline &&
+    const canSpeak = alert => selectedMode !== 'desk' && mode === selectedMode &&
+      (alert.kind === 'obstacle' ? cameraADetecting : stereoFeedsOnline) &&
       alert.stamp >= modeSince &&
       Date.now() < Math.min(alert.expires ?? Infinity, alert.stamp + 1500);
     const crossing = alerts.filter(alert => alert.kind === 'path_intrusion' && canSpeak(alert) &&
