@@ -1,0 +1,50 @@
+{
+  "recording": ".visionassist/video-analysis/turn-20261120-175451",
+  "calibration": "cv/results/stereo-calibration-2026-11-20/webrtc-480x640.json",
+  "first_pair": 0,
+  "last_pair": 36,
+  "max_skew_bound_ms": 52.0,
+  "predefined_roi": false,
+  "algorithms": {
+    "StereoSGBM": {
+      "passed": 0,
+      "total": 37,
+      "reasons": {
+        "low_inlier_ratio": 37
+      },
+      "holdout_frames": 37,
+      "holdout_p50_m": 2.9200241413658996,
+      "holdout_p90_m": 3.6827424878807298,
+      "cup_frames_with_depth": 0,
+      "cup_height_frames": 0,
+      "cup_height_median_m": null,
+      "cup_height_std_m": null,
+      "cup_shared_frames": 0,
+      "cup_shared_height_std_m": null,
+      "ransac_mean_ms": 5.515792810812756,
+      "ransac_p95_ms": 7.070333799492798,
+      "depth_mean_ms": 48.48664305422603
+    },
+    "RAFT-Stereo": {
+      "passed": 22,
+      "total": 37,
+      "reasons": {
+        "ok": 22,
+        "holdout_p90_exceeded": 11,
+        "low_inlier_ratio": 4
+      },
+      "holdout_frames": 37,
+      "holdout_p50_m": 0.015304090939160088,
+      "holdout_p90_m": 0.5650274891537044,
+      "cup_frames_with_depth": 0,
+      "cup_height_frames": 0,
+      "cup_height_median_m": null,
+      "cup_height_std_m": null,
+      "cup_shared_frames": 0,
+      "cup_shared_height_std_m": null,
+      "ransac_mean_ms": 5.168572027016765,
+      "ransac_p95_ms": 5.855374399470745,
+      "depth_mean_ms": 626.9217410809762
+    }
+  }
+}

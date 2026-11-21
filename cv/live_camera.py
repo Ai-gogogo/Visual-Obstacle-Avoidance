@@ -21,9 +21,10 @@ from PIL import Image, ImageOps
 
 from depth_filters import spatial_depth, StaticMedian
 from detect_image import DEFAULT_WEIGHTS, detect
+from geometry import deproject
 from item_features import item_features
 from obstacles import PlaneObstacles, is_obstacle_candidate, unclassified_obstacles
-from path_intrusion import Corridor, IntrusionPredictor, background_mask, deproject
+from path_intrusion import Corridor, IntrusionPredictor, background_mask
 from plane_ransac import fit_support_plane, object_height_m
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge

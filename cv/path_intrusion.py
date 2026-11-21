@@ -6,6 +6,7 @@ import math
 import cv2
 import numpy as np
 
+from geometry import deproject
 from risk import MIN_CONFIDENCE
 from tracking import MAX_GAP_MS
 
@@ -50,11 +51,6 @@ def background_mask(shape, objects):
         pad = max(5, round(.06 * max(x2-x1, y2-y1)))
         mask[max(0, int(y1)-pad):int(y2)+pad+1, max(0, int(x1)-pad):int(x2)+pad+1] = 0
     return mask
-
-
-def deproject(pixels, depth, camera):
-    xy = cv2.undistortPoints(np.asarray(pixels, np.float32).reshape(-1, 1, 2), *camera).reshape(-1, 2)
-    return np.column_stack((xy, np.ones(len(xy)))) * np.asarray(depth).reshape(-1, 1)
 
 
 @dataclass

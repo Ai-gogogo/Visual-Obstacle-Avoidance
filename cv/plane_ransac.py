@@ -5,7 +5,7 @@ import math
 
 import numpy as np
 
-from path_intrusion import deproject
+from geometry import deproject
 
 
 @dataclass(frozen=True)

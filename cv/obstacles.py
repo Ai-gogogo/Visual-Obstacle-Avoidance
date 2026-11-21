@@ -7,7 +7,7 @@ import math
 import cv2
 import numpy as np
 
-from path_intrusion import deproject
+from geometry import deproject
 from plane_ransac import PlaneConfig, height_above_plane
 
 
