@@ -17,28 +17,56 @@ from cv.item_features import item_features, unit
 MODELS = Path(os.environ.get("VISIONASSIST_MODELS", Path(__file__).parent / "models"))
 
 
-@lru_cache(maxsize=1)
-def whisper_model():
+whisper_cuda_failed = False
+
+
+@lru_cache(maxsize=2)
+def whisper_model(cpu_only=False):
     from faster_whisper import WhisperModel
 
     provisioned = next((MODELS / name for name in ("whisper-small", "whisper-base")
                         if (MODELS / name / "model.bin").is_file()), "base")
-    return WhisperModel(
-        os.environ.get("VISIONASSIST_STT_MODEL", str(provisioned)),
-        device="cpu",
-        compute_type="int8",
-        local_files_only=True,
-    )
+    model = os.environ.get("VISIONASSIST_STT_MODEL", str(provisioned))
+    if not cpu_only:
+        if os.name == "nt":
+            # pip's nvidia-cublas-cu12 / nvidia-cudnn-cu12 wheels are not on the DLL search path.
+            import site
+
+            for root in site.getsitepackages():
+                for dlls in Path(root, "nvidia").glob("*/bin"):
+                    os.add_dll_directory(str(dlls))
+                    # ctranslate2 loads cuBLAS through the PATH search order.
+                    os.environ["PATH"] = str(dlls) + os.pathsep + os.environ["PATH"]
+        try:
+            import ctranslate2
+
+            if ctranslate2.get_cuda_device_count() > 0:
+                return WhisperModel(model, device="cuda", compute_type="float16", local_files_only=True)
+        except Exception as error:  # Missing CUDA/cuDNN runtime libraries.
+            print(f"Whisper CUDA unavailable, using CPU: {error}", file=sys.stderr, flush=True)
+    return WhisperModel(model, device="cpu", compute_type="int8", local_files_only=True)
 
 
 def transcribe(payload):
     audio = io.BytesIO(base64.b64decode(payload["audio"], validate=True))
-    segments, info = whisper_model().transcribe(
-        audio, language=payload.get("language"), beam_size=3,
-        condition_on_previous_text=False, vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 250},
-    )
-    text = " ".join(segment.text.strip() for segment in segments).strip()
+    options = dict(language=payload.get("language"), beam_size=3,
+                   condition_on_previous_text=False, vad_filter=True,
+                   vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 250})
+    global whisper_cuda_failed
+    model = whisper_model(cpu_only=whisper_cuda_failed)
+    try:
+        segments, info = model.transcribe(audio, **options)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
+    except RuntimeError as error:
+        if model.model.device != "cuda":
+            raise
+        # cuBLAS/cuDNN libraries can fail on first use; retry the same audio on CPU.
+        print(f"Whisper CUDA failed, using CPU: {error}", file=sys.stderr, flush=True)
+        # A failed CUDA model can hang on its next call, so never reuse it.
+        whisper_cuda_failed = True
+        audio.seek(0)
+        segments, info = whisper_model(cpu_only=True).transcribe(audio, **options)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
     if info.language == "zh" and text:
         from opencc import OpenCC
 
@@ -117,6 +145,12 @@ def export_conversation(payload):
     return {"document": base64.b64encode(result.getvalue()).decode("ascii")}
 
 
+def paddle_device():
+    import paddle
+
+    return "gpu:0" if paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0 else "cpu"
+
+
 @lru_cache(maxsize=2)
 def speech_voice(language):
     from onnxruntime import InferenceSession, SessionOptions
@@ -132,6 +166,7 @@ def speech_voice(language):
     # Limit the speech worker's CPU pool so it can run alongside CV.
     options = SessionOptions()
     options.intra_op_num_threads = 2
+    # CPU synthesis takes about 0.15 s per short alert; the CUDA provider adds seconds of warm-up.
     session = InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
     return PiperVoice(session=session, config=config)
 
@@ -207,7 +242,7 @@ def serve_ocr():
                         use_doc_orientation_classify=False,
                         use_doc_unwarping=False,
                         use_textline_orientation=False,
-                        device="cpu",
+                        device=paddle_device(),
                         enable_mkldnn=False,
                         cpu_threads=2,
                         text_det_limit_side_len=960,
