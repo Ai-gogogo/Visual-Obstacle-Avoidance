@@ -5,6 +5,7 @@ const { mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const test = require('node:test');
+const liveCalibration = require('../cv/results/stereo-calibration-2026-11-20/webrtc-480x640.json');
 
 test('the production frontend and device API share one origin', {timeout:25_000}, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'visionassist-next-'));
@@ -40,8 +41,12 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Reduce motion/);
   assert.match(html,/Stereo calibration/);
   assert.match(html,/Depth algorithm/);
+  assert.ok(html.includes(`<option value="live" selected="">Live · ${liveCalibration.name ?? 'current calibration'}</option>`));
   const planeToggle = html.match(/<input[^>]*id="depth-plane-overlay"[^>]*>/)?.[0];
   assert.ok(planeToggle);
+  const obstacleToggle = html.match(/<input[^>]*id="depth-obstacle-labels"[^>]*>/)?.[0];
+  assert.ok(obstacleToggle);
+  assert.doesNotMatch(obstacleToggle,/checked/);
   assert.match(html,/<article[^>]*id="scene-view"/);
   const position = marker => html.indexOf(marker);
   assert.ok(position('data-camera="A"') < position('id="stereo-view"'));
@@ -53,6 +58,10 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/<canvas[^>]*id="fused-map"[^>]*hidden/);
   assert.match(html,/id="fused-placeholder"[^>]*>Waiting for depth and segmentation\./);
   assert.match(html,/id="fused-status"[^>]*role="status"/);
+  const fusedPalette = html.match(/<select[^>]*id="fused-palette"[^>]*>(.*?)<\/select>/)?.[1] ?? '';
+  assert.match(fusedPalette,/<option value="gray" selected="">Grayscale<\/option>/);
+  assert.match(fusedPalette,/<option value="turbo">Turbo<\/option>/);
+  assert.match(fusedPalette,/<option value="viridis">Viridis<\/option>/);
   assert.match(html,/<article[^>]*id="camera-b-feed"[^>]*hidden/);
   assert.match(html,/<canvas[^>]*id="scene-mask"[^>]*hidden/);
   assert.match(html,/Waiting for Camera A segmentation/);
@@ -91,7 +100,7 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match((await pair.json()).code,/^\d{6}$/);
 });
 
-test('plane status, overlay and box height follow the display controls', async () => {
+test('obstacle labels, plane colors and box height follow independent display controls', async () => {
   const {createPerceptionView} = await import('./features/perception/perception-view.js');
   const nodes = new Map();
   function $(selector) {
@@ -111,6 +120,7 @@ test('plane status, overlay and box height follow the display controls', async (
   const depth = {naturalWidth:180,naturalHeight:240};
   const overlay = {};
   const snapshot = {frame_id:'sample',depth_frame_id:'sample',
+    depth_timestamp_ms:Date.now(),depth_expires_ms:Date.now()+3500,
     plane:{validated:true,pitch_deg:12.8,holdout_p90_m:.011},
     unclassified_obstacles:[
       {semantic_label:'wall',depth_m:1.4}, {semantic_label:'pole',depth_m:1.1},
@@ -123,6 +133,12 @@ test('plane status, overlay and box height follow the display controls', async (
   $('#depth-plane-overlay').checked = true;
   view.repaintDepth();
   assert.deepEqual(calls.splice(0),[[depth,0,0],[overlay,0,0,180,240]]);
+  assert.equal($('#protrusion-status').hidden,true);
+  $('#depth-plane-overlay').checked = false;
+  $('#depth-obstacle-labels').checked = true;
+  view.repaintDepth();
+  assert.deepEqual(calls.splice(0),[[depth,0,0]]);
+  assert.equal(view.depthOptions().planeOverlay,undefined);
   assert.equal($('#protrusion-status').textContent,'pole 1.1m · wall 1.4m');
   assert.equal($('#protrusion-status').hidden,false);
   view.showDepth({...snapshot,depth_frame_id:'different'},depth,false,overlay);
@@ -130,10 +146,12 @@ test('plane status, overlay and box height follow the display controls', async (
   assert.equal($('#protrusion-status').hidden,true);
   view.showDepth(snapshot,null,false);
   assert.equal($('#protrusion-status').hidden,true);
-  $('#depth-plane-overlay').checked = false;
+  view.repaintDepth();
+  assert.equal($('#protrusion-status').hidden,true);
+  $('#depth-obstacle-labels').checked = false;
   view.showDepth(snapshot,depth,false,overlay);
   assert.equal($('#protrusion-status').hidden,true);
-  view.showDepth({plane:{validated:false}},null,false);
+  view.showDepth({plane:{validated:false},stereo_status:'no_matches'},null,false);
   assert.equal($('#plane-status').textContent,'Plane Rejected');
   const canvas = {getContext:() => ctx,dataset:{}};
   const frame = {...snapshot,objects:[{label:'cup',position:'center',confidence:.9,bbox:[.4,.4,.6,.65],
@@ -219,7 +237,7 @@ test('segmentation stays visible across gaps and clears on Camera A replacement'
   controller.abort();
 });
 
-test('the fused canvas follows raw depth, segmentation, palette and stream validity', async t => {
+test('the fused canvas defaults to grayscale and has an independent palette', async t => {
   const {createFusedPreview} = await import('./features/perception/fused-preview.js');
   const {createPerceptionView} = await import('./features/perception/perception-view.js');
   const {createScenePreview} = await import('./features/perception/scene-preview.js');
@@ -270,6 +288,7 @@ test('the fused canvas follows raw depth, segmentation, palette and stream valid
   const view = createPerceptionView($,scope.signal,fused.setDepth);
   const scene = createScenePreview($,() => 'desk',scope.signal,fused.setScene);
   $('#depth-palette').value = 'gray';
+  $('#fused-palette').value = 'gray';
   fused.setPartner('right');
   const snapshot = {frame_id:'depth', depth_rig:'left/right', depth_timestamp_ms:10_000, analysis_expires_ms:13_000};
   const image = {naturalWidth:8,naturalHeight:8};
@@ -283,20 +302,37 @@ test('the fused canvas follows raw depth, segmentation, palette and stream valid
   assert.equal(maskPixels[0],200);
   assert.deepEqual([...fusedPixels.slice(64,68)],[86,86,86,255]);
 
+  const grayFusedFrame = fusedPixels.slice();
   for (const palette of ['turbo','viridis','gray']) {
-    const previous = [...fusedPixels.slice(0,3)];
     $('#depth-palette').value = palette;
     view.repaintDepth();
-    fused.repaint();
-    assert.notDeepEqual([...fusedPixels.slice(0,3)],previous);
-    assert.deepEqual([...fusedPixels.slice(64,67)],Array.from(fusedPixels.slice(0,3), color => Math.round(color*0.86)));
+    view.showDepth(snapshot,image,false);
+    assert.deepEqual(fusedPixels,grayFusedFrame);
   }
+
+  let previousColor = [...fusedPixels.slice(0,3)];
+  for (const palette of ['turbo','viridis','gray']) {
+    $('#fused-palette').value = palette;
+    fused.repaintPalette();
+    assert.notDeepEqual([...fusedPixels.slice(0,3)],previousColor);
+    assert.deepEqual([...fusedPixels.slice(64,67)],Array.from(fusedPixels.slice(0,3), color => Math.round(color*0.86)));
+    previousColor = [...fusedPixels.slice(0,3)];
+  }
+  assert.deepEqual(fusedPixels,grayFusedFrame);
+  assert.equal($('#depth-palette').value,'gray');
 
   t.mock.timers.tick(751);
   assert.equal($('#scene-stale').hidden,false);
   assert.equal($('#fused-map').hidden,false);
   assert.match($('#fused-status').textContent,/Holding last fused frame · segmentation stale/);
   assert.equal(fusedPixels[64],86);
+  $('#fused-palette').value = 'turbo';
+  fused.repaintPalette();
+  assert.notDeepEqual(fusedPixels,grayFusedFrame);
+  assert.match($('#fused-status').textContent,/Holding last fused frame · segmentation stale/);
+  $('#fused-palette').value = 'gray';
+  fused.repaintPalette();
+  assert.deepEqual(fusedPixels,grayFusedFrame);
   sceneFrame = 'seg2';
   maskPixels.fill(0);
   await scene.update('seg2','left');

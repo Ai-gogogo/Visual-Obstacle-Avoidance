@@ -22,7 +22,7 @@ export function createPerceptionView($, signal, onDepth) {
     {label:'Water bottle', camera:'B', distance:2.1, position:'Right', box:[65,36,7,24]}
   ];
 
-  let lastDepthFrame, holdTimer;
+  let lastDepthFrame, holdTimer, holdingDepth = false;
   signal?.addEventListener('abort', () => clearTimeout(holdTimer), {once:true});
 
   function depthOptions() {
@@ -38,7 +38,7 @@ export function createPerceptionView($, signal, onDepth) {
   }
 
   function repaintDepth() {
-    if (lastDepthFrame && $('#depth-hold-status').hidden) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false, lastDepthFrame.overlay, false);
+    if (lastDepthFrame && !holdingDepth) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false, lastDepthFrame.overlay, false);
   }
 
   function makeAnnotations(feeds) {
@@ -91,10 +91,11 @@ export function createPerceptionView($, signal, onDepth) {
 
   function showDepth(snapshot, preview, sampleMode, overlay=null, publish=true) {
     clearTimeout(holdTimer);
+    holdingDepth = false;
     if (!preview && publish) onDepth?.(null);
     const plane = sampleMode ? null : snapshot?.plane;
     const opt = depthOptions();
-    const protrusions = preview && plane?.validated && opt.planeOverlay &&
+    const protrusions = preview && plane?.validated && $('#depth-obstacle-labels').checked &&
       snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id
       ? (snapshot.unclassified_obstacles ?? [])
         .filter(item => item.semantic_label && item.semantic_label !== 'unknown' && Number.isFinite(item.depth_m))
@@ -118,6 +119,7 @@ export function createPerceptionView($, signal, onDepth) {
       (!snapshot.objects && !snapshot.stereo_status));
     if (!preview && !sampleMode && waiting && age >= 0 && age < 3500 &&
         snapshot.depth_rig === lastDepthFrame.snapshot.depth_rig) {
+      holdingDepth = true;
       notice.textContent = 'Last depth frame · '+(age/1000).toFixed(1)+' s ago · waiting for update';
       notice.hidden = false;
       $('#depth-reading').textContent = '';

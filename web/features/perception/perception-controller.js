@@ -223,10 +223,9 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     }
   });
   scope.signal.addEventListener('abort',clearReplay,{once:true});
-  listen($('#depth-palette'), 'change', () => {
-    VisionPerceptionView.repaintDepth();
-    fused.repaint();
-  });
+  listen($('#depth-palette'), 'change', VisionPerceptionView.repaintDepth);
+  listen($('#fused-palette'), 'change', fused.repaintPalette);
+  listen($('#depth-obstacle-labels'), 'change', VisionPerceptionView.repaintDepth);
   for (const id of ['depth-algorithm','depth-spatial','depth-temporal','depth-meters','depth-plane-overlay']) {
     listen($('#'+id), 'change', () => {
       refreshPolling();
