@@ -1,5 +1,6 @@
 const {createAgent, currentDetection, MAX_FRAME_AGE} = require('./agent.cjs');
 const {acceptRoadEdge} = require('./road-alerts.cjs');
+const voiceFrames = require('./voice-frames.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
 const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
@@ -303,6 +304,14 @@ function createAgentRoutes(options, sessions, read, respond) {
     if (session.pending?.until < Date.now()) delete session.pending;
     session.assistant = true;
     const method = req.method;
+    if (route === '/api/agent/voice-frames' && ['POST','PUT','DELETE'].includes(method)) {
+      const id = requestURL.searchParams.get('id');
+      if (!id || !/^[\da-f-]{36}$/i.test(id)) return error(res,400,'Invalid voice turn.');
+      if (method === 'POST') voiceFrames.begin(session,id);
+      else if (method === 'PUT') voiceFrames.markSpoken(session,id);
+      else voiceFrames.discard(session,id);
+      return res.writeHead(204).end();
+    }
     if (route === '/api/agent/runtime' && method === 'GET') {
       const agentRuntime = await agent.modelRuntime();
       const yolo = [...workerRuntime.values()]
@@ -336,6 +345,16 @@ function createAgentRoutes(options, sessions, read, respond) {
     if (route === '/api/agent/preferences') {
       if (method === 'GET') return respond(res,200,agent.preferences());
       if (method === 'PUT') return respond(res,200,agent.savePreferences(await asJSON(req,1024) || {}));
+    }
+    if (route === '/api/agent/wake' && method === 'POST') {
+      if (!/^audio\/wav(\s*;|$)/i.test(req.headers['content-type'] || '')) {
+        return error(res,415,'Expected a PCM WAV recording.');
+      }
+      const language = requestURL.searchParams.get('language');
+      if (!['zh','en'].includes(language)) return error(res,400,'Unknown wake-word language.');
+      const purpose = requestURL.searchParams.get('purpose');
+      if (purpose !== null && !['stop','cancel'].includes(purpose)) return error(res,400,'Unknown voice command purpose.');
+      return respond(res,200,await agent.detectWake(await read(req,purpose ? 300_000 : 900_000),language,purpose));
     }
     if (route === '/api/agent/transcribe' && method === 'POST') {
       if (!/^(audio\/(webm|mp4|ogg|wav))(\s*;|$)/i.test(req.headers['content-type'] || '')) {
@@ -387,7 +406,20 @@ function createAgentRoutes(options, sessions, read, respond) {
     if (session.chatBusy) return error(res,429,'Wait for the current question to finish.');
     session.chatBusy = true;
     try {
-      if (route === '/api/agent/chat') return respond(res,200,await agent.chat(session,input));
+      if (route === '/api/agent/chat') {
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        res.once('close',cancel);
+        try {
+          const answer = await agent.chat(session,input,controller.signal,voiceFrames.take(session,input.voice_turn));
+          if (!controller.signal.aborted) return respond(res,200,answer);
+        } catch (error) {
+          if (!controller.signal.aborted) throw error;
+        } finally {
+          res.off('close',cancel);
+        }
+        return;
+      }
       if (route === '/api/agent/confirm') {
         if (typeof input.accepted !== 'boolean') return error(res,400,'Choose confirm or cancel.');
         return respond(res,200,agent.confirm(session,input.id,input.accepted,input.language === 'zh'));
@@ -396,7 +428,10 @@ function createAgentRoutes(options, sessions, read, respond) {
     } finally { session.chatBusy = false; }
   }
 
-  return {handle, close:agent.close};
+  return {handle, close() {
+    for (const session of sessions.values()) voiceFrames.discard(session);
+    agent.close();
+  }};
 }
 
 module.exports = {createAgentRoutes, DETECTION_SCHEMA_VERSION};

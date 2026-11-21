@@ -46,6 +46,49 @@ def transcribe(payload):
     return {"text": text}
 
 
+WAKE_MODELS = {
+    "zh": ("vosk-model-small-cn-0.22", ("你好 视觉 助手",)),
+    "en": ("vosk-model-small-en-us-0.15", ("hey vision assist",)),
+}
+STOP_PHRASES = {
+    "zh": ("停止 播放", "停止 播报", "停止 朗读"),
+    "en": ("stop playback", "stop reading"),
+}
+CANCEL_PHRASES = {
+    "zh": ("取消 请求", "停止 生成"),
+    "en": ("cancel request", "stop generating"),
+}
+
+
+@lru_cache(maxsize=2)
+def wake_model(language):
+    from vosk import Model, SetLogLevel
+
+    SetLogLevel(-1)
+    return Model(str(MODELS / WAKE_MODELS[language][0]))
+
+
+def detect_wake(payload):
+    from vosk import KaldiRecognizer
+
+    language = payload["language"]
+    purpose = payload.get("purpose")
+    stopping = purpose in ("stop", "cancel")
+    phrases = (STOP_PHRASES if purpose == "stop" else CANCEL_PHRASES)[language] if stopping else WAKE_MODELS[language][1]
+    recording = io.BytesIO(base64.b64decode(payload["audio"], validate=True))
+    with wave.open(recording, "rb") as audio:
+        rate = audio.getframerate()
+        if (audio.getnchannels() != 1 or audio.getsampwidth() != 2 or
+                not 8000 <= rate <= 48000 or audio.getnframes() > rate * 9):
+            raise ValueError("Invalid wake recording")
+        pcm = audio.readframes(audio.getnframes())
+    recognizer = KaldiRecognizer(wake_model(language), rate, json.dumps([*phrases, "[unk]"], ensure_ascii=False))
+    recognizer.AcceptWaveform(pcm)
+    heard = json.loads(recognizer.FinalResult()).get("text", "")
+    matched = any(heard == phrase or (not stopping and heard.startswith(phrase + " ")) for phrase in phrases)
+    return {"matched": "yes" if matched else "no"}
+
+
 def export_conversation(payload):
     from docx import Document
     from docx.oxml.ns import qn
@@ -192,6 +235,8 @@ def serve_ocr():
 def main(mode, payload):
     if mode == "stt":
         return transcribe(payload)
+    if mode == "wake":
+        return detect_wake(payload)
     if mode == "tts":
         return synthesize(payload)
     if mode == "docx":
@@ -204,10 +249,11 @@ def main(mode, payload):
 
 if __name__ == "__main__":
     mode = sys.argv[1]
+    sessions = {"stt-session": transcribe, "tts-session": synthesize, "wake-session": detect_wake}
     if mode == "ocr":
         serve_ocr()
-    elif mode in ("stt-session", "tts-session"):
-        work = transcribe if mode == "stt-session" else synthesize
+    elif mode in sessions:
+        work = sessions[mode]
         for line in sys.stdin:
             try:
                 result = work(json.loads(line))

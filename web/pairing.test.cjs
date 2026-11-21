@@ -7,7 +7,7 @@ test('runtime shows reported YOLO devices and distinguishes model residency from
   t.mock.timers.enable({apis:['Date'],now:Date.now()});
   const originalFetch = globalThis.fetch;
   const chat = process.env.VISIONASSIST_CHAT_MODEL || 'qwen3:4b-instruct-2507-q4_K_M';
-  const vision = process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b';
+  const vision = process.env.VISIONASSIST_VISION_MODEL || 'qwen3-vl:2b-instruct-q4_K_M';
   let models = [
     {name:chat,size:100,size_vram:100},
     {name:vision,size:200,size_vram:50},

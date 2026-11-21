@@ -6,6 +6,7 @@ const {mkdtempSync, rmSync} = require('node:fs');
 const {tmpdir} = require('node:os');
 const {join} = require('node:path');
 const {createAgent} = require('./agent.cjs');
+const {inferIntent} = require('./intent-router.cjs');
 const {createServer} = require('../web/server.cjs');
 const echoOcr = async messages => JSON.parse(messages.at(-1).content).ocr_text;
 
@@ -66,16 +67,17 @@ test('spoken variations and the Quick Actions mode route directly to OCR', async
 test('Ollama maps indirect chat to the camera OCR action and leaves how-to questions in chat', async () => {
   const session = {slots:{A:{frame:Buffer.from('image'),etag:'"sign"',stamp:Date.now()}}};
   let recognitionCalls = 0;
-  const agent = createAgent({filename:':memory:', recognizeText:async () => { recognitionCalls++; return {text:'Library G17'}; },
-    generate:async (messages,image,format) => {
+  const generate = async (messages,image,format) => {
       if (format?.properties?.intent) {
         assert.equal(image,null);
         const {utterance} = JSON.parse(messages.at(-1).content);
-        return JSON.stringify({intent:utterance.includes('门口') ? 'read_room_number' : 'none'});
+        return JSON.stringify({intent:utterance.includes('门口') ? 'read_text' : 'chat',target:''});
       }
       if (messages[0].content.includes('verified OCR')) return echoOcr(messages);
       return 'General reply';
-    }});
+  };
+  const agent = createAgent({filename:':memory:', recognizeText:async () => { recognitionCalls++; return {text:'Library G17'}; },
+    generate,classify:(text,previous,signal) => inferIntent(generate,text,previous,signal)});
   try {
     assert.equal((await agent.chat(session,{text:'门口牌子写啥'})).reply_text,'Library G17');
     assert.equal((await agent.chat(session,{text:'OCR 怎么识别文字？'})).source,'llm');
@@ -205,6 +207,303 @@ test('natural water-bottle enrollment uses the sole live camera and stays out of
   } finally { agent.close(); }
 });
 
+test('cancelling a model reply releases generation and does not save a cancelled turn', async () => {
+  const controller = new AbortController();
+  const session = {slots:{A:{},B:{}}};
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const agent = createAgent({filename:':memory:',generate:async (messages,image,format,placement,signal) => {
+    if (!signal) return 'A new reply.';
+    assert.equal(signal,controller.signal);
+    entered();
+    return new Promise((resolve,reject) =>
+      signal.addEventListener('abort',() => reject(signal.reason),{once:true}));
+  }});
+  try {
+    const first = agent.chat(session,{text:'Tell me a story.'},controller.signal);
+    await started;
+    controller.abort();
+    await assert.rejects(first,{name:'AbortError'});
+    assert.equal(session.dialog,undefined);
+    assert.equal((await agent.chat(session,{text:'Hello.'})).reply_text,'A new reply.');
+  } finally { agent.close(); }
+});
+
+test('conversation replay keeps family enrollment, people counts and item retries on the right task', async () => {
+  const frame = Buffer.from('current frame');
+  const feature = {version:'test-feature',vector:[1,0]};
+  let usedImage;
+  const agent = createAgent({filename:':memory:',
+    worker:async (mode,data) => {
+      if (mode === 'stt') return {text:Buffer.from(data.audio,'base64').toString()};
+      assert.equal(mode,'face');
+      assert.equal(data.image,frame.toString('base64'));
+      return {features:[feature]};
+    },
+    generate:async (_messages,image) => { usedImage = image; return 'Visual answer.'; }
+  });
+  const session = {slots:{A:{phone:'A',frame,stamp:Date.now()},B:{}}};
+  const chat = text => agent.chat(session,{text,camera_id:'both'});
+  const detection = objects => { session.slots.A.detection = {frame,camera_id:'A',timestamp_ms:Date.now(),objects}; };
+  try {
+    for (const text of ['记住这是我的哥哥','记住这是我哥哥','这是我哥哥']) {
+      const enrollment = await chat(text);
+      assert.equal(enrollment.source,'confirmation');
+      assert.match(enrollment.reply_text,/本人同意.*哥哥/);
+      assert.equal(agent.records('person').length,0);
+      assert.equal(agent.records('habit').length,0);
+      if (text !== '这是我哥哥') await chat('取消');
+    }
+    await chat('确认');
+    assert.equal(agent.records('person')[0].name,'哥哥');
+    assert.equal(agent.records('habit').length,0);
+    assert.equal(agent.records('item').length,0);
+    assert.match((await chat('我面前是谁')).reply_text,/看起来是哥哥/);
+    assert.match((await chat('这是我哥哥嘛')).reply_text,/看起来是哥哥/);
+    assert.match((await chat('帮我找我哥哥')).reply_text,/相机 A .*看起来是哥哥/);
+    detection([
+      {label:'person',confidence:.95,position:'center',track_id:'1'},
+      {label:'person',confidence:.94,position:'right',track_id:'2'},
+      {label:'person',confidence:.7,position:'right',track_id:'2'},
+      {label:'person',confidence:.3,position:'left',track_id:'3'}
+    ]);
+    for (const question of ['画面里有几个人','检测到几个人']) {
+      assert.match((await chat(question)).reply_text,/相机 A.*2 人/);
+    }
+    session.slots.B = {phone:'B',frame:Buffer.from('other camera'),stamp:Date.now()};
+    const visual = await chat('你从相机A里面看到我穿的是什么颜色的上衣');
+    assert.equal(visual.source,'image');
+    assert.equal(usedImage,frame);
+    await chat('比较相机 A 和 B 的画面');
+    assert.deepEqual(usedImage,[frame,session.slots.B.frame]);
+    assert.match((await chat('记住这个是我的水杯')).reply_text,/水杯.*中央/);
+    assert.equal((await chat('这是我的杯子吗')).confirmation,null);
+    const cup = {label:'cup',confidence:.95,position:'center',
+      item_feature:{version:'spatial-hsv-v1',vector:[1,...Array(539).fill(0)]}};
+    detection([cup]);
+    assert.match((await chat('我已经换到画面中央了')).reply_text,/确认登记相机 A 中的物品：水杯/);
+    assert.equal(agent.records('item').length,0);
+    await chat('确认');
+    assert.equal(agent.records('item')[0].name,'水杯');
+    assert.equal((await chat('这是我的水杯吗')).source,'camera');
+    assert.deepEqual(await agent.transcribe(Buffer.from('字幕by索兰娅'),'zh'),{text:'',ignored:true});
+    assert.deepEqual(await agent.transcribe(Buffer.from('谢谢大家'),'zh'),{text:'谢谢大家'});
+  } finally { agent.close(); }
+});
+
+test('semantic routing reuses read-only tools and still requires confirmation to save', async () => {
+  const frame = Buffer.from('image');
+  const stages = [];
+  const inferences = new Map([
+    ['眼跟前摆的都是啥',{intent:'scene',target:''}],
+    ['有几个身影',{intent:'people_count',target:''}],
+    ['那上头印的呢',{intent:'read_text',target:''}],
+    ['给我的随行杯建个档',{intent:'register_item',target:'随行杯'}],
+    ['不要把杯子存一下',{intent:'register_item',target:'杯子'}],
+    ['请替我建个档',{intent:'register_item',target:'看不见的名字'}]
+  ]);
+  const agent = createAgent({filename:':memory:',
+    classify:async (text,previous) => {
+      stages.push([text,previous]);
+      return inferences.get(text);
+    },
+    recognizeText:async request => {
+      assert.equal(request.image,frame);
+      return {text:'CUP'};
+    },
+    generate:async (messages,image) => {
+      if (messages[0].content.includes('verified OCR')) return echoOcr(messages);
+      return image ? 'Visual answer.' : 'Ordinary answer.';
+    }
+  });
+  const cup = {label:'cup',confidence:.95,position:'center',
+    item_feature:{version:'spatial-hsv-v1',vector:[1,...Array(539).fill(0)]}};
+  const session = {slots:{A:{frame,etag:'"cup"',stamp:Date.now(),detection:{frame,camera_id:'A',timestamp_ms:Date.now(),
+    objects:[cup,{label:'person',confidence:.95,position:'left'}]}},B:{}}};
+  const chat = text => agent.chat(session,{text,camera_id:'A'});
+  try {
+    assert.equal((await chat('我前面有什么')).source,'yolo');
+    assert.equal(stages.length,0);
+    assert.equal((await chat('眼跟前摆的都是啥')).source,'yolo');
+    assert.match((await chat('有几个身影')).reply_text,/检测到 1 人/);
+    assert.equal((await chat('这个杯子什么颜色')).source,'image');
+    assert.equal((await chat('那上头印的呢')).source,'ocr');
+    assert.deepEqual(stages.at(-1),['那上头印的呢','这个杯子什么颜色']);
+    assert.match((await chat('不要把杯子存一下')).reply_text,/已取消保存/);
+    assert.equal((await chat('请替我建个档')).confirmation,null);
+    assert.equal((await chat('给我的随行杯建个档')).source,'confirmation');
+    assert.equal(agent.records('item').length,0);
+    await chat('确认');
+    assert.equal(agent.records('item')[0].name,'随行杯');
+  } finally { agent.close(); }
+});
+
+test('spoken memory management lists, renames and deletes only with confirmation', async () => {
+  const agent = createAgent({filename:':memory:',generate:async () => 'Ordinary answer.'});
+  const session = {slots:{A:{},B:{}}};
+  const chat = text => agent.chat(session,{text,camera_id:'A'});
+  try {
+    await chat('记住，我出门前检查钥匙');
+    await chat('确认');
+    assert.match((await chat('读出已保存的习惯')).reply_text,/出门前检查钥匙/);
+    const rename = await chat('把习惯我出门前检查钥匙改名为检查钥匙');
+    assert.equal(rename.source,'confirmation');
+    assert.equal(agent.records('habit')[0].name,'我出门前检查钥匙');
+    assert.match(agent.confirm(session,rename.confirmation.id,true,true).reply_text,/已改名为/);
+    const deletion = await chat('删除习惯检查钥匙');
+    assert.equal(agent.records('habit').length,1);
+    agent.confirm(session,deletion.confirmation.id,false,true);
+    assert.equal(agent.records('habit').length,1);
+    const retry = await chat('删除习惯检查钥匙');
+    agent.confirm(session,retry.confirmation.id,true,true);
+    assert.deepEqual(agent.records('habit'),[]);
+  } finally { agent.close(); }
+});
+
+test('voice frames survive a feed interruption for one visual question only', async t => {
+  let input;
+  const server = createServer({agent:{filename:':memory:',generate:async (messages,images) => {
+    input = {messages,images};
+    return 'Visual answer.';
+  }}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const root = 'http://127.0.0.1:'+server.address().port;
+  async function call(path, method, status, token, data) {
+    const binary = Buffer.isBuffer(data);
+    const reply = await fetch(root+path,{method,headers:{
+      ...(token ? {Authorization:'Bearer '+token} : {}),
+      ...(data ? {'Content-Type':binary ? 'image/jpeg' : 'application/json'} : {})
+    },body:data && (binary ? data : JSON.stringify(data))});
+    assert.equal(reply.status,status,path);
+    return status === 204 ? null : reply.json();
+  }
+  const {token:desk} = await call('/api/session','POST',201);
+  const {code} = await call('/api/pair/A','POST',201,desk);
+  const {token:phone} = await call('/api/join','POST',200,null,{code});
+  const first = Buffer.from([255,216,1,255,217]);
+  const later = Buffer.from([255,216,2,255,217]);
+  const id = '37c7e135-85c1-499d-b5f1-38d845994c1c';
+  const route = '/api/agent/voice-frames?id='+id;
+  await call('/api/frame','PUT',204,phone,first);
+  await call(route,'POST',401,phone);
+  await call(route,'POST',204,desk);
+  await call(route,'PUT',204,desk);
+  await call('/api/frame','PUT',204,phone,later);
+  await new Promise(resolve => setTimeout(resolve,650));
+  await call('/api/frame','DELETE',204,phone);
+  const question = {text:'这个杯子是什么样子的',camera_id:'A',voice_turn:id};
+  const reply = await call('/api/agent/chat','POST',200,desk,question);
+  assert.equal(reply.source,'image');
+  assert.match(reply.reply_text,/根据本轮已收到/);
+  assert.deepEqual(input.images,[first,later]);
+  assert.match(input.messages.at(-1).content,/第一张较早，第二张较晚/);
+  assert.equal((await call('/api/agent/chat','POST',200,desk,question)).source,'unavailable');
+});
+
+test('live appearance, nearby people and camera status use the current camera', async () => {
+  const frame = Buffer.from('current frame');
+  const generated = [];
+  const agent = createAgent({filename:':memory:',generate:async (messages,image) => {
+    generated.push(image);
+    return 'Model reply.';
+  }});
+  const session = {slots:{A:{phone:'paired',stamp:Date.now(),frame},B:{}}};
+  const chat = (text,camera_id='A') => agent.chat(session,{text,camera_id});
+  const details = ['我身上有没有花纹？','我衣服上有没有花纹','我有没有戴眼镜了？',
+    '那有条纹吗？','Am I wearing glasses?','Does my shirt have a pattern?'];
+  try {
+    for (const question of details) assert.equal((await chat(question)).source,'image',question);
+    assert.equal((await chat(details[0],'both')).source,'image');
+    assert.deepEqual(generated,Array(7).fill(frame));
+    assert.match((await chat('你看不到画面吗？')).reply_text,/相机 A.+画面/);
+    assert.equal((await chat('我附近有人吗')).source,'unavailable');
+    session.slots.A.detection = {timestamp_ms:Date.now(),frame,objects:[{label:'person',confidence:.95}]};
+    assert.match((await chat('我附近有人吗')).reply_text,/检测到有人/);
+    session.slots.A.detection.objects = [];
+    assert.match((await chat('我附近有人吗')).reply_text,/没有检测到人/);
+    session.slots.A.stamp = session.slots.A.detection.timestamp_ms = Date.now()-10_000;
+    assert.match((await chat(details[0])).reply_text,/相机 A.+画面/);
+    assert.equal((await chat(details[0])).source,'unavailable');
+    assert.match((await chat('你看不到画面吗？')).reply_text,/暂时收不到/);
+    assert.equal(generated.length,7);
+    assert.equal((await chat('怎样清洗眼镜？')).source,'llm');
+  } finally { agent.close(); }
+});
+
+test('equivalent surroundings questions use current YOLO detections with localized labels', async () => {
+  const agent = createAgent({filename:':memory:',generate:async () => 'General answer'});
+  const frame = Buffer.from('current');
+  const session = {slots:{A:{phone:'paired',stamp:Date.now(),frame,
+    detection:{timestamp_ms:Date.now(),frame,objects:[
+      {label:'person',confidence:.95,position:'center'},
+      {label:'chair',confidence:.92,position:'left'}
+    ]}},B:{}}};
+  const chat = text => agent.chat(session,{text,camera_id:'A'});
+  try {
+    for (const text of ['我面前有什么东西','我前面有什么？','我眼前都有哪些物体？',
+      '帮我看看我身边有什么','描述一下我周围的环境','我面前有什么障碍物吗？',
+      '播报附近','帮我播报一下附近的物体','描述一下周围']) {
+      const result = await chat(text);
+      assert.equal(result.source,'yolo',text);
+      assert.equal(result.reply_text,'相机 A 画面中央有人，左侧有椅子。');
+    }
+    assert.match((await chat('What is in front of me?')).reply_text,/person \(center\)/);
+    assert.equal((await chat('我面前的椅子是什么颜色？')).source,'image');
+    assert.equal((await chat('我面前的瓶子上写的什么字？')).source,'image');
+    assert.equal((await chat('面前遇到困难应该怎么解决？')).source,'llm');
+    session.slots.A.stamp = session.slots.A.detection.timestamp_ms = Date.now()-10_000;
+    assert.equal((await chat('我面前有什么东西')).source,'unavailable');
+  } finally { agent.close(); }
+});
+
+test('explicit clothing questions skip semantic inference and visual follow-ups use a fresh frame', async () => {
+  const initialFrame = Buffer.from('first camera frame');
+  const updatedFrame = Buffer.from('updated camera frame');
+  const requests = [];
+  let classifications = 0;
+  const agent = createAgent({filename:':memory:',
+    classify:async () => { classifications++; },
+    generate:async (messages,image) => {
+      requests.push({question:messages.at(-1).content,image});
+      return 'Visual answer.';
+    }
+  });
+  const camera = {frame:initialFrame,stamp:Date.now()};
+  const session = {slots:{A:camera,B:{}}};
+  const chat = text => agent.chat(session,{text,camera_id:'A'});
+  try {
+    assert.equal((await chat('我衣服上是什么花纹？')).source,'image');
+    assert.equal(requests[0].image,initialFrame);
+    camera.frame = updatedFrame;
+    camera.stamp = Date.now();
+    assert.equal((await chat('它是什么颜色？')).source,'image');
+    assert.equal(requests[1].image,updatedFrame);
+    assert.match(requests[1].question,/Earlier user question.*衣服.*花纹/s);
+    assert.equal((await chat('我的鞋是什么颜色？')).source,'image');
+    assert.doesNotMatch(requests[2].question,/Earlier user question/);
+    assert.equal(classifications,0);
+  } finally { agent.close(); }
+});
+
+test('label reading uses the current image and asks for original text', async () => {
+  const frame = Buffer.from('camera image');
+  const agent = createAgent({filename:':memory:',generate:async (messages,image) => {
+    assert.equal(image,frame);
+    assert.match(messages.at(-1).content,/保留原文语言和拼写|Preserve its original language/);
+    return 'TANGERINE JUICE';
+  }});
+  const session = {slots:{A:{frame,stamp:Date.now()},B:{}}};
+  try {
+    for (const text of ['这上面写的什么字','这个画面当中的这个称职 这个杯子上写的什么字','What does the label say?']) {
+      assert.equal((await agent.chat(session,{text})).reply_text,'TANGERINE JUICE');
+    }
+    session.slots.A.stamp = Date.now()-10_000;
+    assert.equal((await agent.chat(session,{text:'这上面写的什么字'})).source,'unavailable');
+  } finally { agent.close(); }
+});
+
 test('paired camera, exact-frame YOLO, alerts, assisted vision and local model adapters', async t => {
   const generated = [];
   const ocrRequests = [];
@@ -217,6 +516,10 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   });
   let itemExtractions = 0;
   const worker = async (mode,data) => {
+    if (mode === 'wake') {
+      assert.equal(data.language,'en');
+      return {matched:Buffer.from(data.audio,'base64').toString() === 'wake' ? 'yes' : 'no'};
+    }
     if (mode === 'stt') {
       assert.equal(data.language,'en');
       return {text:'Help me identify the text.'};
@@ -280,6 +583,14 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   });
   assert.equal(foreignHost,403);
   assert.equal((await call('/api/cv/sources',{headers:{Origin:root}})).status,403);
+  const wake = (token, text, language='en') => call('/api/agent/wake?language='+language,{
+    method:'POST',token,type:'audio/wav',body:Buffer.from(text)
+  });
+  assert.equal((await wake(phone,'wake')).status,401);
+  assert.equal((await wake(desk,'wake','auto')).status,400);
+  assert.deepEqual(await json(await wake(desk,'background speech'),200),{matched:false});
+  assert.deepEqual(await json(await wake(desk,'wake'),200),{matched:true});
+  assert.equal(generated.length,0);
   assert.equal((await chat('我前面有什么？')).source,'unavailable');
   const {sources:[source]} = await json(await call('/api/cv/sources'),200);
   const query = '?source_id='+source.source_id+'&camera_id=A';
@@ -315,7 +626,7 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
 
   assert.equal((await publish(latestFrame)).status,204);
   assert.equal((await publish(latestFrame)).status,204);
-  assert.match((await chat('我前面有什么')).reply_text,/bottle/);
+  assert.match((await chat('我前面有什么')).reply_text,/瓶子/);
   assert.equal(ocrRequests.length,0);
   assert.match((await chat('哪个物体更近？')).reply_text,/无法判断/);
   assert.match((await chat('哪个物体更远？', {camera_id:'B'})).reply_text,/没有可用/);
@@ -371,7 +682,14 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.equal(image.source,'image');
   assert.deepEqual(generated.at(-1).image,frame(9));
   assert.match((await chat('Compare cameras',{camera_id:'both'})).reply_text,/Camera B has no recent frame/);
-  assert.match((await chat('What is in front of me?', {camera_id:'both'})).reply_text,/Camera B has no recent frame/);
+  const generatedBeforeScene = generated.length;
+  for (const fields of [{camera_id:'both'},{camera_id:'both',mode:'scene'}]) {
+    const surroundings = await chat('What is in front of me?',fields);
+    assert.equal(surroundings.source,'yolo');
+    assert.match(surroundings.reply_text,/Camera A detects bottle/);
+    assert.match(surroundings.reply_text,/Camera B has no recent detections/);
+  }
+  assert.equal(generated.length,generatedBeforeScene);
   await push(await pair('B'),3);
   assert.equal((await chat('Compare cameras',{camera_id:'both'})).source,'image');
   assert.deepEqual(generated.at(-1).image,[frame(9),frame(3)]);
