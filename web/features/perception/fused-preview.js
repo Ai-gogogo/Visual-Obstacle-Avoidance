@@ -5,10 +5,17 @@ export function createFusedPreview($, signal) {
   const canvas = $('#fused-map');
   const placeholder = $('#fused-placeholder');
   const status = $('#fused-status');
+  const palette = $('#fused-palette');
   const ctx = canvas.getContext('2d');
   let depth, scene, partner, timer, frame, computed;
   let replay = false;
   let sceneHistory = [];
+
+  function repaintPalette() {
+    if (signal.aborted || !computed || !frame) return;
+    paintFusedDepth(computed.result, frame.data, depthPalettes[palette.value]);
+    ctx.putImageData(frame, 0, 0);
+  }
 
   function repaint() {
     clearTimeout(timer);
@@ -46,8 +53,7 @@ export function createFusedPreview($, signal) {
       frame = undefined;
     }
     frame ??= ctx.createImageData(depth.width, depth.height);
-    paintFusedDepth(computed.result, frame.data, depthPalettes[$('#depth-palette').value]);
-    ctx.putImageData(frame, 0, 0);
+    repaintPalette();
 
     const {filledCount, labelFillCount} = computed.result;
     const gain = (100 * filledCount / depth.gray.length).toFixed(1);
@@ -67,7 +73,7 @@ export function createFusedPreview($, signal) {
 
   signal.addEventListener('abort', () => clearTimeout(timer), {once:true});
   return {
-    repaint,
+    repaintPalette,
     resetDepth,
     setDepth(value) {
       depth = replay ? null : value;
