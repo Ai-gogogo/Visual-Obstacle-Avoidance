@@ -195,6 +195,19 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     });
   }
   listen($('#mode'), 'click', () => renderMode(!sampleMode));
+  const cameraB = $('#camera-b-feed');
+  const cameraBToggle = $('#show-camera-b');
+  const visibilityKey = 'visionassist-hide-camera-b';
+  function setCameraBHidden(hidden) {
+    cameraB.hidden = hidden;
+    cameraBToggle.setAttribute('aria-pressed', String(!hidden));
+  }
+  try { setCameraBHidden(localStorage.getItem(visibilityKey) === 'true'); } catch {}
+  listen(cameraBToggle, 'click', () => {
+    const hidden = !cameraB.hidden;
+    setCameraBHidden(hidden);
+    try { localStorage.setItem(visibilityKey, String(hidden)); } catch {}
+  });
   listen($('#pixel-preview'), 'click', event => {
     const active = $('#camera-feeds').toggleAttribute('data-actual-pixels');
     event.currentTarget.setAttribute('aria-pressed', String(active));

@@ -24,6 +24,15 @@ export function MonitorPanel() {
           >
             Actual pixels
           </button>
+          <button
+            className="quiet"
+            id="show-camera-b"
+            type="button"
+            aria-pressed="true"
+            aria-controls="camera-b-feed"
+          >
+            Show Camera B
+          </button>
           <button className="quiet" id="open-calibration">
             Stereo calibration
           </button>

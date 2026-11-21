@@ -45,6 +45,7 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Generate depth comparison/);
   assert.match(html,/Code for Camera A/);
   assert.match(html,/Code for Camera B/);
+  assert.match(html,/<button[^>]*aria-pressed="true"[^>]*aria-controls="camera-b-feed"[^>]*>Show Camera B<\/button>/);
   const stylesheet = /<link[^>]+href="([^"]+\.css)"[^>]*>/.exec(html);
   assert.ok(stylesheet,'The server rendered a stylesheet link');
   assert.equal((await call(stylesheet[1])).status,200);

@@ -41,7 +41,7 @@ export function CameraFeeds() {
           <span className="rtc-status" role="status"></span>
         </footer>
       </article>
-      <article className="feed" data-camera="B">
+      <article className="feed" id="camera-b-feed" data-camera="B">
         <header>
           <div>
             <span className="camera-icon" aria-hidden="true">
