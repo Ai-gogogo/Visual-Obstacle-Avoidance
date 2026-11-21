@@ -16,6 +16,12 @@ PATH_LEFT = 0.35
 PATH_RIGHT = 0.65
 PATH_TOP = 0.60
 MIN_PATH_OVERLAP = 0.25
+CITYSCAPES_STATIC_START = 2
+CITYSCAPES_STATIC_LABELS = (
+    "building", "wall", "fence", "pole", "traffic_light", "traffic_sign", "vegetation", "terrain",
+)
+CITYSCAPES_STATIC_END = CITYSCAPES_STATIC_START + len(CITYSCAPES_STATIC_LABELS)
+SEMANTIC_UNKNOWN_ID = 255
 
 
 def is_obstacle_candidate(bbox):
@@ -80,8 +86,24 @@ class PlaneObstacles:
         return points @ forward, points @ lateral
 
 
-def unclassified_obstacles(depth, camera, plane, background, settings, axes):
+def vote_static_class(semantic_region, pixels):
+    """Summarize Cityscapes evidence at the pixels of one connected component."""
+    classes = semantic_region[pixels]
+    valid = classes[(classes >= CITYSCAPES_STATIC_START) & (classes < CITYSCAPES_STATIC_END)]
+    if valid.size < 12:
+        return {"semantic_label": "unknown"}
+    counts = np.bincount(valid - CITYSCAPES_STATIC_START, minlength=len(CITYSCAPES_STATIC_LABELS))
+    winner = int(counts.argmax())
+    fraction = counts[winner] / valid.size
+    if fraction < .50:
+        return {"semantic_label": "unknown"}
+    return {"semantic_label": CITYSCAPES_STATIC_LABELS[winner], "semantic_confidence": round(float(fraction), 2)}
+
+
+def unclassified_obstacles(depth, camera, plane, background, settings, axes, *, semantic_map=None):
     """Group unlabelled above-plane pixels within the configured metric corridor."""
+    if semantic_map is not None and semantic_map.shape != depth.shape:
+        raise ValueError("semantic map and metric depth must have the same shape")
     heights = height_above_plane(depth, camera, plane)
     threshold = max(settings.min_height_m, 1.5 * plane.holdout_p90_m)
     y, x = np.nonzero(background & (heights > threshold))
@@ -101,9 +123,12 @@ def unclassified_obstacles(depth, camera, plane, background, settings, axes):
         left, top, width, height, _ = stats[component]
         region = np.s_[top:top+height, left:left+width]
         pixels = labels[region] == component
-        result.append({
+        obstacle = {
             "bbox": [left / w, top / h, (left + width) / w, (top + height) / h],
             "depth_m": round(float(np.median(depth[region][pixels])), 3),
             "height_above_plane_m": round(float(np.median(heights[region][pixels])), 3),
-        })
+        }
+        if semantic_map is not None:
+            obstacle.update(vote_static_class(semantic_map[region], pixels))
+        result.append(obstacle)
     return result

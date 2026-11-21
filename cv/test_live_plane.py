@@ -1,6 +1,7 @@
 """Exercise the live Camera A worker's outgoing payload over consecutive frames."""
 import base64
 import io
+import json
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
@@ -15,12 +16,52 @@ from live_camera import CameraWorker
 from obstacles import PlaneObstacles
 from path_intrusion import Corridor
 from plane_ransac import fit_support_plane
-from road_edge import DEFAULT_ROAD_CONFIG
+from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge, RoadSegmenter
 from stereo_depth import object_depth
 from test_plane_ransac import scene
 
 
 class LivePlaneTests(unittest.TestCase):
+    def test_road_and_plane_share_one_cityscapes_inference_without_sending_the_map(self):
+        depth, camera, support, _, _, projection = scene(noisy=False)
+        wall = np.s_[400:420, 225:250]
+        depth[wall] = (.18 - .55) / projection[wall]
+        model = RoadSegmenter.__new__(RoadSegmenter)
+        model.session = Mock()
+        logits = np.zeros((1, 19, 128, 96), dtype=np.float32)
+        logits[0, 3, :85] = 10
+        logits[0, 1, 93:] = 10
+        model.session.run.return_value = [logits]
+        stereo = SimpleNamespace(camera_a=camera, size=(480, 640))
+        road = RoadEdge(json.loads(DEFAULT_ROAD_CONFIG.read_text()), stereo, model)
+        jpeg = io.BytesIO()
+        Image.new("RGB", stereo.size).save(jpeg, format="JPEG")
+        http = Mock()
+        http.get.return_value = Mock(status_code=200, content=jpeg.getvalue(), headers={"ETag": '"id"'})
+        http.post.return_value.status_code = 204
+
+        def process(road_module, plane_settings, raw_depth, calls):
+            model.session.run.reset_mock()
+            worker = CameraWorker("http://local", None, http, stereo=stereo, road=road_module,
+                                  plane=plane_settings, infer=lambda _: [])
+            worker.measure_depth = Mock(return_value=({}, raw_depth))
+            worker.process_frame("source")
+            self.assertEqual(model.session.run.call_count, calls)
+            payload = http.post.call_args.kwargs["json"]
+            self.assertNotIn("semantic_map", json.dumps(payload))
+            return payload
+
+        settings = PlaneObstacles()
+        both = process(road, settings, depth, 1)
+        self.assertTrue(both["stereo"]["plane"]["validated"])
+        self.assertEqual(len(both["unclassified_obstacles"]), 1)
+        wall_record = both["unclassified_obstacles"][0]
+        self.assertEqual((wall_record["semantic_label"], wall_record["semantic_confidence"]), ("wall", 1.0))
+        without_road = process(None, settings, depth, 0)
+        self.assertNotIn("semantic_label", without_road["unclassified_obstacles"][0])
+        self.assertIn("road_edge", process(road, None, depth, 1))
+        self.assertIn("road_edge", process(road, settings, None, 1))
+
     def test_segmented_foreground_shared_by_pose_fit_and_unknown_obstacle_deduplication(self):
         depth, camera, support, _, _, _ = scene(noisy=False)
         chair = dict(label="chair", bbox=[.25, .65, .50, .90], confidence=.9, position="center")
@@ -86,9 +127,9 @@ class LivePlaneTests(unittest.TestCase):
             dict(label="person", confidence=.9, position="center", relative_depth="near",
                  bbox=[275/480, 510/640, 308/480, 560/640]),
         ]
-        segmenter = Mock(return_value=(np.zeros_like(candidate), candidate))
+        segmenter = Mock(return_value=(np.zeros_like(candidate), candidate, np.full(depth.shape, 255, np.uint8)))
         road = Mock()
-        road.segment = segmenter
+        road.segment_scene = segmenter
         road.confidence = .55
         road.locate.return_value = {"risk": "normal"}
         road.return_value = {"risk": "normal"}
@@ -173,7 +214,7 @@ class LivePlaneTests(unittest.TestCase):
         jpeg = io.BytesIO()
         Image.new("RGB", (480, 640)).save(jpeg, format="JPEG")
         road = Mock(confidence=.55)
-        road.segment.return_value = np.zeros_like(candidate), candidate
+        road.segment_scene.return_value = np.zeros_like(candidate), candidate, np.full(depth.shape, 255, np.uint8)
         road.locate.return_value = {"level": "visual"}
         http = Mock()
         http.post.return_value.status_code = 204

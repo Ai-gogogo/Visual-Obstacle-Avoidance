@@ -169,6 +169,7 @@ class CameraWorker:
 
             depth = None
             road_masks = None
+            semantic_map = None
             if self.side == "A":
                 if self.stereo is not None:
                     if frame.headers.get("X-CV-Transport") == "webrtc" and not self.allow_webrtc_stereo and not (rtc_low and (self.rtc_reference is not None or self.rtc_low_stereo is not None)):
@@ -178,7 +179,8 @@ class CameraWorker:
                         payload["stereo"], depth = self.measure_depth(params, payload, image, retry_partner, object_masks)
                 if self.road is not None:
                     if self.plane is not None and depth is not None:
-                        road_masks = self.road.segment(image, self.road.confidence)
+                        road, sidewalk, semantic_map = self.road.segment_scene(image)
+                        road_masks = road, sidewalk
                     else:
                         payload["road_edge"] = self.road(image, depth)
 
@@ -228,7 +230,8 @@ class CameraWorker:
                 support = road_masks[0] | road_masks[1] if road_masks is not None else None
                 metric_evidence, measured = self.apply_support_plane(payload, depth, support, masks=object_masks,
                                                                     prior=prior, overlay=overlay,
-                                                                    background=precise_background)
+                                                                    background=precise_background,
+                                                                    semantic_map=semantic_map)
                 fresh = measured if measured is not None and measured.validated else None
                 orientation = fresh or prior
                 axes = ground_axes(orientation.normal) if orientation is not None else None
@@ -327,7 +330,8 @@ class CameraWorker:
                 current.accepted_stamp = previous.accepted_stamp
         return current, pose, current.plane
 
-    def apply_support_plane(self, payload, depth, support, *, masks=None, prior=None, overlay=False, background=None):
+    def apply_support_plane(self, payload, depth, support, *, masks=None, prior=None, overlay=False,
+                            background=None, semantic_map=None):
         stereo = payload.setdefault("stereo", {})
         if depth is None:
             stereo["plane"] = {"validated": False, "reason": "depth_unavailable"}
@@ -380,7 +384,7 @@ class CameraWorker:
             obj["obstacle_candidate"] = bool(inside and median >= self.plane.min_height_m)
 
         payload["unclassified_obstacles"] = unclassified_obstacles(
-            depth, camera, plane, background, self.plane, axes)
+            depth, camera, plane, background, self.plane, axes, semantic_map=semantic_map)
         return metric_evidence, plane
 
     def encode_plane_overlay(self, depth, camera, plane, candidate):

@@ -8,13 +8,16 @@ import numpy as np
 from PIL import Image
 
 from geometry import deproject, ground_axes, pitch_normal
-from obstacles import PATH_LEFT, PATH_RIGHT, is_obstacle_candidate
+from obstacles import (
+    CITYSCAPES_STATIC_END, CITYSCAPES_STATIC_START, PATH_LEFT, PATH_RIGHT,
+    SEMANTIC_UNKNOWN_ID, is_obstacle_candidate,
+)
 
 DEFAULT_ROAD_CONFIG = Path(__file__).with_name("road_config.json")
 
 
 class RoadSegmenter:
-    """Cityscapes SegFormer-B0, logits 0=road and 1=sidewalk."""
+    """Cityscapes SegFormer-B0 with the original road and sidewalk masks."""
     def __init__(self, path):
         import onnxruntime as ort
         if not path.is_file():
@@ -23,15 +26,36 @@ class RoadSegmenter:
         options.intra_op_num_threads = 2
         self.session = ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
 
-    def __call__(self, image, confidence):
+    def _logits(self, image):
         rgb = np.asarray(image.resize((512, 512), Image.Resampling.BILINEAR), dtype=np.float32) / 255
         rgb -= np.array([.485, .456, .406], np.float32)
         rgb /= np.array([.229, .224, .225], np.float32)
         tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None])
-        logits = self.session.run(None, {"pixel_values": tensor})[0][0]
+        return self.session.run(None, {"pixel_values": tensor})[0][0]
+
+    @staticmethod
+    def _road_masks(scores, denominator, size, confidence):
+        probs = scores[:2] / denominator
+        return tuple(cv2.resize(p, size) >= confidence for p in probs)
+
+    def __call__(self, image, confidence):
+        logits = self._logits(image)
         scores = np.exp(logits - logits.max(axis=0))
-        probs = scores[:2] / scores.sum(axis=0)
-        return tuple(cv2.resize(p, image.size) >= confidence for p in probs)
+        return self._road_masks(scores, scores.sum(axis=0), image.size, confidence)
+
+    def segment_scene(self, image, confidence):
+        """Return road, sidewalk and original-size static class IDs from one inference."""
+        logits = self._logits(image)
+        scores = np.exp(logits - logits.max(axis=0))
+        denominator = scores.sum(axis=0)
+        road, sidewalk = self._road_masks(scores, denominator, image.size, confidence)
+        winners = logits.argmax(axis=0)
+        # In the max-shifted softmax the winning numerator is always one.
+        known = ((winners >= CITYSCAPES_STATIC_START) & (winners < CITYSCAPES_STATIC_END)
+                 & (1 / denominator >= confidence))
+        ids = np.where(known, winners, SEMANTIC_UNKNOWN_ID).astype(np.uint8)
+        semantic_map = cv2.resize(ids, image.size, interpolation=cv2.INTER_NEAREST)
+        return road, sidewalk, semantic_map
 
 
 class RoadEdge:
@@ -56,6 +80,9 @@ class RoadEdge:
     def __call__(self, image, depth):
         road, sidewalk = self.segment(image, self.confidence)
         return self.locate(road, sidewalk, depth)
+
+    def segment_scene(self, image):
+        return self.segment.segment_scene(image, self.confidence)
 
     def locate(self, road, sidewalk, depth, *, axes=None, plane=None, camera=None):
         h, w = road.shape
