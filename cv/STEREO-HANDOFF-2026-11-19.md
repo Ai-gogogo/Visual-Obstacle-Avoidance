@@ -1,16 +1,22 @@
 # VisionAssist 双目深度交接
 
-## 当前接手点 · 2026-11-20 晚间
+## 当前接手点 · 2026-11-21
 
-- **分支与部署。** 本机分支为 `cv-stereo-depth-map`。目前 8775 部署的功能版本是 `c2e428c`，包含上一张分割图保留逻辑 `39b917f` 和来自队友 `cv` 分支的 ADE20K 分割合并 `b5a142d`。更新此文时，8775 桌面服务、8776 手机 HTTPS 代理和 Camera A worker 都在线，A、B 都有新帧。Git 的本地 `origin/cv-stereo-depth-map` 跟踪点为 `c021460`，接手时以本机功能版本为准。
-- **实时控制台。** Camera A、**Stereo depth map**、**Camera A segmentation** 从左到右同排，窄窗口可以横向滚动。Camera B 位于下一排，可用 **Show Camera B** 控制可见性，浏览器会记住该设置。卡片、状态行和检测列表都有预留空间，警报浮在角落。深度图可切 StereoSGBM 或 RAFT-Stereo。分割结果短暂缺失或过期时，面板保留上一张图和图例，同时标记 **Last result · waiting for update**。更换或断开 Camera A 会清除该图。
-- **平面与避障。** `--plane-ransac` 使用原始公制深度拟合并独立验证支撑面。平面合格时，**Show meters** 可显示物体离面高度，适用的障碍判断使用 3D 走廊和高度阈值。平面失效时，障碍与风险回到原有 2D 规则，路沿与横穿预测可在同一配对、有效 PnP 和 500 ms 时限内沿用变换后的姿态，其余情况使用静态俯仰角。**Show plane overlay** 默认关闭。开启后，绿色标出训练内点和合格中央留区，橙色标出高于误差带且处在有效高度区间的点，默认下限至少 0.05 m、上限 2.0 m。橙色是调试几何提示，告警还依赖走廊和风险条件。
-- **分割的用途。** `--scene-segmentation` 启用 Camera A 的 ADE20K 分类图，150 类，后台默认每秒最多启动三次推理。ADE20K 当前服务于实时预览和录像对比。独立的 `--road-alerts` 使用 Cityscapes 模型提供路沿预警和可用的道路、人行道候选掩码，本次 8775 的启动参数没有这个开关。
-- **录像与对比。** **Record A + B → Stop and save** 保存同步两路 JPEG/PNG、`timestamps.csv` 和当次标定，随后生成左右并排原片。在 **Saved recordings** 选中录像，点 **Generate depth comparison** 输出 **Camera A 原图｜StereoSGBM｜RAFT-Stereo｜Camera A 语义分割** 四栏 MP4。旧的三栏对比用 **Regenerate with segmentation** 重生成。四栏使用同一批原始配对帧，分割从对应的 A 原图离线重算。固定 4 FPS 便于逐帧查看，播放中的算法等待消失，深度缺测和分类边缘波动仍可能存在。
+- **分支与部署。** `cv-stereo-depth-map` 的 S1–S5 功能版截至 `7ad749f`，已推到同名 GitHub 分支。8775 正在运行该功能版加本机改动。默认标定、Depth source 显示名称、独立的障碍标签开关和四栏视频导出改动尚在本机工作区。交接时已核实 8775 和 8776 HTTPS 均可访问，桌面、手机代理和 Camera A worker 均在运行。实体手机连线以控制台当时显示为准。
+- **新机位。** 默认 `480 × 640 · WebRTC` 标定名为 `18pro+15pro_2026-11-21_09-03-42`，来自 09:03:42 保存的棋盘录像 `754fb6cb`。取录像后段 35 个不同姿势，26 个拟合、9 个留出验证。左右校正垂直误差 P50 为 0.35 px，P95 为 0.94 px，拟合基线约 20.8 cm。米制比例沿用每格 14.605 mm。绝对距离仍待用尺复核。新机位的一对留出帧通过 8775 回放获得同帧深度，有效覆盖率为 36.6%。命名配置、旧默认备份、拟合脚本和验证日志保存在本机 `.visionassist/calibrations/18pro+15pro_2026-11-21_09-03-42/`。
+- **实时控制台。** Camera A、**Stereo depth map**、**Camera A segmentation** 同排，窄窗口可横向滚动。Camera B 位于下方，可用 **Show Camera B** 切换。Depth source 默认项显示新标定名称。分割暂缺时保留上一张图和图例并显示等待状态，更换或断开 Camera A 会清除该图。
+- **录像与对比。** **Record A + B → Stop and save** 保留同步原图、时间戳、当次标定和原版左右并排 `stereo.mp4`。本机 **Generate depth comparison** 生成 **Camera A + YOLO｜StereoSGBM｜RAFT-Stereo｜Camera A 语义分割** 四栏 MP4，4 FPS，分割图例最多 8 项。**Regenerate with segmentation** 更新四栏文件。2026-11-20 23:42 的 403 帧录像已按此重生成，原始材料校验值一致。新的录制使用当前标定，已有录像各自保留拍摄时的配置。
+
+## 现场怎么测 S1–S5
+
+1. 两台手机按标定时的 A/B 顺序装好，保持镜头、倍率、方向和相对位置。通过 **Pair a phone → Wi-Fi · WebRTC** 分别配对，选择 **480 × 640 · WebRTC**。Depth source 保持命名的 Live 默认项，Depth algorithm 先试 **RAFT-Stereo**。WLS 和 Temporal median 只影响预览，可以先留空。
+2. 勾 **Show meters**。Camera A 的框显示可用的中位距离和离支撑面高度。最近距离以 P10 表示，同时比中位距离至少近 0.20 m 和 15% 时才出现 `min`。要验证实物精度，用固定机位、带纹理的目标和两个尺量距离复测。
+3. 勾 **Show obstacle labels**。出现 **Plane OK** 且当前凸起通过几何和语义筛选时，深度图下方会显示例如 `pole 1.1m` 的摘要。**Show plane overlay** 独立控制深度图着色，绿色标出支撑面拟合内点及合格留区，橙色标出高于误差带的点。两个选项均默认关闭，后台 RANSAC、测量和分类照常运行。想保持深度图原色，只勾 **Show meters** 和 **Show obstacle labels**。
+4. **Last depth frame · waiting for update** 表示正在等待新的配对结果。检查两路是否持续发帧、是否同为 480 × 640 WebRTC，以及拍摄时差和校时误差之和是否在 65 ms 内。Camera B 断联、结果过期或检测帧与深度帧不匹配时，预览清除最近距离和未知凸起摘要。
 
 ## 复现当前运行方式
 
-在仓库根目录执行。手机使用 **Pair a phone → Wi-Fi · WebRTC** 获取 A、B 的配对码，两台选择 **480 × 640 · WebRTC**。按标定位置安装两台手机，Rice 对应左侧 A，Jia 对应右侧 B。重启桌面服务后需要重新配对。只重启 Camera A worker 可以保留桌面会话和手机配对，适合更新仅涉及 Python 处理的改动。手机端代码变动后，先在 Safari 重新载入相机页。
+在项目根目录运行。已运行的本机服务由 `launchctl` 管理，标签为 `com.visionassist.local.desktop8775`、`com.visionassist.local.phone8776` 和 `com.visionassist.local.worker8775`。日志位于 `.visionassist/deploy/s5-8775.sdxyor/`。只更新 CV 或更换默认标定时，重启 worker 即可保留配对。前端重新构建后需要重启桌面服务来加载新页面，两台手机随后重新配对。
 
 ```sh
 (cd web && npm run build -- --webpack)
@@ -19,27 +25,31 @@ VISIONASSIST_PORT=8775 \
   VISIONASSIST_CV_PYTHON="$PWD/.visionassist/rtc-env/bin/python" \
   node web/server.cjs
 
-# 另一个终端，从仓库根目录运行。
+# 另一个终端，从项目根目录运行。
 .visionassist/rtc-env/bin/python -u cv/live_camera.py \
   --server http://127.0.0.1:8775 --device mps --cpu-threads 4 \
+  --weights cv/models/yolo11n-seg.pt \
   --rtc-low-config cv/results/stereo-calibration-2026-11-20/webrtc-480x640.json \
-  --plane-ransac --scene-segmentation
+  --plane-ransac --road-alerts --scene-segmentation
 ```
 
-桌面入口是 [localhost:8775](http://localhost:8775/)，手机 HTTPS 源由本机 `.visionassist/phone-origin-8775.txt` 指定。局域网变化时按 [Web README](../web/README.md#双手机-webrtc) 核对 8776 代理、证书和网卡地址。没有 MPS 的机器可用 `--device cpu`。当前分割使用 `cv/models/scene-segformer-b0.onnx`，RAFT 使用本机 `.visionassist/RAFT-Stereo/raftstereo-realtime.pth` 和对应模型代码。下载及依赖见 [CV README](README.md#camera-a-室内外语义分割) 和 [Web README](../web/README.md#录制用于测试的-ab-素材)。
+桌面入口是 [localhost:8775](http://localhost:8775/)。手机 HTTPS 源由本机 `.visionassist/phone-origin-8775.txt` 指定，网卡变化时按 [Web README](../web/README.md#双手机-webrtc) 核对地址与证书。默认标定路径的本机文件和命名 JSON 内容一致，供 worker、菜单及新录像共同使用。搭建新工作区时需取得本机配置和界面改动，GitHub 上的 S1–S5 基线仍使用仓库原来的标定。权重、校准录像、发布日志和原始素材保存在本机 Git 忽略目录。使用 [CV README](README.md#camera-a-室内外语义分割) 核对依赖。
 
-480 × 640 WebRTC 的配对上界包括 A/B 拍摄时间差和两台设备的校时误差，当前门槛为 65 ms。若控制台提示缺采集时间，先确认两路都在发帧，再检查 `X-RTC-Timing-Source` 与手机代理转发的 `X-Capture-Stream`。此前实机确认两端均使用 `frame-capture-time`，抽查 8 对同步帧的上界为 27–52 ms。Apple GPU 加速 YOLO，现有 RAFT 路径仍使用 CPU。
+## 融合路径和验收证据
 
-## 验证与证据边界
+- **实例分割 + 原始深度。** YOLO-Seg 的实例掩码对齐 Camera A。S2 优先取腐蚀后的物体内部测距、测高，按证据质量回退。S3 将前景轮廓合并后膨胀 4 px，保留椅腿之间的支撑面点。同一份扣除结果用于 RANSAC、PnP 和未知凸起去重。平面验证失败时继续走原有 2D 回退。
+- **Cityscapes + 凸起几何。** `--road-alerts` 的 CPU SegFormer-B0 一次推理同时提供道路、人行道候选和静态语义。扣除已检测前景后的凸起先通过几何筛选，再用至少 12 个有效语义像素和 50% 得票门槛定类。ADE20K 是另一条 CPU 推理路径，由 `--scene-segmentation` 启用，负责 150 类彩色预览及录像对比。
+- **接口。** S5 放行 P10 和凸起语义标量。实拍 HTTP 回放核对了字段透传与断联清除，检测请求及预览响应没有实例像素掩码或 `semantic_map`。Apple MPS 承担 YOLO 推理，RAFT-Stereo 和两条 SegFormer 路径使用 CPU。
 
-| 项目 | 已有证据 |
+| 阶段 | 验证与边界 |
 | --- | --- |
-| M1–M5 | 支撑平面拟合、离线评测、实时 3D/2D 回退、动态姿态、路沿落差及控制台已接通。M1/M2 整改、M3 与 M4 已通过项目审查。M5 有完整回归和叠层启闭的同帧 HTTP 验证。 |
-| 真实桌面评测 | 同一段 37 对同步帧，自动掩码下 StereoSGBM 为 0/37，RAFT-Stereo 为 22/37。RAFT 的逐帧留区 P90 中位数为 15.3 mm。手工 ROI 下，只有 7 帧同时拟合通过且有杯身高度，帧间标准差 20.5 mm。固定印花点的高度稳定性与绝对测距精度仍待实测。 |
-| PnP 先验 | 合成运动序列上，快速路径将单帧拟合均值从 8.22 ms 降到 6.93 ms，法向抖动持平。该组计时独立于 PnP 耗时。37 对实拍帧回放中没有通过校验的 PnP 位姿，现场加速仍待验证。 |
-| 最新界面与导出 | 桌面 1440 px 和窄屏 390 px 都验证了三栏对齐。通过真实录像的 4 对同步帧验证旧对比升级、四栏 MP4 解码与 CSV 帧号对齐。最近 Web 21/21、生产前端 3/3、构建与 TypeScript 检查通过。最近全量 CV 70/70 通过于语义分割合并版 `b5a142d`。 |
+| [S1](results/segmentation-s1/README.md) `38bd53a` | YOLO 检测和分割权重均可用。MPS 逐对耗时差中位数 8.00 ms，P95 22.48 ms。 |
+| [S2](results/segmentation-s2/README.md) `389b9a8` | 合成镂空目标验证测距、测高和回退。有效平面帧的 CPU 测量后处理 P95 为 3.64 ms。 |
+| [S3](results/segmentation-s3/README.md) `133c615` | 同源 RAFT 的桌面段和室内段各 37 帧，有效测距率分别从 28.0% 到 30.9%、62.4% 到 65.5%。平面通过数分别为 22→19、0→0。前景扣除 P95 为 0.61–0.77 ms，桌面段完整后处理 P95 为 4.31 ms，高于 4 ms 目标。 |
+| [S4](results/segmentation-s4/README.md) `63597b9` | 实拍 HTTP 验证开启道路预警时每帧一次 Cityscapes 推理，关闭时零次。合成 12 连通域语义投票 P95 为 0.145 ms。 |
+| [S5](results/segmentation-s5/README.md) `7ad749f` | CV 85/85、Web 21/21、生产前端 3/3、构建和 TypeScript 均通过。本机拆分显示开关后，生产前端 3/3 再通过，8775 页面已核实。 |
 
-可分享的自动掩码数据见 [summary.json](results/ransac-m2-auto-mask/summary.json)。本机逐帧数据和日志位于 `.visionassist/plane-eval/`、`.visionassist/scene-merge/`、`.visionassist/ui-layout/` 和 `.visionassist/scene-comparison/`。最近部署日志在 `.visionassist/deploy/comparison-8775.6OGTxM/`。录像、权重和证书保存在本机 Git 忽略目录。桌面与纸杯的实验背景及旧快照说明见 `.visionassist/handoffs/2026-11-20/HANDOFF.md`。
+M1–M5 的历史平面证据见 [自动掩码评测](results/ransac-m2-auto-mask/summary.json) 及本机 `.visionassist/plane-eval/`。当时同一桌面录像用纯检测权重运行，StereoSGBM 为 0/37，RAFT-Stereo 为 22/37。实拍绝对距离、已知高度和新机位的平面通过率仍待测。本机逐帧实拍数据与 HTTP 日志见 `.visionassist/seg-eval/`，更早的实验材料见本机交接 `.visionassist/handoffs/2026-11-20/HANDOFF.md`。
 
 ## 历史记录 · 2026-11-19
 
