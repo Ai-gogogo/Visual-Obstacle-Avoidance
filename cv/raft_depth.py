@@ -4,8 +4,20 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import os
+
 import cv2
 import numpy as np
+
+
+def _device():
+    """CUDA when present; MPS only on request because RAFT-Stereo is unverified there."""
+    import torch
+
+    requested = os.environ.get('VISIONASSIST_RAFT_DEVICE')
+    if requested:
+        return torch.device(requested)
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 @lru_cache(maxsize=1)
@@ -24,19 +36,21 @@ def _load_model():
     model = RAFTStereo(options)
     weights = torch.load(repo / 'raftstereo-realtime.pth', map_location='cpu', weights_only=True)
     model.load_state_dict({name.removeprefix('module.'): value for name, value in weights.items()})
-    return model.eval(), InputPadder
+    device = _device()
+    print(f'RAFT-Stereo on {device}', file=sys.stderr, flush=True)
+    return model.to(device).eval(), InputPadder, device
 
 
 def _disparity(left, right):
     import torch
 
-    model, input_padder = _load_model()
+    model, input_padder, device = _load_model()
     with torch.inference_mode():
-        tensors = [torch.from_numpy(np.ascontiguousarray(im[:, :, ::-1])).permute(2, 0, 1)[None].float()
+        tensors = [torch.from_numpy(np.ascontiguousarray(im[:, :, ::-1])).permute(2, 0, 1)[None].float().to(device)
                    for im in (left, right)]
         padder = input_padder(tensors[0].shape, divis_by=32)
         _, flow = model(*padder.pad(*tensors), iters=7, test_mode=True)
-        return -padder.unpad(flow)[0, 0].numpy()
+        return -padder.unpad(flow)[0, 0].cpu().numpy()
 
 
 def compute(stereo, left_bgr, right_bgr):
