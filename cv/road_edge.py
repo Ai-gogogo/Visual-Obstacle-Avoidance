@@ -20,7 +20,16 @@ class RoadSegmenter:
             raise ValueError(f"Missing road model {path}. See cv/README.md for the download.")
         options = ort.SessionOptions()
         options.intra_op_num_threads = 2
-        self.session = ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
+        providers = ["CPUExecutionProvider"]
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            try:
+                import torch  # noqa: F401  The CUDA build of torch ships the CUDA and cuDNN DLLs.
+            except ImportError:
+                pass
+            providers.insert(0, "CUDAExecutionProvider")
+        # onnxruntime falls back to CPU when the CUDA provider cannot start.
+        self.session = ort.InferenceSession(str(path), options, providers=providers)
+        print(f"Road segmentation on {self.session.get_providers()[0]}", flush=True)
 
     def __call__(self, image, confidence):
         rgb = np.asarray(image.resize((512, 512), Image.Resampling.BILINEAR), dtype=np.float32) / 255
