@@ -1,0 +1,11 @@
+name: visionassist-ocr
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r agent-requirements.txt
+      - paddlepaddle==3.2.0
+      - paddleocr==3.3.2
+      - paddlex==3.3.12

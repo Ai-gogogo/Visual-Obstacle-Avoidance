@@ -1,7 +1,7 @@
 faster-whisper==1.2.1
 av==16.1.0
 piper-tts==1.8.0
-opencv-python-headless
+opencv-contrib-python==4.10.0.84
 numpy
 python-docx
 opencc-python-reimplemented

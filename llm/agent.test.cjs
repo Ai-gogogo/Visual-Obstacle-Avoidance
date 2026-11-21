@@ -7,6 +7,153 @@ const {tmpdir} = require('node:os');
 const {join} = require('node:path');
 const {createAgent} = require('./agent.cjs');
 const {createServer} = require('../web/server.cjs');
+const echoOcr = async messages => JSON.parse(messages.at(-1).content).ocr_text;
+
+test('fixed OCR demo is opt-in and its labeled reply reaches speech synthesis', async () => {
+  const previous = process.env.VISIONASSIST_OCR_DEMO;
+  const worker = async (mode, data) => {
+    assert.equal(mode,'tts');
+    assert.deepEqual(data,{text:'Text recognition demo. Study Room G17',language:'en'});
+    return {audio:Buffer.from('RIFF mocked WAV').toString('base64')};
+  };
+  let enabled, disabled;
+  try {
+    process.env.VISIONASSIST_OCR_DEMO = '1';
+    enabled = createAgent({worker});
+    delete process.env.VISIONASSIST_OCR_DEMO;
+    disabled = createAgent({worker});
+  } finally {
+    if (previous === undefined) delete process.env.VISIONASSIST_OCR_DEMO;
+    else process.env.VISIONASSIST_OCR_DEMO = previous;
+  }
+  const session = {slots:{A:{frame:Buffer.from([255,216,255,217]),etag:'"sample"',stamp:Date.now()}}};
+  const input = {text:'Help me identify the text.'};
+  const noCamera = {slots:{A:{}}};
+  assert.equal((await disabled.chat(noCamera,input)).source,'unavailable');
+  assert.equal((await enabled.chat(noCamera,input)).source,'unavailable');
+  const reply = await enabled.chat(session,input);
+  assert.equal(reply.source,'ocr_demo');
+  assert.match((await enabled.synthesize(reply.reply_text)).toString(),/^RIFF/);
+});
+
+test('spoken variations and the Quick Actions mode route directly to OCR', async () => {
+  const session = {slots:{A:{frame:Buffer.from('image'),etag:'"sign"',stamp:Date.now()}}};
+  let ocrModelCalls = 0;
+  let failModel = false;
+  const agent = createAgent({filename:':memory:', recognizeText:async () => ({text:'Library'}), generate:async messages => {
+    if (!messages[0].content.includes('verified OCR')) return 'General reply';
+    assert.equal(await echoOcr(messages),'Library');
+    ocrModelCalls++;
+    if (failModel) throw new Error('Ollama offline');
+    return 'Wrong sign';
+  }});
+  try {
+    const phrases = ['帮我读一下文字', '嗯，帮我读一下文字好吗？', '能不能帮我看看上面写了什么？',
+      '请念一下画面里的字。', 'Can you tell me what is written on this sign?', '那么我识别一下文字',
+      '那么，我想识别一下画面里的文字。'];
+    for (const text of phrases) {
+      assert.equal((await agent.chat(session,{text})).reply_text,'Library',text);
+    }
+    assert.equal((await agent.chat(session,{text:'Read camera text',mode:'read_text'})).source,'ocr');
+    assert.equal((await agent.chat(session,{text:'Please read my last reply.'})).source,'llm');
+    assert.equal((await agent.chat(session,{text:'我想了解怎么识别文字。'})).source,'llm');
+    assert.equal(ocrModelCalls,phrases.length+1);
+    failModel = true;
+    assert.equal((await agent.chat(session,{text:'帮我读文字'})).ocr_status,'model_unavailable');
+  } finally { agent.close(); }
+});
+
+test('Ollama maps indirect chat to the camera OCR action and leaves how-to questions in chat', async () => {
+  const session = {slots:{A:{frame:Buffer.from('image'),etag:'"sign"',stamp:Date.now()}}};
+  let recognitionCalls = 0;
+  const agent = createAgent({filename:':memory:', recognizeText:async () => { recognitionCalls++; return {text:'Library G17'}; },
+    generate:async (messages,image,format) => {
+      if (format?.properties?.intent) {
+        assert.equal(image,null);
+        const {utterance} = JSON.parse(messages.at(-1).content);
+        return JSON.stringify({intent:utterance.includes('门口') ? 'read_room_number' : 'none'});
+      }
+      if (messages[0].content.includes('verified OCR')) return echoOcr(messages);
+      return 'General reply';
+    }});
+  try {
+    assert.equal((await agent.chat(session,{text:'门口牌子写啥'})).reply_text,'Library G17');
+    assert.equal((await agent.chat(session,{text:'OCR 怎么识别文字？'})).source,'llm');
+    session.slots.A = {};
+    assert.equal((await agent.chat(session,{text:'门口牌子写啥'})).ocr_status,'no_frame');
+    assert.equal(recognitionCalls,1);
+  } finally { agent.close(); }
+});
+
+test('OCR speaks distinct retry messages and suppresses results from replaced or expired frames', async () => {
+  const frame = (id,stamp=Date.now()) => ({frame:Buffer.from(id),etag:`"${id}"`,stamp});
+  const session = {slots:{A:{},B:frame('b')}};
+  const input = {text:'Help me identify the text.'};
+  let recognize;
+  const agent = createAgent({recognizeText:request => recognize(request),generate:echoOcr});
+  const ask = () => agent.chat(session,input);
+  try {
+    assert.equal((await ask()).ocr_status,'no_frame');
+    session.slots.A = frame('expired',Date.now()-6000);
+    assert.equal((await ask()).ocr_status,'stale_frame');
+    session.slots.A = frame('live');
+    for (const [result,status] of [
+      [{text:''},'no_text'], [{text:'',uncertain:true},'uncertain'], [{text:'',invalid_frame:true},'invalid_frame']
+    ]) {
+      recognize = async () => result;
+      assert.equal((await ask()).ocr_status,status);
+    }
+    recognize = async () => ({text:'Exit',uncertain:true});
+    const partial = await ask();
+    assert.equal(partial.ocr_status,'partial');
+    assert.match(partial.reply_text,/unclear.*Exit/);
+    recognize = async () => { throw Object.assign(new Error('test timeout'),{code:'ETIMEDOUT'}); };
+    assert.equal((await ask()).ocr_status,'timeout');
+    recognize = async () => { throw new Error('test crash'); };
+    assert.equal((await ask()).ocr_status,'worker_error');
+    recognize = async () => {
+      session.slots.A = frame('reconnected');
+      return {text:'Old sign text'};
+    };
+    const replaced = await ask();
+    assert.equal(replaced.ocr_status,'camera_changed');
+    assert.doesNotMatch(replaced.reply_text,/Old sign text/);
+    session.slots.A = frame('aging',Date.now()-4990);
+    recognize = async () => {
+      await new Promise(resolve => setTimeout(resolve,30));
+      Object.assign(session.slots.A,frame('newer'));
+      return {text:'Previous sign'};
+    };
+    assert.equal((await ask()).ocr_status,'stale_frame');
+  } finally { agent.close(); }
+});
+
+test('Gxx room-number requests require agreement from two recent frames of the same camera', async () => {
+  const frame = (id,stamp) => ({frame:Buffer.from(id),etag:`"${id}"`,stamp});
+  const session = {slots:{}};
+  let nextCode, gap;
+  const agent = createAgent({generate:echoOcr,recognizeText:async ({frame_id,camera_id,timestamp_ms}) => {
+    assert.equal(camera_id,'A');
+    if (frame_id === 'first') {
+      Object.assign(session.slots.A,frame('second',timestamp_ms+gap));
+      return {text:'G17'};
+    }
+    return {text:nextCode};
+  }});
+  try {
+    for (const [code,interval,status] of [
+      ['G17',200,'room_confirmed'], ['G18',200,'uncertain'], ['G17',2200,'uncertain']
+    ]) {
+      nextCode = code;
+      gap = interval;
+      session.slots.A = frame('first',Date.now()-2500);
+      const result = await agent.chat(session,{text:'请帮我读一下门牌号。'});
+      assert.equal(result.ocr_status,status);
+      if (status === 'room_confirmed') assert.equal(result.reply_text,'G17');
+      else assert.doesNotMatch(result.reply_text,/G1[78]/);
+    }
+  } finally { agent.close(); }
+});
 
 test('a habit is private until confirmation, persists after restart and can be deleted', async () => {
   const directory = mkdtempSync(join(tmpdir(),'visionassist-memory-'));
@@ -60,6 +207,11 @@ test('natural water-bottle enrollment uses the sole live camera and stays out of
 
 test('paired camera, exact-frame YOLO, alerts, assisted vision and local model adapters', async t => {
   const generated = [];
+  const ocrRequests = [];
+  const recognizeText = async request => {
+    ocrRequests.push(request);
+    return {text:'Study Room G17'};
+  };
   const itemFeature = index => ({
     version:'spatial-hsv-v1', vector:Array.from({length:540},(_,i) => Number(i === index))
   });
@@ -67,14 +219,14 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   const worker = async (mode,data) => {
     if (mode === 'stt') {
       assert.equal(data.language,'en');
-      return {text:'What can you see?'};
+      return {text:'Help me identify the text.'};
     }
     if (mode === 'docx') {
       assert.deepEqual(data.messages.map(message => message.role),['user','assistant']);
       return {document:Buffer.from('PK mocked DOCX').toString('base64')};
     }
     if (mode === 'tts') {
-      assert.equal(data.language,'zh');
+      assert.deepEqual(data,{text:'Study Room G17',language:'en'});
       return {audio:Buffer.from('RIFF mocked WAV').toString('base64')};
     }
     const byte = Buffer.from(data.image,'base64')[2];
@@ -92,9 +244,10 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   };
   const generate = async (messages,image) => {
     generated.push({messages,image});
+    if (messages[0].content.includes('verified OCR')) return echoOcr(messages);
     return image ? 'The box looks blue.' : 'Hello.';
   };
-  const server = createServer({agent:{filename:':memory:',worker,generate}});
+  const server = createServer({agent:{filename:':memory:',worker,generate,recognizeText}});
   server.listen(0,'127.0.0.1');
   await once(server,'listening');
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -115,6 +268,8 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   const phone = await pair();
   const frame = byte => Buffer.from([255,216,byte,255,217]);
   const push = (token,byte) => call('/api/frame',{method:'PUT',token,type:'image/jpeg',body:frame(byte)});
+  assert.match((await chat('Help me identify the text.')).reply_text,/no recent frame/);
+  assert.equal(ocrRequests.length,0);
   assert.equal((await push(phone,3)).status,204);
   assert.equal((await call('/api/memory/people',{token:phone})).status,401);
   const foreignHost = await new Promise((resolve,reject) => {
@@ -161,6 +316,7 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.equal((await publish(latestFrame)).status,204);
   assert.equal((await publish(latestFrame)).status,204);
   assert.match((await chat('我前面有什么')).reply_text,/bottle/);
+  assert.equal(ocrRequests.length,0);
   assert.match((await chat('哪个物体更近？')).reply_text,/无法判断/);
   assert.match((await chat('哪个物体更远？', {camera_id:'B'})).reply_text,/没有可用/);
   const alert = await json(await call('/api/agent/alerts?after=0',{token:desk}),200);
@@ -234,13 +390,26 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.equal(generated.length,modelCalls);
   const speech = await json(await call('/api/agent/transcribe?language=en',{method:'POST',token:desk,
     type:'audio/webm',body:Buffer.from('mock audio')}),200);
-  assert.equal(speech.text,'What can you see?');
+  assert.equal(speech.text,'Help me identify the text.');
+  const ocrReply = await chat(speech.text);
+  assert.equal(ocrReply.reply_text,'Study Room G17');
+  assert.equal((await chat('请帮我读一下门牌。',{camera_id:'B'})).source,'ocr');
+  assert.equal((await chat('What does this sign say?',{camera_id:'both'})).source,'unavailable');
+  assert.equal(ocrRequests.length,2);
+  const previewB = await json(await call('/api/preview/B',{token:desk}),200);
+  assert.deepEqual(ocrRequests[1],{
+    image:frame(3), camera_id:'B', frame_id:previewB.frame_id, timestamp_ms:previewB.timestamp_ms
+  });
+  assert.deepEqual(ocrRequests[0].image,frame(9));
+  assert.equal(generated.length,modelCalls+2);
+  assert.equal(generated.at(-1).image,null);
+  assert.equal(await echoOcr(generated.at(-1).messages),'Study Room G17');
   const exported = await call('/api/agent/export',{method:'POST',token:desk,body:{
     messages:[{role:'user',text:'你好'},{role:'assistant',text:'我是 VisionAssist'}]
   }});
   assert.equal(exported.status,200);
   assert.match(exported.headers.get('content-disposition'),/\.docx/);
-  const spoken = await call('/api/agent/speech',{method:'POST',token:desk,body:{text:'你好'}});
+  const spoken = await call('/api/agent/speech',{method:'POST',token:desk,body:{text:ocrReply.reply_text}});
   assert.equal(spoken.headers.get('content-type'),'audio/wav');
   assert.match(await spoken.text(),/^RIFF/);
   await pair();

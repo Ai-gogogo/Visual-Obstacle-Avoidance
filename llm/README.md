@@ -106,3 +106,30 @@ CV 可在物体结果中设置 `risk: "caution"` 或 `"urgent"`。Dashboard 轮�
 运行 `node --test pairing.test.cjs agent.test.cjs`。团队目录结构下，从仓库根目录运行 `node --test web/pairing.test.cjs llm/agent.test.cjs`。自动测试使用双端 HTTP 配对、真实 SQLite、模拟模型和模拟 CV 数据；模型质量、双机与扬声器由现场测试确认。建议先拿一种物品和一位同意登记的亲友试跑，再加入相似物品和未登记参与者。
 
 参考：[Ollama 图片接口](https://docs.ollama.com/capabilities/vision) · [faster-whisper](https://github.com/SYSTRAN/faster-whisper) · [Piper](https://github.com/OHF-Voice/piper1-gpl) · [OpenCV 人脸模型](https://docs.opencv.org/4.x/d0/dd4/tutorial_dnn_face.html)
+
+## 固定 OCR 结果语音演示
+
+从仓库根目录启动服务前，在 PowerShell 执行 `$env:VISIONASSIST_OCR_DEMO = '1'`，再按下文启动网页服务。使用手机时，按 Web README 配置 HTTPS。配对并选中有实时画面的相机 A 或 B，进入助手页面，说 “Help me identify the text.”。助手会显示并播报演示提示和固定文字 `Study Room G17`。也可以输入同一句话，再点 **Read aloud**。语音输入和播报分别使用已安装的 Whisper 和 Piper 模型。
+
+演示结束后执行 `Remove-Item Env:VISIONASSIST_OCR_DEMO` 并重启服务。该演示的文字与镜头内容无关。
+
+## 实时文字识别
+
+在 `llm` 目录运行 `conda env create -f environment.yml`，并把上面列出的 Whisper 和 Piper 模型放入 `llm/models`。Whisper 也支持把对应的 `Systran/faster-whisper-base` 文件放到 `llm/models/whisper-base`。
+
+在 `web` 目录用 Node.js 24 运行 `npm ci` 后，从仓库根目录启动本地开发服务：
+
+~~~powershell
+conda activate visionassist-ocr
+$env:VISIONASSIST_PYTHON = (Get-Command python).Source
+Remove-Item Env:VISIONASSIST_OCR_DEMO -ErrorAction SilentlyContinue
+npm --prefix web run dev
+~~~
+
+如果模型已下载到另一个工作区，启动前可用 `VISIONASSIST_MODELS` 指向现有模型目录。手机通过 WebRTC 传输时，仍需按 Web README 配置 HTTPS 和 `VISIONASSIST_RTC_PYTHON`。
+
+配对并选择有实时画面的相机，然后询问 “Help me identify the text.” 或“请帮我读一下门牌”。也可以点击 Quick Actions 中的同名按钮。PaddleOCR 从画面中提取文字，Agent 将文字交给本地 Ollama 的聊天模型，然后由 Piper 播报。实时朗读需要 Ollama 在 `127.0.0.1:11434` 运行，并安装默认聊天模型 `qwen3:4b-instruct-2507-q4_K_M` 或 `VISIONASSIST_CHAT_MODEL` 指定的本地模型。Agent 只接受模型对空白的调整，避免模型改写文字或门牌号。Ollama 调用失败时会提示检查本地模型。首次识别时加载 PP-OCRv5 移动版模型，后续识别复用同一进程。
+
+可将 `PP-OCRv5_mobile_det` 和 `PP-OCRv5_mobile_rec` 的 `inference.json`、`inference.pdiparams` 和 `inference.yml` 分别下载到 `llm/models/ocr/` 下的同名子目录。没有预置模型时，PaddleOCR 会尝试下载。识别超时后可以重新发起请求。[检测模型](https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det) · [识别模型](https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec)
+
+当画面过期、相机重连、没有文字、文字不清或识别超时时，助手会给出对应提示。普通朗读只读置信度达到 `0.80` 的文字，部分内容看不清时会在播报中说明。明确询问“门牌号”“房间号”或 “room number” 时，`Gxx` 候选须在同一相机、同一次请求内两张间隔不超过两秒的画面上读到相同编号才会播报。

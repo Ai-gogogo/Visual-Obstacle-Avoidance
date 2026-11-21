@@ -1,11 +1,13 @@
 """Local speech and image feature extraction for VisionAssist."""
 import base64
+from contextlib import redirect_stdout
 from functools import lru_cache
 import io
 import json
 import os
 from pathlib import Path
 import sys
+import traceback
 import wave
 
 # The Agent worker is launched as a script from any working directory.
@@ -120,6 +122,73 @@ def face_features(image):
     ]
 
 
+class InvalidImage(ValueError):
+    pass
+
+
+def decode_image(payload, max_pixels=4_000_000):
+    import cv2
+    import numpy as np
+
+    try:
+        image = cv2.imdecode(
+            np.frombuffer(base64.b64decode(payload["image"], validate=True), dtype=np.uint8),
+            cv2.IMREAD_COLOR,
+        )
+    except (ValueError, cv2.error) as error:
+        raise InvalidImage("Invalid image") from error
+    if image is None or not image.size or image.shape[0] * image.shape[1] > max_pixels:
+        raise InvalidImage("Invalid image")
+    return image
+
+
+def serve_ocr():
+    reader = None
+    for line in sys.stdin:
+        try:
+            with redirect_stdout(sys.stderr):
+                image = decode_image(json.loads(line), max_pixels=3840 * 2160)
+                if reader is None:
+                    cache = Path(__file__).parent / ".visionassist" / "paddlex"
+                    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(cache))
+                    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+                    from paddleocr import PaddleOCR
+
+                    detector = MODELS / "ocr" / "PP-OCRv5_mobile_det"
+                    recognizer = MODELS / "ocr" / "PP-OCRv5_mobile_rec"
+                    reader = PaddleOCR(
+                        text_detection_model_name=detector.name,
+                        text_detection_model_dir=str(detector) if (detector / "inference.pdiparams").is_file() else None,
+                        text_recognition_model_name=recognizer.name,
+                        text_recognition_model_dir=str(recognizer) if (recognizer / "inference.pdiparams").is_file() else None,
+                        use_doc_orientation_classify=False,
+                        use_doc_unwarping=False,
+                        use_textline_orientation=False,
+                        device="cpu",
+                        enable_mkldnn=False,
+                        cpu_threads=2,
+                        text_det_limit_side_len=960,
+                        text_det_limit_type="max",
+                        text_rec_score_thresh=0.0,
+                    )
+                lines = []
+                uncertain = False
+                for result in reader.predict(image):
+                    recognized = 0
+                    for text, score in zip(result["rec_texts"], result["rec_scores"]):
+                        if text.strip() and score >= 0.8:
+                            lines.append(text.strip())
+                            recognized += 1
+                    uncertain |= recognized < max(len(result["dt_polys"]), len(result["rec_texts"]))
+            print(json.dumps({"text": "\n".join(lines), "uncertain": uncertain}, ensure_ascii=False), flush=True)
+        except InvalidImage:
+            print('{"text":"","invalid_frame":true}', flush=True)
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            print('{"error":"OCR inference failed"}', flush=True)
+            return
+
+
 def main(mode, payload):
     if mode == "stt":
         return transcribe(payload)
@@ -128,22 +197,16 @@ def main(mode, payload):
     if mode == "docx":
         return export_conversation(payload)
 
-    import cv2
-    import numpy as np
-
-    image = cv2.imdecode(
-        np.frombuffer(base64.b64decode(payload["image"], validate=True), dtype=np.uint8),
-        cv2.IMREAD_COLOR,
-    )
-    if image is None or not image.size or image.shape[0] * image.shape[1] > 4_000_000:
-        raise ValueError("Invalid image")
+    image = decode_image(payload)
     features = face_features(image) if mode == "face" else item_features(image, payload["boxes"])
     return {"features": features}
 
 
 if __name__ == "__main__":
     mode = sys.argv[1]
-    if mode in ("stt-session", "tts-session"):
+    if mode == "ocr":
+        serve_ocr()
+    elif mode in ("stt-session", "tts-session"):
         work = transcribe if mode == "stt-session" else synthesize
         for line in sys.stdin:
             try:
