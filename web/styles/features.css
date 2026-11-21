@@ -146,7 +146,8 @@ td{font-size:.94rem}
 #depth-hold-status { margin:0; padding-inline:.85rem; }
 #depth-reading { flex-basis:100%; }
 #stereo-view footer { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
-#stereo-view footer :is(#plane-status,#depth-scale) { grid-column:1 / -1; }
+#stereo-view footer :is(#plane-status,#protrusion-status,#depth-scale) { grid-column:1 / -1; }
+#protrusion-status { margin:0; }
 #record-progress { flex-basis:100%; }
 #record-library[open] { block-size:clamp(12rem,34vh,21rem); overflow:auto; scrollbar-gutter:stable; }
 .model-compute { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }

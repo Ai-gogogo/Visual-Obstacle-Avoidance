@@ -184,7 +184,7 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   assert.ok(alert.judged_ms >= alert.capture_ms);
 });
 
-test('plane diagnostics stay on the paired frame and overlay bytes are opt-in', async t => {
+test('paired depth fields and plane overlays survive only on the matched frame', async t => {
   t.mock.timers.enable({apis:['Date'],now:Date.now()});
   const server = createServer({agent:{filename:':memory:'}});
   server.listen(0,'127.0.0.1');
@@ -205,7 +205,11 @@ test('plane diagnostics stay on the paired frame and overlay bytes are opt-in', 
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN5sAAAAASUVORK5CYII=';
   const plane = {validated:true,reason:'ok',pitch_deg:12.3456,roll_deg:-.04,inlier_ratio:.85,holdout_p90_m:.012};
   const box = {bbox:[.4,.4,.6,.7],depth_m:1.2,height_above_plane_m:.14};
-  const objects = [{...box,label:'cup',position:'center',confidence:.9}];
+  const object = {...box,label:'cup',position:'center',confidence:.9,nearest_depth_m:.9};
+  const objects = [{...object,mask:[[1]],semantic_map:[[5]]},
+    {...object,nearest_depth_m:1.3}, {...object,nearest_depth_m:[.7]}];
+  const pole = {...box,semantic_label:'pole',semantic_confidence:.83};
+  const unknown = {...box,semantic_label:'unknown'};
   const road = {level:'visual',point:[.5,.6],curb_drop_m:.12,curb_confidence:'supported'};
   const preview = (opts, etag) => call('/api/preview/A','GET',desk,undefined,{
     'X-Depth-Options':JSON.stringify(opts), ...(etag ? {'If-None-Match':etag} : {})
@@ -228,7 +232,11 @@ test('plane diagnostics stay on the paired frame and overlay bytes are opt-in', 
     assert.equal(partner.headers.get('x-depth-plane-overlay'),opts.planeOverlay ? '1' : null);
     const stereo = {status:'ready',partner_id:partner.headers.get('x-partner-id'),preview:png,...stereoExtras};
     const accepted = await post('/api/cv/detections'+query,undefined,{
-      frame_id,objects,stereo,unclassified_obstacles:[box,{...box,depth_m:-1}],road_edge:edge
+      frame_id,objects,stereo:{...stereo,semantic_map:[[5]]},
+      unclassified_obstacles:[{...pole,mask:[[1]],semantic_map:[[5]]},
+        {...unknown,semantic_confidence:.99}, {...box,semantic_label:'unlisted',semantic_confidence:.8},
+        {...box,semantic_label:'wall',semantic_confidence:2}, {...box,depth_m:-1}],
+      semantic_map:[[5]],road_edge:edge
     });
     assert.equal(accepted.status,204);
     return preview(opts);
@@ -236,12 +244,24 @@ test('plane diagnostics stay on the paired frame and overlay bytes are opt-in', 
 
   const off = {meters:true};
   const on = {...off,planeOverlay:true};
-  let result = await (await publish(off,{plane,plane_overlay:png})).json();
+  function noPairedMetrics(result) {
+    assert.equal(Object.hasOwn(result,'unclassified_obstacles'),false);
+    assert.ok((result.objects ?? []).every(obj => !Object.hasOwn(obj,'nearest_depth_m')));
+  }
+  const matched = await publish(off,{plane,plane_overlay:png});
+  let result = await matched.json();
   assert.equal(Object.hasOwn(result,'plane_overlay'),false);
   assert.deepEqual(result.plane,plane);
   assert.equal(result.objects[0].height_above_plane_m,.14);
-  assert.deepEqual(result.unclassified_obstacles,[box]);
+  assert.equal(result.objects[0].nearest_depth_m,.9);
+  assert.ok(result.objects.slice(1).every(obj => !Object.hasOwn(obj,'nearest_depth_m')));
+  assert.deepEqual(result.unclassified_obstacles,[pole,unknown,box,{...box,semantic_label:'wall'}]);
+  assert.doesNotMatch(JSON.stringify(result), /"(?:mask|semantic_map)":/);
   assert.deepEqual(result.road_edge,road);
+
+  const hiddenMeters = await preview({meters:false},matched.headers.get('etag'));
+  assert.equal(hiddenMeters.status,200);
+  assert.ok((await hiddenMeters.json()).objects.every(obj => !Object.hasOwn(obj,'nearest_depth_m')));
 
   let response = await publish(on,{plane,plane_overlay:png});
   const withOverlay = response.headers.get('etag');
@@ -255,19 +275,38 @@ test('plane diagnostics stay on the paired frame and overlay bytes are opt-in', 
   result = await (await publish({meters:false,planeOverlay:true},{plane,plane_overlay:'not-a-png'})).json();
   assert.equal(Object.hasOwn(result,'plane_overlay'),false);
   assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'nearest_depth_m'),false);
 
   result = await (await publish(on,{plane:{validated:false,reason:'low_inlier_ratio',inlier_ratio:7},plane_overlay:png})).json();
   assert.deepEqual(result.plane,{validated:false,reason:'low_inlier_ratio'});
   assert.equal(Object.hasOwn(result,'plane_overlay'),false);
   assert.equal(Object.hasOwn(result,'unclassified_obstacles'),false);
   assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+  assert.equal(result.objects[0].nearest_depth_m,.9);
+
+  noPairedMetrics(await (await publish(on,{plane,partner_id:'other-b-frame'})).json());
+  noPairedMetrics(await (await publish(on,{plane,frame_id:'other-a-frame'})).json());
+  noPairedMetrics(await (await publish(on,{plane,preview:'invalid depth preview'})).json());
+
+  const raft = {...on,algorithm:'raft'};
+  result = await (await publish(raft,{plane,algorithm:'raft'})).json();
+  assert.equal(result.objects[0].nearest_depth_m,.9);
+  t.mock.timers.tick(800);
+  result = await (await preview(on)).json();
+  assert.ok(result.depth_frame_id);
+  noPairedMetrics(result);
+  t.mock.timers.tick(2800);
+  result = await (await preview(raft)).json();
+  assert.equal(Object.hasOwn(result,'depth_frame_id'),false);
+  noPairedMetrics(result);
 
   await publish(on,{plane,plane_overlay:png});
-  await pair('B');
+  assert.equal((await call('/api/frame','DELETE',b)).status,204);
   result = await (await preview(on)).json();
   assert.equal(Object.hasOwn(result,'plane'),false);
   assert.equal(Object.hasOwn(result,'plane_overlay'),false);
   assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+  noPairedMetrics(result);
   assert.deepEqual(result.road_edge,{level:'visual',point:[.5,.6]});
 });
 

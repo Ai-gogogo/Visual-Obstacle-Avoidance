@@ -54,6 +54,7 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.equal((await labels.json()).length,150);
   assert.doesNotMatch(planeToggle,/checked/);
   assert.match(html,/id="plane-status"[^>]*hidden/);
+  assert.match(html,/id="protrusion-status"[^>]*hidden/);
   assert.match(html,/RAFT-Stereo/);
   assert.match(html,/Record A \+ B/);
   assert.match(html,/Generate depth comparison/);
@@ -102,23 +103,44 @@ test('plane status, overlay and box height follow the display controls', async (
   const view = createPerceptionView($);
   const depth = {naturalWidth:180,naturalHeight:240};
   const overlay = {};
-  const snapshot = {frame_id:'sample',plane:{validated:true,pitch_deg:12.8,holdout_p90_m:.011}};
+  const snapshot = {frame_id:'sample',depth_frame_id:'sample',
+    plane:{validated:true,pitch_deg:12.8,holdout_p90_m:.011},
+    unclassified_obstacles:[
+      {semantic_label:'wall',depth_m:1.4}, {semantic_label:'pole',depth_m:1.1},
+      {semantic_label:'unknown',depth_m:.9}, {depth_m:.7}
+    ]};
   view.showDepth(snapshot,depth,false,overlay);
   assert.deepEqual(calls.splice(0),[[depth,0,0]]);
   assert.equal($('#plane-status').textContent,'Plane OK · Pitch 12.8° · P90 11.0 mm');
+  assert.equal($('#protrusion-status').hidden,true);
   $('#depth-plane-overlay').checked = true;
   view.repaintDepth();
   assert.deepEqual(calls.splice(0),[[depth,0,0],[overlay,0,0,180,240]]);
+  assert.equal($('#protrusion-status').textContent,'pole 1.1m · wall 1.4m');
+  assert.equal($('#protrusion-status').hidden,false);
+  view.showDepth({...snapshot,depth_frame_id:'different'},depth,false,overlay);
+  assert.equal($('#protrusion-status').textContent,'');
+  assert.equal($('#protrusion-status').hidden,true);
+  view.showDepth(snapshot,null,false);
+  assert.equal($('#protrusion-status').hidden,true);
+  $('#depth-plane-overlay').checked = false;
+  view.showDepth(snapshot,depth,false,overlay);
+  assert.equal($('#protrusion-status').hidden,true);
   view.showDepth({plane:{validated:false}},null,false);
   assert.equal($('#plane-status').textContent,'Plane Rejected');
   const canvas = {getContext:() => ctx,dataset:{}};
   const frame = {...snapshot,objects:[{label:'cup',position:'center',confidence:.9,bbox:[.4,.4,.6,.65],
-    depth_m:1.2,height_above_plane_m:.14}]};
+    depth_m:1.5,nearest_depth_m:1.2,height_above_plane_m:.14}]};
   view.paintCamera(canvas,depth,frame);
-  assert.doesNotMatch(calls.pop(),/H 0\.14/);
+  assert.doesNotMatch(calls.pop(),/H 0\.14|min/);
   $('#depth-meters').checked = true;
   view.paintCamera(canvas,depth,frame);
-  assert.match(calls.pop(),/1\.20 m · H 0\.14 m/);
+  assert.match(calls.pop(),/1\.50 m · H 0\.14 m · min 1\.20m/);
+  view.paintCamera(canvas,depth,{...frame,depth_frame_id:'different'});
+  assert.doesNotMatch(calls.pop(),/min/);
+  frame.objects[0].nearest_depth_m = 1.45;
+  view.paintCamera(canvas,depth,frame);
+  assert.equal(calls.pop(),'cup · 90% · center · 1.50 m · H 0.14 m');
 });
 
 test('segmentation stays visible across gaps and clears on Camera A replacement', async t => {

@@ -98,6 +98,7 @@ export function CameraFeeds() {
           <span className="frame-size" id="depth-preview-size" hidden></span>
           <span className="frame-size" id="depth-coverage" hidden></span>
           <span className="frame-size" id="plane-status" role="status" hidden></span>
+          <p className="frame-size" id="protrusion-status" role="status" hidden></p>
           <span id="depth-scale"></span>
         </footer>
         </div>

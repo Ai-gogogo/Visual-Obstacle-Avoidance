@@ -92,6 +92,18 @@ export function createPerceptionView($, signal) {
   function showDepth(snapshot, preview, sampleMode, overlay=null) {
     clearTimeout(holdTimer);
     const plane = sampleMode ? null : snapshot?.plane;
+    const opt = depthOptions();
+    const protrusions = preview && plane?.validated && opt.planeOverlay &&
+      snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id
+      ? (snapshot.unclassified_obstacles ?? [])
+        .filter(item => item.semantic_label && item.semantic_label !== 'unknown' && Number.isFinite(item.depth_m))
+        .sort((a,b) => a.depth_m-b.depth_m)
+        .slice(0,3)
+        .map(item => item.semantic_label.replaceAll('_',' ') + ' ' + item.depth_m.toFixed(1) + 'm')
+      : [];
+    const protrusionStatus = $('#protrusion-status');
+    protrusionStatus.textContent = protrusions.join(' · ');
+    protrusionStatus.hidden = !protrusions.length;
     const planeStatus = $('#plane-status');
     planeStatus.hidden = !plane;
     planeStatus.textContent = plane ? [plane.validated ? 'Plane OK' : 'Plane Rejected',
@@ -142,7 +154,6 @@ export function createPerceptionView($, signal) {
     const [near, far] = snapshot?.depth_range_m ?? [];
     const palette = $('#depth-palette').value;
     const [nearColor,farColor] = {gray:['bright','dark'],turbo:['red','purple'],viridis:['yellow','purple']}[palette];
-    const opt = depthOptions();
     $('#depth-reading').textContent = !opt.meters ? '' : near
       ? (Number.isFinite(snapshot.center_m) ? 'Center: '+snapshot.center_m.toFixed(2)+' m' : 'Center: no reliable depth')
       : 'Waiting for measured depth…';
@@ -200,6 +211,13 @@ export function createPerceptionView($, signal) {
       if ($('#depth-meters').checked) {
         if (Number.isFinite(object.depth_m)) caption += ' · '+object.depth_m.toFixed(2)+' m';
         if (Number.isFinite(object.height_above_plane_m)) caption += ' · H '+object.height_above_plane_m.toFixed(2)+' m';
+        const nearest = object.nearest_depth_m;
+        if (snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id &&
+            Number.isFinite(object.depth_m) && Number.isFinite(nearest) &&
+            nearest > 0 && nearest <= .85*object.depth_m &&
+            object.depth_m-nearest >= .20) {
+          caption += ' · min '+nearest.toFixed(2)+'m';
+        }
       }
       if (object.intrusion && object.intrusion.expires > Date.now()) {
         caption += ' · may cross from '+object.intrusion.from_side+' (~'+object.intrusion.eta_s.toFixed(1)+' s)';

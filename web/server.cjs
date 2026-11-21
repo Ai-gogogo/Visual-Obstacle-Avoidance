@@ -456,10 +456,12 @@ function createServer(options = {}) {
           ? recentDetection : null;
         const depthDetection = freshAnalysis ?? raftDepth;
         const partner = depthDetection?.stereoPartner;
-        const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
+        const right = session.slots.B;
+        const lostPartner = partner && (!right.frame || right.streamID !== partner.stream || now - partner.stamp > FRESH);
         // Delayed RAFT results keep the matched YOLO image even if depth or meter labels are unavailable.
         const raftAnalysis = withinRaftWindow && side === 'A' && session.depthOptions?.algorithm === 'raft';
         const detection = freshAnalysis ?? (raftAnalysis ? recentDetection : null);
+        const matchedDepth = !lostPartner && depthDetection?.depthPreview && detection === depthDetection;
         const frame = detection?.frame ?? slot.frame;
         const format = detection?.frameType ?? slot.frameType;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
@@ -467,9 +469,10 @@ function createServer(options = {}) {
         const activeForecasts = [];
         const objects = detection?.objects.map(({item_feature, intrusion, ...object}, i) => {
           if (lostPartner) delete object.depth_m;
-          if (lostPartner || !depthDetection?.depthPreview || detection !== depthDetection) {
+          if (!matchedDepth) {
             delete object.height_above_plane_m;
           }
+          if (!matchedDepth || session.depthOptions?.meters === false) delete object.nearest_depth_m;
           if (freshAnalysis && !lostPartner && intrusion && intrusion.expires > now && detection.partnerStream === session.slots.B.streamID) {
             object.intrusion = intrusion;
             activeForecasts.push(i);
@@ -483,7 +486,7 @@ function createServer(options = {}) {
         const plane = !lostPartner && depthDetection?.plane;
         const overlay = plane?.validated && depthDetection?.depthPreview && session.depthOptions?.planeOverlay
           ? depthDetection.planeOverlay : undefined;
-        const protrusions = plane?.validated && depthDetection?.depthPreview ? depthDetection.unclassifiedObstacles : undefined;
+        const protrusions = matchedDepth && plane?.validated ? depthDetection.unclassifiedObstacles : undefined;
         let edge = freshAnalysis?.road_edge;
         if (lostPartner && edge) {
           if (edge.distance_m !== undefined) edge = undefined;
@@ -493,8 +496,9 @@ function createServer(options = {}) {
           }
         }
         const forecastTag = activeForecasts.length ? '-cross-' + activeForecasts.join('-') : '';
+        const nearestTag = objects?.some(obj => obj.nearest_depth_m !== undefined) ? '-nearest' : '';
         const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + forecastTag + waitingClocks.join('') +
-          (raftAnalysis ? '-raft-overlay' : '') + (raftDepth ? '-depth-' + raftDepth.frame_id : '') + (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + (overlay ? '-plane' : '') + '"';
+          (raftAnalysis ? '-raft-overlay' : '') + (raftDepth ? '-depth-' + raftDepth.frame_id : '') + (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + (overlay ? '-plane' : '') + nearestTag + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
         return respond(res,200,{

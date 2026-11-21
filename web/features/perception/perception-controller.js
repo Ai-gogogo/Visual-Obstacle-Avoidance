@@ -91,11 +91,13 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       )) {
         depth = overlay = null;
         delete snapshot.plane;
+        delete snapshot.unclassified_obstacles;
         snapshot.stereo_status = 'waiting_for_a';
         delete snapshot.depth_range_m;
         delete snapshot.center_m;
         for (const object of snapshot.objects ?? []) {
           delete object.depth_m;
+          delete object.nearest_depth_m;
           delete object.height_above_plane_m;
         }
       }

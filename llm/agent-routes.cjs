@@ -9,6 +9,9 @@ const SCENE_MAX_AGE = 750;
 const movingLabels = new Map(Object.entries({
   person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
 }));
+const staticObstacleLabels = new Set([
+  'building','wall','fence','pole','traffic_light','traffic_sign','vegetation','terrain','unknown'
+]);
 
 
 function validItemFeature(feature) {
@@ -73,7 +76,13 @@ function parseProtrusions(raw) {
   if (!Array.isArray(raw)) return;
   return raw.slice(0,12).filter(v => validBox(v?.bbox) && Number.isFinite(v.depth_m) && v.depth_m > 0 &&
     Number.isFinite(v.height_above_plane_m) && v.height_above_plane_m > 0)
-    .map(({bbox,depth_m,height_above_plane_m}) => ({bbox,depth_m,height_above_plane_m}));
+    .map(({bbox,depth_m,height_above_plane_m,semantic_label,semantic_confidence}) => ({
+      bbox,depth_m,height_above_plane_m,
+      ...(staticObstacleLabels.has(semantic_label) ? {semantic_label} : {}),
+      ...(staticObstacleLabels.has(semantic_label) && semantic_label !== 'unknown' &&
+          Number.isFinite(semantic_confidence) && semantic_confidence >= .5 && semantic_confidence <= 1
+        ? {semantic_confidence} : {})
+    }));
 }
 
 function validPlaneOverlay(value) {
@@ -272,6 +281,7 @@ function createAgentRoutes(options, sessions, read, respond) {
           ? payload.stereo.status : 'waiting_for_pair';
       }
       const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
+          (payload.stereo?.frame_id === undefined || payload.stereo.frame_id === payload.frame_id) &&
           (partner.depthOptions?.algorithm ?? 'sgbm') === (payload.stereo?.algorithm ?? 'sgbm') &&
           partner.stream === session.slots.B.streamID;
       if (camera === 'A') {
@@ -279,8 +289,10 @@ function createAgentRoutes(options, sessions, read, respond) {
       }
       if (paired) {
         const plane = slot.detection.plane;
+        const preview = payload.stereo.preview;
+        const hasPreview = typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview);
         if (plane?.validated) {
-          slot.detection.unclassifiedObstacles = parseProtrusions(payload.unclassified_obstacles);
+          if (hasPreview) slot.detection.unclassifiedObstacles = parseProtrusions(payload.unclassified_obstacles);
           if (partner.depthOptions?.planeOverlay && session.depthOptions?.planeOverlay &&
               validPlaneOverlay(payload.stereo.plane_overlay)) {
             slot.detection.planeOverlay = payload.stereo.plane_overlay;
@@ -289,7 +301,11 @@ function createAgentRoutes(options, sessions, read, respond) {
         for (const [i, object] of objects.entries()) {
           const z = payload.objects[i].depth_m;
           const measured = Number.isFinite(z) && z > 0;
-          if (measured && partner.depthOptions?.meters !== false) object.depth_m = z;
+          if (measured && partner.depthOptions?.meters !== false) {
+            object.depth_m = z;
+            const nearest = payload.objects[i].nearest_depth_m;
+            if (hasPreview && Number.isFinite(nearest) && nearest > 0 && nearest <= z) object.nearest_depth_m = nearest;
+          }
           const height = payload.objects[i].height_above_plane_m;
           if (plane?.validated && partner.depthOptions?.meters !== false && Number.isFinite(height)) {
             object.height_above_plane_m = height;
@@ -302,8 +318,7 @@ function createAgentRoutes(options, sessions, read, respond) {
             if (expires > Date.now()) object.intrusion = {from_side:prediction.from_side, eta_s:prediction.eta_s, expires};
           }
         }
-        const preview = payload.stereo.preview;
-        if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
+        if (hasPreview) {
           slot.detection.stereoPartner = partner;
           slot.detection.depthPreview = preview;
           const center = payload.stereo.center_m;
