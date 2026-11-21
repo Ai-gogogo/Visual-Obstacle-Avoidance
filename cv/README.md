@@ -136,6 +136,17 @@ camera and a theoretical input limit of about 4.55 FPS per camera.
 The workspace had no CUDA GPU. CUDA and physical-phone results require a run
 on the deployment machine.
 
+## GPU
+
+On an NVIDIA computer, install the CUDA build of PyTorch so `--device auto` selects `cuda:0`
+for YOLO and RAFT-Stereo (`VISIONASSIST_RAFT_DEVICE` overrides RAFT, for example `mps`).
+The `+cu128` tag is required; otherwise pip keeps an installed CPU wheel.
+
+```sh
+python -m pip install --force-reinstall --no-deps "torch==2.9.0+cu128" "torchvision==0.24.0+cu128" --index-url https://download.pytorch.org/whl/cu128
+```
+
+StereoSGBM, optical flow and the OpenCV face models remain on CPU with the pip OpenCV build.
 
 ## Obstacle risk
 
