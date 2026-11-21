@@ -1,3 +1,7 @@
+import webRtcCalibration from "../../../cv/results/stereo-calibration-2026-11-20/webrtc-480x640.json";
+
+const liveCalibrationName = (webRtcCalibration as { name?: string }).name ?? "current calibration";
+
 export function CameraFeeds() {
   return (
     <div className="feed-grid" id="camera-feeds">
@@ -62,7 +66,7 @@ export function CameraFeeds() {
         </div>
         <label className="depth-source-control">Depth source
           <select id="depth-source" defaultValue="live">
-            <option value="live">Live · current calibration</option>
+            <option value="live">{`Live · ${liveCalibrationName}`}</option>
             <option value="low">Live · 480 × 640 crop</option>
             <option value="d8be72ae">Saved · cup and table · 480 × 640</option>
             <option value="4317d705">Saved · checkerboard 4317d705 · 480 × 640</option>
@@ -91,6 +95,7 @@ export function CameraFeeds() {
           <label><input type="checkbox" id="depth-spatial" /> Edge-aware filter (WLS)</label>
           <label><input type="checkbox" id="depth-temporal" /> Temporal median</label>
           <label><input type="checkbox" id="depth-meters" /> Show meters</label>
+          <label><input type="checkbox" id="depth-obstacle-labels" /> Show obstacle labels</label>
           <label><input type="checkbox" id="depth-plane-overlay" /> Show plane overlay</label>
           <span id="depth-reading" role="status"></span>
         </div>
@@ -115,7 +120,25 @@ export function CameraFeeds() {
         </div>
         <ul id="scene-legend" aria-label="Most visible classes"></ul>
       </article>
-      <article className="feed" id="camera-b-feed" data-camera="B">
+      <article className="feed" id="fused-view">
+        <header><h2>Fused depth + segmentation</h2></header>
+        <div className="frame">
+          <canvas id="fused-map" className="live-frame" role="img"
+                  aria-label="Stereo depth with darker segmentation-based fills" hidden />
+          <p id="fused-placeholder" className="no-feed">Waiting for depth and segmentation.</p>
+        </div>
+        <footer>
+          <label>Fused palette{" "}
+            <select id="fused-palette" defaultValue="gray">
+              <option value="gray">Grayscale</option>
+              <option value="turbo">Turbo</option>
+              <option value="viridis">Viridis</option>
+            </select>
+          </label>
+          <span id="fused-status" role="status">Waiting for depth and segmentation.</span>
+        </footer>
+      </article>
+      <article className="feed" id="camera-b-feed" data-camera="B" hidden>
         <header>
           <div>
             <span className="camera-icon" aria-hidden="true">

@@ -15,11 +15,13 @@
 .frame-size{font-variant-numeric:tabular-nums}
 .depth-source-control{display:block;padding:.7rem .85rem 0}
 .depth-source-control select{max-width:100%}
-#camera-feeds{grid-template-columns:repeat(3,minmax(15rem,1fr));align-items:start;overflow-x:auto}
+#camera-feeds{align-items:start}
+#fused-map{image-rendering:pixelated}
 #camera-b-feed{grid-column:1}
 #camera-feeds .feed > header{block-size:3.3rem;flex-wrap:nowrap}
 #camera-feeds .feed > header > div{min-width:0}
 #camera-feeds .feed > header :is(h2,.feed-status){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#camera-feeds #fused-view h2{white-space:normal}
 #camera-feeds .camera-icon{flex:none}
 #camera-feeds[data-live] .frame{aspect-ratio:3/4}
 #camera-feeds[data-actual-pixels] .camera-frame[data-has-pixels]{display:block;overflow:auto}

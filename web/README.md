@@ -78,7 +78,7 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 实时查看时，在 **Stereo depth map → Depth algorithm** 选择 StereoSGBM（默认）或 RAFT-Stereo。下一对同步帧会使用所选算法。两者共用当前机位的标定，RAFT 首次使用时会加载本机权重。
 
-Camera A、Stereo depth map 和 Camera A segmentation 从左到右同排。窄窗口内可横向滚动。Camera B 位于下一排，**Show Camera B** 仅控制预览可见性。语义分割短暂缺帧时保留上一张结果和图例，并显示 **Last result · waiting for update**。使用中的场景分割、平面拟合及轮换服务的参数见[最新交接](../cv/STEREO-HANDOFF-2026-11-19.md)。
+Camera A、Stereo depth map、Camera A segmentation 和 Fused depth + segmentation 在宽屏上同排，中屏分为两列，窄屏为一列。Camera B 默认隐藏，可用 **Show Camera B** 展开。语义分割短暂缺帧时保留上一张结果和图例，并显示 **Last result · waiting for update**。融合栏优先使用同帧语义，或选取相差 350 ms 以内的语义帧。它用相近的实测深度帮助恢复缺失语义，再在语义区域内拟合深度渐变。补出的深度用略暗的相同配色显示。深度断帧或分割过期时，融合栏保留上一张并标明正在等待。使用中的场景分割、平面拟合及轮换服务的参数见[最新交接](../cv/STEREO-HANDOFF-2026-11-19.md)。
 
 ## 录制用于测试的 A/B 素材
 
@@ -86,6 +86,6 @@ Camera A、Stereo depth map 和 Camera A segmentation 从左到右同排。窄�
 
 每次录制保存在项目本机的 `.visionassist/recordings/<id>/`。A/B 文件保留接收端的原始 JPEG 或 PNG；`timestamps.csv` 记录左右帧 ID、各自的采样时间、帧间时差及含时钟误差的上界（最多 65 ms）。`stereo.mp4` 按采样时间回放。刷新网页或重启服务后可以重新选择已保存的录像。
 
-本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成 Camera A 原图、StereoSGBM、RAFT-Stereo 和 Camera A 语义分割四栏 MP4。每一帧的分割都取自该同步帧对中的 Camera A 原图。旧版对比视频可用 **Regenerate with segmentation** 重新生成。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**；四栏按帧号对齐。改变机位、镜头或裁切后需要更新对应标定。
+本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成带 YOLO 叠加的 Camera A、StereoSGBM、RAFT-Stereo 和 Camera A 语义分割四栏 MP4。导出从每对同步帧重算检测、追踪和分割。Camera A 上的距离和可用高度来自同帧的原始 RAFT-Stereo 公制深度。旧版对比视频可用 **Regenerate with segmentation** 重新生成。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**，四栏按帧号对齐。改变机位、镜头或裁切后需要更新对应标定。
 
 原片导出需要安装了 PyAV 和 Pillow 的 Python。对比导出还需要 CV 依赖、`opt_einsum` 和 [ADE20K 场景分割权重](../cv/README.md#camera-a-室内外语义分割)，并使用 `.visionassist/RAFT-Stereo/` 的官方代码和 `raftstereo-realtime.pth` 权重。服务优先使用 `VISIONASSIST_CV_PYTHON`，其次使用项目中的 `.visionassist/rtc-env/bin/python`。导出失败时原始帧和时间戳仍然保留，可修复依赖后重试。
