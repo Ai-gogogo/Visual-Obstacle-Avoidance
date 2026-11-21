@@ -53,7 +53,6 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   assert.equal(played[0].canPlay(),false);
   assert.ok(cancelled > beforeLoss);
   select('walking');
-  await event({kind:'road_edge',metric:false});
   await event({kind:'road_edge',metric:true,stamp:Date.now()-1600});
   await event({...crossing(),expires:Date.now()-1});
   assert.equal(played.length,1);
@@ -80,11 +79,14 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   await event(crossing(),aOnly);
   await event({kind:'road_edge',metric:true},aOnly);
   assert.equal(played.length,6);
+  await event({kind:'road_edge',metric:false,text_zh:'请小心，前方可能是车行道。'},aOnly);
+  assert.equal(played[6].text,'请小心，前方可能是车行道。');
   await event(obstacle({track_id:'A-10'}),{A:'live',B:'offline'});
-  assert.equal(played.length,6);
+  assert.equal(played.length,7);
   select('stationary');
   await event(obstacle({track_id:'A-8'}));
-  assert.equal(played.length,6);
+  await event({kind:'road_edge',metric:false});
+  assert.equal(played.length,7);
   select('desk');
   assert.equal(played[2].canPlay(),false);
   controller.abort();

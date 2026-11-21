@@ -17,7 +17,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
   let mode = 'desk';
   let modeSince = 0;
   let stereoFeedsOnline = false;
-  // Static obstacles come from Camera A detection alone; crossings and road edges need the stereo pair.
+  // Static obstacles and unmeasured road cues come from Camera A alone; crossings and measured road edges need the stereo pair.
   let cameraADetecting = false;
   modeControl.value = mode;
 
@@ -28,7 +28,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
     if (!cameraADetecting || (hadStereo && !stereoFeedsOnline)) cancelSpokenAlert();
     const text = mode === 'desk' ? 'Automatic alert speech is off.' :
       mode === 'walking' && cameraADetecting && !stereoFeedsOnline ?
-        'Walking alerts selected. Camera B is offline, so only obstacles in the walking path can trigger speech.' :
+        'Walking alerts selected. Camera B is offline, so only obstacles in the walking path and possible road ahead can trigger speech.' :
       !stereoFeedsOnline ? 'Spoken alerts paused. Waiting for both camera feeds and analysis on Camera A.' :
         mode === 'stationary' ? 'Stationary monitoring selected. Only verified nearby movement can trigger speech.' :
           'Walking alerts selected. Obstacles in the walking path, timely stereo crossings and measured road edges can trigger speech.';
@@ -51,14 +51,13 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
   function handleSpokenAlerts(alerts) {
     const selectedMode = mode;
     const canSpeak = alert => selectedMode !== 'desk' && mode === selectedMode &&
-      (alert.kind === 'obstacle' ? cameraADetecting : stereoFeedsOnline) &&
+      (alert.kind === 'obstacle' || (alert.kind === 'road_edge' && !alert.metric) ? cameraADetecting : stereoFeedsOnline) &&
       alert.stamp >= modeSince &&
       Date.now() < Math.min(alert.expires ?? Infinity, alert.stamp + 1500);
     const crossing = alerts.filter(alert => alert.kind === 'path_intrusion' && canSpeak(alert) &&
       (mode === 'walking' || alert.stationary_zone === true))
       .sort((a,b) => a.expires-b.expires)[0];
-    const road = mode === 'walking' && alerts.findLast(alert => alert.kind === 'road_edge' &&
-      alert.metric === true && canSpeak(alert));
+    const road = mode === 'walking' && alerts.findLast(alert => alert.kind === 'road_edge' && canSpeak(alert));
     // Static obstacles in the walking corridor speak in walking mode, once per track and risk level.
     const obstacle = mode === 'walking' && alerts.filter(alert => alert.kind === 'obstacle' && canSpeak(alert) &&
       newObstacleLevel(alert)).sort((a,b) => Number(b.risk === 'urgent')-Number(a.risk === 'urgent'))[0];
