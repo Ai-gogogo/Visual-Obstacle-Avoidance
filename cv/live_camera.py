@@ -664,11 +664,11 @@ def main():
     sides = "AB" if args.dual_yolo else "A"
     if device == "cpu" or not args.dual_yolo:
         # Independent predictors let both camera threads use the CPU concurrently.
-        predictors = [partial(detect, YOLO(str(args.weights), task="detect"), **options) for _ in sides]
+        predictors = [partial(detect, YOLO(str(args.weights)), **options) for _ in sides]
     else:
         predictor = partial(
             detect,
-            YOLO(str(args.weights), task="detect"),
+            YOLO(str(args.weights)),
             **options
         )
         inference_lock = Lock()

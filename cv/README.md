@@ -18,6 +18,18 @@ The official YOLO11n detection checkpoint used here has SHA-256 `0ebbc80d4a7680d
 
 ## Run on one image
 
+The single-image and live commands also accept `--weights cv/models/yolo11n-seg.pt`.
+Download the optional checkpoint for instance masks and the real-model segmentation test:
+
+```sh
+curl -fL https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt -o cv/models/yolo11n-seg.pt
+```
+
+Its SHA-256 is `55ed65c56c91713d23e8402371c6c49a6fd84f257f7dce452e8d70e41dcbe152`.
+In Python, `detect(model, image, return_masks=True)` returns `(objects, masks)`.
+Each boolean mask follows the corresponding object's index and the input image's height and width.
+Detection-only weights and empty predictions return `None` for masks. JSON output contains only the object metadata.
+
 ```sh
 python cv/detect_image.py path/to/photo.jpg --output cv/results/my-photo
 ```
