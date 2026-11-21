@@ -4,8 +4,10 @@ from risk import RiskAssessment
 from tracking import MAX_GAP_MS
 
 
-def obstacle(track_id="A-1", *, bottom=.85, depth="near", confidence=.9, candidate=True):
+def obstacle(track_id="A-1", *, bottom=.85, depth="near", confidence=.9, candidate=True, depth_m=None):
+    extra = {} if depth_m is None else {"depth_m": depth_m}
     return {
+        **extra,
         "track_id": track_id,
         "bbox": [.35, .35, .65, bottom],
         "relative_depth": depth,
@@ -35,6 +37,13 @@ class RiskAssessmentTests(unittest.TestCase):
         self.assertEqual(self.risk(201, depth="far", bottom=.95), "caution")
         self.assertEqual(self.risk(401, depth="unknown", bottom=.95), "caution")
         self.assertEqual(self.risk(601, depth="unknown", bottom=.95), "urgent")
+
+    def test_measured_distance_overrides_box_size(self):
+        self.assertEqual(self.risk(1, bottom=.70, depth_m=1.0), "normal")
+        self.assertEqual(self.risk(201, bottom=.70, depth_m=1.0), "urgent")
+        self.assertEqual(self.risk(401, bottom=.95, depth_m=2.0), "caution")
+        self.assertEqual(self.risk(601, bottom=.95, depth_m=3.5), "normal")
+        self.assertEqual(self.risk(801, bottom=.95, depth_m=2.0), "normal")
 
     def test_confirmation_does_not_carry_across_gaps_or_different_tracks(self):
         self.assertEqual(self.risk(1), "normal")

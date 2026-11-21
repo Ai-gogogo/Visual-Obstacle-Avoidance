@@ -1,4 +1,4 @@
-const {createAgent, currentDetection, MAX_FRAME_AGE} = require('./agent.cjs');
+const {createAgent, currentDetection, detectionLabelsZh, MAX_FRAME_AGE} = require('./agent.cjs');
 const {acceptRoadEdge} = require('./road-alerts.cjs');
 const voiceFrames = require('./voice-frames.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
@@ -9,6 +9,22 @@ const DETECTION_SCHEMA_VERSION = 1;
 const movingLabels = new Map(Object.entries({
   person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
 }));
+const obstacleDirections = {
+  left:['ahead on the left','左前方'], center:['straight ahead','正前方'], right:['ahead on the right','右前方']
+};
+
+// Spoken obstacle text. Distance is rounded to 0.5 m so the speech does not overstate stereo precision.
+function obstacleSpeech({label, position, risk, depth_m}) {
+  const [where, whereZh] = obstacleDirections[position] ?? obstacleDirections.center;
+  const name = detectionLabelsZh.get(label) ?? label;
+  const meters = Number.isFinite(depth_m) && depth_m > 0 ? Math.max(.5, Math.round(depth_m*2)/2) : null;
+  const urgent = risk === 'urgent';
+  return {
+    label, position, ...(meters ? {distance_m:meters} : {}),
+    text:(urgent ? 'Stop. ' : 'Caution. ') + label + ' ' + where + (meters ? ', about ' + meters + (meters === 1 ? ' meter' : ' meters') : '') + '.',
+    text_zh:(urgent ? '注意，' : '小心，') + whereZh + (meters ? '约' + meters + '米' : '') + '有' + name + '。'
+  };
+}
 
 
 function validItemFeature(feature) {
@@ -255,8 +271,8 @@ function createAgentRoutes(options, sessions, read, respond) {
         const id = [slot.streamID,obstacle.track_id || obstacle.label,obstacle.risk].join(':');
         if (session.alertCooldown.has(id)) continue;
         session.alertCooldown.set(id,now);
-        session.alerts.push({id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,streamID:slot.streamID,
-          text:(obstacle.risk === 'urgent' ? 'Urgent. ' : 'Caution. ') + obstacle.label + ', Camera ' + camera + ', ' + obstacle.position + '.', stamp:captured.stamp});
+        session.alerts.push({kind:'obstacle',id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,streamID:slot.streamID,
+          track_id:obstacle.track_id,stamp:captured.stamp,...obstacleSpeech(obstacle)});
       }
       if (camera === 'A') {
         const warning = acceptRoadEdge(slot, payload.road_edge, captured.stamp, session.slots.B.streamID, paired);
