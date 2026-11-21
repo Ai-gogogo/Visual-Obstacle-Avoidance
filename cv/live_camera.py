@@ -26,7 +26,7 @@ from geometry import deproject, ground_axes
 from item_features import item_features
 from obstacles import PlaneObstacles, is_obstacle_candidate, unclassified_obstacles
 from path_intrusion import Corridor, Frame, IntrusionPredictor, background_mask, pose_between
-from plane_ransac import PlaneEstimate, fit_support_plane, object_height_m, predict_plane
+from plane_ransac import PlaneEstimate, fit_support_plane, height_above_plane, object_height_m, predict_plane
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from tracking import FrameTracker
@@ -190,6 +190,7 @@ class CameraWorker:
             stereo_result = payload.get("stereo", {})
             right_stream = stereo_result.pop("partner_stream", None)
             meter_scale = stereo_result.pop("meter_scale", None)
+            overlay = stereo_result.pop("plane_overlay_requested", False)
             capture_ms = frame.headers.get("X-CV-Sample-Ms")
             paired = depth is not None and stream and right_stream and capture_ms
             pair = (stream, right_stream, meter_scale, id(self.stereo))
@@ -207,7 +208,7 @@ class CameraWorker:
                 else:
                     self.plane_frames.pop(source, None)
                 support = road_masks[0] | road_masks[1] if road_masks is not None else None
-                metric_evidence, measured = self.apply_support_plane(payload, depth, support, prior=prior)
+                metric_evidence, measured = self.apply_support_plane(payload, depth, support, prior=prior, overlay=overlay)
                 fresh = measured if measured is not None and measured.validated else None
                 orientation = fresh or prior
                 axes = ground_axes(orientation.normal) if orientation is not None else None
@@ -301,7 +302,7 @@ class CameraWorker:
                 current.accepted_stamp = previous.accepted_stamp
         return current, pose, current.plane
 
-    def apply_support_plane(self, payload, depth, support, *, prior=None):
+    def apply_support_plane(self, payload, depth, support, *, prior=None, overlay=False):
         stereo = payload.setdefault("stereo", {})
         if depth is None:
             stereo["plane"] = {"validated": False, "reason": "depth_unavailable"}
@@ -314,7 +315,8 @@ class CameraWorker:
         if support is None or not support.any():
             support = np.arange(h)[:, None] >= .45 * h
         camera = self.stereo.camera_a
-        plane = fit_support_plane(depth, camera, background & support, prior_plane=prior, config=self.plane.fit)
+        candidate = background & support
+        plane = fit_support_plane(depth, camera, candidate, prior_plane=prior, config=self.plane.fit)
         summary = {"validated": plane.validated, "reason": plane.reason}
         for key in ("pitch_deg", "roll_deg", "inlier_ratio", "holdout_p90_m"):
             value = getattr(plane, key)
@@ -324,6 +326,10 @@ class CameraWorker:
         if not plane.validated:
             return {}, plane
 
+        if overlay:
+            encoded = self.encode_plane_overlay(depth, camera, plane, candidate)
+            if encoded is not None:
+                stereo["plane_overlay"] = encoded
         axes = ground_axes(plane.normal)
         metric_evidence = {}
         for index, obj in enumerate(objects):
@@ -349,6 +355,23 @@ class CameraWorker:
         payload["unclassified_obstacles"] = unclassified_obstacles(
             depth, camera, plane, background, self.plane, axes)
         return metric_evidence, plane
+
+    def encode_plane_overlay(self, depth, camera, plane, candidate):
+        """Encode only when requested, using the same Camera A alignment as the depth map."""
+        heights = height_above_plane(depth, camera, plane)
+        x = np.arange(depth.shape[1])
+        training = candidate & ((x < .44 * depth.shape[1]) | (x >= .56 * depth.shape[1]))
+        tolerance = self.plane.fit.inlier_tol_m
+        inliers = training & (np.abs(heights) <= tolerance)
+        raised = heights > max(tolerance, plane.holdout_p90_m)
+        scale = min(1, 240 / max(depth.shape))
+        masks = [cv2.resize(mask.astype(np.uint8), None, fx=scale, fy=scale,
+                            interpolation=cv2.INTER_NEAREST).astype(bool) for mask in (inliers, raised)]
+        rgba = np.zeros((*masks[0].shape, 4), dtype=np.uint8)
+        rgba[masks[0]] = (0, 220, 70, 120)
+        rgba[masks[1]] = (0, 135, 255, 165)
+        ok, png = cv2.imencode(".png", rgba)
+        return base64.b64encode(png).decode("ascii") if ok else None
 
     def measure_depth(self, params, payload, image, retry_partner=False):
         if image.size != self.stereo.size:
@@ -460,6 +483,8 @@ class CameraWorker:
                   "preview": base64.b64encode(png).decode("ascii")}
         result.update(valid_fraction=valid_fraction, partner_stream=options.get("X-Partner-Stream"),
                       meter_scale=scale_m)
+        if self.plane is not None and options.get("X-Depth-Plane-Overlay") == "1":
+            result["plane_overlay_requested"] = True
         if meters and scale_m is not None:
             result["range_m"] = [self.stereo.min_m*scale_m, self.stereo.max_m*scale_m]
             # Report only original observations. Filters never create a metric reading.

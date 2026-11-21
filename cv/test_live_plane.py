@@ -1,10 +1,12 @@
 """Exercise the live Camera A worker's outgoing payload over consecutive frames."""
+import base64
 import io
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -181,3 +183,28 @@ class LivePlaneTests(unittest.TestCase):
         points = np.array([[1., 2., 3.]])
         np.testing.assert_allclose(default.corridor_coordinates(points, None),
                                    default.corridor_coordinates(points, ground_axes(pitch_normal(np.radians(20)))))
+
+    def test_debug_overlay_encodes_only_when_requested(self):
+        depth, camera, candidate, _, _, projection = scene(noisy=False)
+        bump = np.s_[547:585, 230:256]
+        depth[bump] = (.16 - .55) / projection[bump]
+        worker = CameraWorker("http://local", None, Mock(), stereo=SimpleNamespace(camera_a=camera),
+                              plane=PlaneObstacles())
+        with patch("live_camera.cv2.imencode", wraps=cv2.imencode) as encode:
+            off = {"objects": []}
+            worker.apply_support_plane(off, depth, candidate)
+            encode.assert_not_called()
+            self.assertNotIn("plane_overlay", off["stereo"])
+            on = {"objects": []}
+            worker.apply_support_plane(on, depth, candidate, overlay=True)
+            encode.assert_called_once()
+        pixels = cv2.imdecode(np.frombuffer(base64.b64decode(on["stereo"]["plane_overlay"]), np.uint8),
+                              cv2.IMREAD_UNCHANGED)
+        self.assertEqual(pixels.shape, (240, 180, 4))
+        self.assertTrue(np.any(np.all(pixels == (0, 220, 70, 120), axis=-1)))
+        self.assertTrue(np.any(np.all(pixels == (0, 135, 255, 165), axis=-1)))
+        self.assertTrue(np.any(pixels[..., 3] == 0))
+        rejected = {"objects": []}
+        worker.apply_support_plane(rejected, np.full_like(depth, np.nan), candidate, overlay=True)
+        self.assertFalse(rejected["stereo"]["plane"]["validated"])
+        self.assertNotIn("plane_overlay", rejected["stereo"])

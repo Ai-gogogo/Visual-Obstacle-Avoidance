@@ -130,11 +130,13 @@ export function CameraFeeds() {
           <label><input type="checkbox" id="depth-spatial" /> Edge-aware filter (WLS)</label>
           <label><input type="checkbox" id="depth-temporal" /> Temporal median</label>
           <label><input type="checkbox" id="depth-meters" /> Show meters</label>
+          <label><input type="checkbox" id="depth-plane-overlay" /> Show plane overlay</label>
           <span id="depth-reading" role="status"></span>
         </div>
         <footer>
           <span className="frame-size" id="depth-preview-size" hidden></span>
           <span className="frame-size" id="depth-coverage" hidden></span>
+          <span className="frame-size" id="plane-status" role="status" hidden></span>
           <span id="depth-scale"></span>
         </footer>
         </div>

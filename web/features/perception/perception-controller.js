@@ -77,16 +77,22 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       image.src = snapshot.png ? 'data:image/png;base64,' + snapshot.png : 'data:image/jpeg;base64,' + snapshot.jpeg;
       let depth = snapshot.depth_preview ? new Image() : null;
       if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
-      await Promise.all([image.decode(), depth?.decode()]);
+      let overlay = depth && snapshot.plane_overlay && VisionPerceptionView.depthOptions().planeOverlay ? new Image() : null;
+      if (overlay) overlay.src = 'data:image/png;base64,' + snapshot.plane_overlay;
+      await Promise.all([image.decode(), depth?.decode(), overlay?.decode().catch(() => { overlay = null; })]);
       if (version !== pollVersion) return;
       if (snapshot.depth_options && Object.entries(VisionPerceptionView.depthOptions()).some(
-        ([key, value]) => snapshot.depth_options[key] !== value
+        ([key, value]) => key !== 'planeOverlay' && snapshot.depth_options[key] !== value
       )) {
-        depth = null;
+        depth = overlay = null;
+        delete snapshot.plane;
         snapshot.stereo_status = 'waiting_for_a';
         delete snapshot.depth_range_m;
         delete snapshot.center_m;
-        for (const object of snapshot.objects ?? []) delete object.depth_m;
+        for (const object of snapshot.objects ?? []) {
+          delete object.depth_m;
+          delete object.height_above_plane_m;
+        }
       }
       const canvas = feed.node.querySelector('canvas');
       scope.cancelDelay(feed.expiry);
@@ -98,7 +104,8 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       feed.etag = response.headers.get('etag');
       const hasDetections = feed.objects != null || snapshot.objects != null;
       feed.objects = hasAnalysis ? snapshot.objects : null;
-      if (feed.side === 'A') VisionPerceptionView.showDepth(snapshot,hasAnalysis || snapshot.depth_expires_ms > Date.now() ? depth : null,sampleMode);
+      if (feed.side === 'A') VisionPerceptionView.showDepth(
+        snapshot,hasAnalysis || snapshot.depth_expires_ms > Date.now() ? depth : null,sampleMode,overlay);
       feed.rtc.update(Boolean(snapshot.webrtc));
       feed.rtc.updateAnalysis(hasAnalysis && hasBoxes);
       setFeed(feed,true);
@@ -188,7 +195,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   });
   scope.signal.addEventListener('abort',clearReplay,{once:true});
   listen($('#depth-palette'), 'change', VisionPerceptionView.repaintDepth);
-  for (const id of ['depth-algorithm','depth-spatial','depth-temporal','depth-meters']) {
+  for (const id of ['depth-algorithm','depth-spatial','depth-temporal','depth-meters','depth-plane-overlay']) {
     listen($('#'+id), 'change', () => {
       refreshPolling();
       VisionPerceptionView.renderDetections(sampleMode, feeds);

@@ -24,6 +24,10 @@ function acceptRoadEdge(slot, raw, stamp, rightStream, paired) {
       edge.distance_m = raw.distance_m;
     }
   }
+  if (paired && slot.detection.plane?.validated && level !== 'unseen' && Number.isFinite(raw.curb_drop_m)) {
+    edge.curb_drop_m = raw.curb_drop_m;
+    if (['supported','uncertain'].includes(raw.curb_confidence)) edge.curb_confidence = raw.curb_confidence;
+  }
   slot.detection.road_edge = edge;
   let state = slot.roadState;
   if (!state || state.right !== rightStream || stamp-state.last > MAX_FRAME_AGE) {

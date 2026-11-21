@@ -325,7 +325,7 @@ class LiveCameraTests(unittest.TestCase):
         camera = dict(fx=420, fy=420, cx=320, cy=180, distortion=[0]*5)
         config.update(image_size_px=[640, 360], baseline_m=.12, camera_A=camera, camera_B=camera,
                       rotation_A_to_B=np.eye(3).tolist(), translation_direction_A_to_B=[-1, 0, 0])
-        self.worker.stereo = StereoDepth(config)
+        self.worker = CameraAWorker(self.base, self.model, self.cv, stereo=StereoDepth(config))
         self.worker.corridor = Corridor.load(DEFAULT_ROAD_CONFIG)
         with Image.open(ASSETS / "bus.jpg") as photo:
             person = photo.crop((44, 390, 244, 907)).resize((76, 197))

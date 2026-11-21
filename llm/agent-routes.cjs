@@ -49,15 +49,49 @@ function validItemFeature(feature) {
 }
 
 
+function validBox(box) {
+  return Array.isArray(box) && box.length === 4 &&
+    box.every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
+    box[0] < box[2] && box[1] < box[3];
+}
+
+function parsePlane(raw, paired) {
+  if (typeof raw?.validated !== 'boolean' || (raw.validated && !paired) ||
+      typeof raw.reason !== 'string' || !/^[a-z_]{1,48}$/.test(raw.reason)) return;
+  const plane = {validated:raw.validated,reason:raw.reason};
+  if (paired) {
+    const ranges = {pitch_deg:[-90,90],roll_deg:[-180,180],inlier_ratio:[0,1],holdout_p90_m:[0,Infinity]};
+    for (const [key,[min,max]] of Object.entries(ranges)) {
+      if (Number.isFinite(raw[key]) && raw[key] >= min && raw[key] <= max) plane[key] = raw[key];
+    }
+  }
+  return plane;
+}
+
+function parseProtrusions(raw) {
+  if (!Array.isArray(raw)) return;
+  return raw.slice(0,12).filter(v => validBox(v?.bbox) && Number.isFinite(v.depth_m) && v.depth_m > 0 &&
+    Number.isFinite(v.height_above_plane_m) && v.height_above_plane_m > 0)
+    .map(({bbox,depth_m,height_above_plane_m}) => ({bbox,depth_m,height_above_plane_m}));
+}
+
+function validPlaneOverlay(value) {
+  if (typeof value !== 'string' || value.length > 128000 || value.length < 44 ||
+      value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
+  const header = Buffer.from(value.slice(0,44),'base64');
+  return header.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex')) &&
+    header.toString('ascii',12,16) === 'IHDR' &&
+    [header.readUInt32BE(16),header.readUInt32BE(20)].every(size => size > 0 && size <= 240) &&
+    header[24] === 8 && [4,6].includes(header[25]);
+}
+
 function parseObjects(objects) {
   if (!Array.isArray(objects) || objects.length > 40) return null;
   const results = [];
   for (const entry of objects) {
     if (!entry || typeof entry.label !== 'string' || !/^[\p{L}\p{N} _-]{1,50}$/u.test(entry.label) ||
         !positions.has(entry.position) || !Number.isFinite(entry.confidence) || entry.confidence < 0 || entry.confidence > 1 ||
-        !Array.isArray(entry.bbox) || entry.bbox.length !== 4 ||
-        !entry.bbox.every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
-        entry.bbox[0] >= entry.bbox[2] || entry.bbox[1] >= entry.bbox[3]) return null;
+        !validBox(entry.bbox)) return null;
     const label = entry.label.toLowerCase();
     const itemFeature = label !== 'person' && entry.confidence >= 0.5 && validItemFeature(entry.item_feature)
       ? {version:entry.item_feature.version,vector:entry.item_feature.vector} : null;
@@ -165,6 +199,7 @@ function createAgentRoutes(options, sessions, read, respond) {
         res.setHeader('X-Depth-Spatial',Number(opt.spatial));
         res.setHeader('X-Depth-Temporal',Number(opt.temporal));
         res.setHeader('X-Depth-Meters',Number(opt.meters));
+        if (opt.planeOverlay) res.setHeader('X-Depth-Plane-Overlay','1');
         res.setHeader('X-Depth-Five-Mm',opt.fiveMm);
         res.setHeader('X-Depth-Rig',slot.streamID+'/'+right.streamID);
         res.setHeader('X-Depth-Stamp',left.stamp);
@@ -179,7 +214,7 @@ function createAgentRoutes(options, sessions, read, respond) {
     return error(res,404,'Unknown CV route.');
 
     async function publish() {
-      const payload = await asJSON(req,600_000 + 128_000);
+      const payload = await asJSON(req,600_000 + 2*128_000);
       const objects = parseObjects(payload?.objects);
       const weak = parseObjects(payload?.preview_objects ?? []);
       if (!objects || !weak || typeof payload.frame_id !== 'string') return error(res,400,'Invalid detections.');
@@ -212,11 +247,26 @@ function createAgentRoutes(options, sessions, read, respond) {
       const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
           (partner.depthOptions?.algorithm ?? 'sgbm') === (payload.stereo?.algorithm ?? 'sgbm') &&
           partner.stream === session.slots.B.streamID;
+      if (camera === 'A') {
+        slot.detection.plane = parsePlane(payload.stereo?.plane, paired);
+      }
       if (paired) {
+        const plane = slot.detection.plane;
+        if (plane?.validated) {
+          slot.detection.unclassifiedObstacles = parseProtrusions(payload.unclassified_obstacles);
+          if (partner.depthOptions?.planeOverlay && session.depthOptions?.planeOverlay &&
+              validPlaneOverlay(payload.stereo.plane_overlay)) {
+            slot.detection.planeOverlay = payload.stereo.plane_overlay;
+          }
+        }
         for (const [i, object] of objects.entries()) {
           const z = payload.objects[i].depth_m;
           const measured = Number.isFinite(z) && z > 0;
           if (measured && partner.depthOptions?.meters !== false) object.depth_m = z;
+          const height = payload.objects[i].height_above_plane_m;
+          if (plane?.validated && partner.depthOptions?.meters !== false && Number.isFinite(height)) {
+            object.height_above_plane_m = height;
+          }
           const prediction = payload.objects[i].intrusion;
           if (measured && object.track_id && movingLabels.has(object.label) && object.confidence >= .5 &&
               ['left','right'].includes(prediction?.from_side) && Number.isFinite(prediction.eta_s) &&

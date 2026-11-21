@@ -183,3 +183,90 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   assert.equal(alert.capture_error_ms,4);
   assert.ok(alert.judged_ms >= alert.capture_ms);
 });
+
+test('plane diagnostics stay on the paired frame and overlay bytes are opt-in', async t => {
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const call = (url, method='GET', token, body, extra={}) => fetch(base+url, {
+    method, body, headers:{...(token ? {Authorization:'Bearer '+token} : {}), ...extra}
+  });
+  const post = (url, token, data) => call(url,'POST',token,JSON.stringify(data),{'Content-Type':'application/json'});
+  const {token:desk} = await (await post('/api/session')).json();
+  async function pair(side) {
+    const {code} = await (await post('/api/pair/'+side,desk)).json();
+    return (await (await post('/api/join',undefined,{code})).json()).token;
+  }
+  const a = await pair('A'), b = await pair('B');
+  assert.equal((await call('/api/agent/alerts','GET',desk)).status,200);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN5sAAAAASUVORK5CYII=';
+  const plane = {validated:true,reason:'ok',pitch_deg:12.3456,roll_deg:-.04,inlier_ratio:.85,holdout_p90_m:.012};
+  const box = {bbox:[.4,.4,.6,.7],depth_m:1.2,height_above_plane_m:.14};
+  const objects = [{...box,label:'cup',position:'center',confidence:.9}];
+  const road = {level:'visual',point:[.5,.6],curb_drop_m:.12,curb_confidence:'supported'};
+  const preview = (opts, etag) => call('/api/preview/A','GET',desk,undefined,{
+    'X-Depth-Options':JSON.stringify(opts), ...(etag ? {'If-None-Match':etag} : {})
+  });
+  async function publish(opts, stereoExtras, edge=road) {
+    t.mock.timers.tick(100);
+    for (const phone of [b,a]) {
+      const result = await call('/api/frame','PUT',phone,Buffer.from([255,216,11,255,217]), {
+        'Content-Type':'image/jpeg','X-Sample-Ms':String(Date.now()),'X-Clock-Error-Ms':'2'
+      });
+      assert.equal(result.status,204);
+    }
+    await preview(opts);
+    const {sources} = await (await call('/api/cv/sources')).json();
+    const query = '?camera_id=A&source_id='+sources.find(s => s.camera_id === 'A').source_id;
+    const frame = await call('/api/cv/frame'+query);
+    const frame_id = frame.headers.get('etag').slice(1,-1);
+    const partner = await call('/api/cv/stereo-partner'+query+'&frame_id='+frame_id+'&max_skew_ms=65');
+    assert.equal(partner.status,200);
+    assert.equal(partner.headers.get('x-depth-plane-overlay'),opts.planeOverlay ? '1' : null);
+    const stereo = {status:'ready',partner_id:partner.headers.get('x-partner-id'),preview:png,...stereoExtras};
+    const accepted = await post('/api/cv/detections'+query,undefined,{
+      frame_id,objects,stereo,unclassified_obstacles:[box,{...box,depth_m:-1}],road_edge:edge
+    });
+    assert.equal(accepted.status,204);
+    return preview(opts);
+  }
+
+  const off = {meters:true};
+  const on = {...off,planeOverlay:true};
+  let result = await (await publish(off,{plane,plane_overlay:png})).json();
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.deepEqual(result.plane,plane);
+  assert.equal(result.objects[0].height_above_plane_m,.14);
+  assert.deepEqual(result.unclassified_obstacles,[box]);
+  assert.deepEqual(result.road_edge,road);
+
+  let response = await publish(on,{plane,plane_overlay:png});
+  const withOverlay = response.headers.get('etag');
+  result = await response.json();
+  assert.equal(result.plane_overlay,png);
+  assert.equal(result.depth_frame_id,result.frame_id);
+  response = await preview(off,withOverlay);
+  assert.equal(response.status,200);
+  assert.equal(Object.hasOwn(await response.json(),'plane_overlay'),false);
+
+  result = await (await publish({meters:false,planeOverlay:true},{plane,plane_overlay:'not-a-png'})).json();
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+
+  result = await (await publish(on,{plane:{validated:false,reason:'low_inlier_ratio',inlier_ratio:7},plane_overlay:png})).json();
+  assert.deepEqual(result.plane,{validated:false,reason:'low_inlier_ratio'});
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.equal(Object.hasOwn(result,'unclassified_obstacles'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+
+  await publish(on,{plane,plane_overlay:png});
+  await pair('B');
+  result = await (await preview(on)).json();
+  assert.equal(Object.hasOwn(result,'plane'),false);
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+  assert.deepEqual(result.road_edge,{level:'visual',point:[.5,.6]});
+});
