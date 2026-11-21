@@ -29,7 +29,6 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     frame.tabIndex = !size.hidden && $('#camera-feeds').hasAttribute('data-actual-pixels') ? 0 : -1;
     if (!connected) {
       if (feed.side === 'A') {
-        scene.clear();
         VisionPerceptionView.showDepth(null, null, sampleMode);
       }
       feed.etag = undefined;
@@ -62,19 +61,23 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       const path = '/api/preview/' + feed.side;
       const response = await fetch(path, {headers, signal:AbortSignal.any([scope.signal, AbortSignal.timeout(3000)])});
       if (version !== pollVersion) return;
-      if (feed.side === 'A' && (response.status === 200 || response.status === 304)) {
-        scene.update(response.headers.get('X-Segmentation-Frame'));
+      const sceneId = response.headers.get('X-Segmentation-Frame');
+      if (response.status === 304) {
+        if (feed.side === 'A') scene.update(sceneId);
+        return;
       }
-      if (response.status === 304) return;
       if (response.status !== 200) {
+        if (feed.side === 'A' && (response.status === 204 || response.status === 401)) scene.clear();
         if (response.status === 401) session.invalidate(requestToken);
         setFeed(feed,false,response.status === 401 ? 'Session expired. Pair the phone again.' : undefined);
         return;
       }
       const snapshot = await response.json();
+      if (version !== pollVersion) return;
       if (snapshot.camera_id !== undefined && snapshot.camera_id !== feed.side) {
         throw new Error('Preview camera does not match the requested feed.');
       }
+      if (feed.side === 'A') scene.update(sceneId, snapshot.depth_rig?.split('/')[0]);
       const image = new Image();
       image.src = snapshot.png ? 'data:image/png;base64,' + snapshot.png : 'data:image/jpeg;base64,' + snapshot.jpeg;
       let depth = snapshot.depth_preview ? new Image() : null;
@@ -143,10 +146,14 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     const version = ++pollVersion;
     if (sampleMode || !isMonitor()) return;
     feeds.forEach(feed => setFeed(feed,false));
-    if (!session.token) return;
+    if (!session.token) { scene.clear(); return; }
     async function poll(feed) {
       if (version !== pollVersion) return;
-      if (!session.token) { setFeed(feed,false,'Pair the phone again.'); return; }
+      if (!session.token) {
+        if (feed.side === 'A') scene.clear();
+        setFeed(feed,false,'Pair the phone again.');
+        return;
+      }
       await readFrame(feed,version);
       if (version === pollVersion) scope.delay(() => poll(feed),feed.side === 'A' ? 100 : feed.rtc.playing ? 450 : 220);
     }
@@ -156,6 +163,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   function renderMode(demo) {
     onModeChange();
     sampleMode = demo;
+    if (demo) scene.clear();
     $('#camera-feeds').toggleAttribute('data-live', !demo);
     $('#pixel-preview').hidden = demo;
     $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';

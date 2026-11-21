@@ -1,6 +1,7 @@
 export function createScenePreview($, getToken, signal) {
   const placeholder = $('#scene-placeholder');
   const canvas = $('#scene-mask');
+  const stale = $('#scene-stale');
   const ctx = canvas.getContext('2d', {willReadFrequently:true});
   const legend = $('#scene-legend');
   const palette = document.createElement('canvas');
@@ -14,16 +15,18 @@ export function createScenePreview($, getToken, signal) {
     swatches.fillRect(id,0,1,1);
   }
   const colors = swatches.getImageData(0,0,256,1).data;
-  let currentId, expiry, labelRequest, version = 0;
+  let stream, expiry, labelRequest, loading = false, version = 0;
 
   function clear() {
     version++;
     clearTimeout(expiry);
+    loading = false;
+    stream = undefined;
     canvas.hidden = true;
     placeholder.hidden = false;
+    stale.hidden = true;
     legend.replaceChildren();
     delete canvas.dataset.frameId;
-    currentId = null;
   }
 
   function paint(image, scene, labels) {
@@ -55,20 +58,23 @@ export function createScenePreview($, getToken, signal) {
 
   signal.addEventListener('abort',clear,{once:true});
 
-  async function update(id) {
-    if (currentId === id) return;
+  async function update(id, cameraStream) {
+    if (cameraStream && stream && cameraStream !== stream) clear();
+    if (cameraStream) stream = cameraStream;
     const token = getToken();
-    if (!id || !token) { clear(); return; }
-    currentId = id;
-    const current = ++version;
+    if (!token) { clear(); return; }
+    if (!id || canvas.dataset.frameId === id || loading) return;
+
+    loading = true;
+    const current = version;
     const started = performance.now();
     try {
       const headers = {Authorization:'Bearer '+token};
       const response = await fetch('/api/segmentation/A', {headers,
         signal:AbortSignal.any([signal,AbortSignal.timeout(1800)])});
-      if (current !== version) return;
-      if (response.status !== 200) { clear(); return; }
+      if (current !== version || response.status !== 200) return;
       const scene = await response.json();
+      if (current !== version || canvas.dataset.frameId === scene.frame_id) return;
       const image = new Image();
       image.src = 'data:image/png;base64,' + scene.mask;
       labelRequest ??= fetch('/ade20k-labels.json', {signal:AbortSignal.any([signal,AbortSignal.timeout(1800)])})
@@ -82,15 +88,14 @@ export function createScenePreview($, getToken, signal) {
       const [, labels] = await Promise.all([image.decode(), labelRequest]);
       if (current !== version) return;
       const remaining = scene.remaining_ms - (performance.now() - started);
-      if (remaining <= 0) { clear(); return; }
       clearTimeout(expiry);
-      currentId = scene.frame_id;
       paint(image,scene,labels);
-      expiry = setTimeout(() => {
-        if (current === version) clear();
-      },remaining);
+      stale.hidden = remaining > 0;
+      if (remaining > 0) expiry = setTimeout(() => { stale.hidden = false; }, remaining);
     } catch {
-      if (current === version) clear();
+      // Keep the previous mask visible while a newer result is unavailable.
+    } finally {
+      if (current === version) loading = false;
     }
   }
   return {clear, update};

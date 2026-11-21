@@ -52,6 +52,9 @@ export function MonitorPanel() {
           <canvas id="scene-mask" width={128} height={128} role="img"
                   aria-label="Semantic classes in the sampled Camera A frame" hidden />
           <p id="scene-placeholder" className="no-feed">Waiting for Camera A segmentation.</p>
+          <span id="scene-stale" className="analysis-frame-label" role="status" hidden>
+            Last result · waiting for update
+          </span>
         </div>
         <ul id="scene-legend" aria-label="Most visible classes"></ul>
       </article>

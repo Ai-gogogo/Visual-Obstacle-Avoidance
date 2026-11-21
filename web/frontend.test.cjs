@@ -116,3 +116,72 @@ test('plane status, overlay and box height follow the display controls', async (
   view.paintCamera(canvas,depth,frame);
   assert.match(calls.pop(),/1\.20 m · H 0\.14 m/);
 });
+
+test('segmentation stays visible across gaps and clears on Camera A replacement', async t => {
+  const {createScenePreview} = await import('./features/perception/scene-preview.js');
+  t.mock.timers.enable({apis:['setTimeout']});
+  const ctx = {fillRect() {}, drawImage() {}, putImageData() {},
+    getImageData: () => ({data:new Uint8ClampedArray(256*4)})};
+  const canvas = {hidden:true,dataset:{},style:{},getContext:() => ctx};
+  const placeholder = {hidden:false};
+  const stale = {hidden:true};
+  const legend = {items:[],replaceChildren(...items) { this.items = items; }};
+  const elements = {'#scene-mask':canvas,'#scene-placeholder':placeholder,'#scene-stale':stale,'#scene-legend':legend};
+  const fakeDocument = {createElement:() => ({style:{},append() {},getContext:() => ctx})};
+  const saved = {document:globalThis.document,Image:globalThis.Image};
+  globalThis.document = fakeDocument;
+  globalThis.Image = class { async decode() {} };
+  t.after(() => {
+    for (const [name,value] of Object.entries(saved)) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
+  });
+
+  const reply = frame_id => Response.json({frame_id,mask:'AA==',remaining_ms:500,width:480,height:640});
+  let next = Promise.resolve(reply('first'));
+  let fetchCount = 0;
+  t.mock.method(globalThis,'fetch',url => {
+    if (url === '/ade20k-labels.json') return Promise.resolve(Response.json(['wall']));
+    assert.equal(url,'/api/segmentation/A');
+    fetchCount++;
+    return next;
+  });
+  const controller = new AbortController();
+  const view = createScenePreview(id => elements[id], () => 'desk', controller.signal);
+  await view.update('first','camera-a');
+  assert.equal(canvas.hidden,false);
+  assert.equal(stale.hidden,true);
+  assert.equal(legend.items.length,1);
+  t.mock.timers.tick(501);
+  await view.update(null,'camera-a');
+  assert.equal(stale.hidden,false);
+  assert.equal(canvas.dataset.frameId,'first');
+  assert.equal(canvas.hidden,false);
+
+  next = Promise.resolve(new Response(null,{status:204}));
+  await view.update('expired','camera-a');
+  assert.equal(canvas.dataset.frameId,'first');
+  let finish;
+  next = new Promise(resolve => { finish = resolve; });
+  const loading = view.update('second','camera-a');
+  await view.update(null,'camera-a');
+  await view.update('newer','camera-a');
+  assert.equal(fetchCount,3);
+  assert.equal(canvas.dataset.frameId,'first');
+  assert.equal(placeholder.hidden,true);
+  finish(reply('second'));
+  await loading;
+  assert.equal(canvas.dataset.frameId,'second');
+  assert.equal(stale.hidden,true);
+
+  next = new Promise(resolve => { finish = resolve; });
+  const old = view.update('old-stream','camera-a');
+  await view.update(null,'replacement-camera');
+  finish(reply('old-stream'));
+  await old;
+  assert.equal(canvas.hidden,true);
+  assert.equal(placeholder.hidden,false);
+  assert.equal(legend.items.length,0);
+  controller.abort();
+});
