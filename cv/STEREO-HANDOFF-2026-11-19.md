@@ -1,18 +1,16 @@
 # VisionAssist 双目深度交接
 
-## 当前进度 · 2026-11-20
+## 当前接手点 · 2026-11-20 晚间
 
-**接手基线。** 分支 `cv-stereo-depth-map`，功能提交 `2a5fb5974d52428be02f8094016613daa595a7e6` 已推送至同名远端分支。更新交接时，本机 8775 控制台在线，A、B 都在发帧，Camera A 的 YOLO worker 报告 `mps / fp32`。Camera B 提供双目匹配所需的右图。
-
-- **双摄同步。** 互换 A/B 身份后，约 20 秒的发端报告时间偏差跟着同一台手机走。通过 USB 读取该手机系统时钟，只比 Mac 快约 27 ms。偏差在 WebRTC 发端报告链路已可见，尚未确定它是在生成报告还是传输时产生。新版 480 × 640 WebRTC 模式从手机浏览器的同一帧回调取画面和 `captureTime`，将 JPEG、转换到 Mac 时间轴的时间戳和误差一起上传。Mac 用两帧采集时差加双方校时误差作为配对上界，门槛为 65 ms。实机双端都报告 `frame-capture-time`，抽查 8 对匹配帧的上界为 27–52 ms，控制台恢复显示深度。Safari 网页检查器与 USB 用于这次诊断，日常 Wi-Fi 采集无需开启。
-- **实时深度与 YOLO。** `Stereo depth map` 下方可选 StereoSGBM（默认）或 RAFT-Stereo，两种算法共用相应机位的标定。开启 **Show meters** 后，仅在框中央有效深度点足够且一致时显示物体的前向距离。RAFT 结果晚于 750 ms 时，页面可在采集后 3.5 秒内显示匹配的 A 图与 YOLO 框，即使关闭米数或该帧没有可用深度。通过真实录像回放验证了 3 个超过原显示时限的 RAFT 帧仍有同帧检测框。
-- **Camera B 显示开关。** 点击控制台顶部的 **Show Camera B** 可隐藏 B 的画面，让桌面布局只显示并排的 A 与深度图。B 继续提供测距与录制所需的帧。浏览器会记住该选择。已验证关闭、刷新后保留及重新开启。
-- **Apple GPU。** 当前 worker 用 `--device mps --cpu-threads 4` 运行。真实录像交替测试的单帧中位耗时，YOLO 从 CPU 的 49.7 ms 降到 MPS 的 28.9 ms。RAFT 仍在 CPU 上约需 615 ms，整套处理从 666.6 ms 降到 646.9 ms。实测为同一段录像上的计算耗时，实时端到端延迟还包含传输和界面轮询。
-- **录制与逐帧对比。** **Record A + B → Stop and save** 保存同步原图与 `timestamps.csv`，然后生成并排的 A/B 原片。手机断线时会保存已经写入的帧。在 **Saved recordings** 里选中录像，点 **Generate depth comparison** 生成 Camera A 原图、StereoSGBM、RAFT-Stereo 三栏视频。对比视频为 4 FPS，可逐帧查看。之前实拍的 47 对帧已加入录像列表，原片和对比 MP4 均解码核验为 47 帧。
+- **分支与部署。** 本机分支为 `cv-stereo-depth-map`。目前 8775 部署的功能版本是 `c2e428c`，包含上一张分割图保留逻辑 `39b917f` 和来自队友 `cv` 分支的 ADE20K 分割合并 `b5a142d`。更新此文时，8775 桌面服务、8776 手机 HTTPS 代理和 Camera A worker 都在线，A、B 都有新帧。Git 的本地 `origin/cv-stereo-depth-map` 跟踪点为 `c021460`，接手时以本机功能版本为准。
+- **实时控制台。** Camera A、**Stereo depth map**、**Camera A segmentation** 从左到右同排，窄窗口可以横向滚动。Camera B 位于下一排，可用 **Show Camera B** 控制可见性，浏览器会记住该设置。卡片、状态行和检测列表都有预留空间，警报浮在角落。深度图可切 StereoSGBM 或 RAFT-Stereo。分割结果短暂缺失或过期时，面板保留上一张图和图例，同时标记 **Last result · waiting for update**。更换或断开 Camera A 会清除该图。
+- **平面与避障。** `--plane-ransac` 使用原始公制深度拟合并独立验证支撑面。平面合格时，**Show meters** 可显示物体离面高度，适用的障碍判断使用 3D 走廊和高度阈值。平面失效时，障碍与风险回到原有 2D 规则，路沿与横穿预测可在同一配对、有效 PnP 和 500 ms 时限内沿用变换后的姿态，其余情况使用静态俯仰角。**Show plane overlay** 默认关闭。开启后，绿色标出训练内点和合格中央留区，橙色标出高于误差带且处在有效高度区间的点，默认下限至少 0.05 m、上限 2.0 m。橙色是调试几何提示，告警还依赖走廊和风险条件。
+- **分割的用途。** `--scene-segmentation` 启用 Camera A 的 ADE20K 分类图，150 类，后台默认每秒最多启动三次推理。ADE20K 当前服务于实时预览和录像对比。独立的 `--road-alerts` 使用 Cityscapes 模型提供路沿预警和可用的道路、人行道候选掩码，本次 8775 的启动参数没有这个开关。
+- **录像与对比。** **Record A + B → Stop and save** 保存同步两路 JPEG/PNG、`timestamps.csv` 和当次标定，随后生成左右并排原片。在 **Saved recordings** 选中录像，点 **Generate depth comparison** 输出 **Camera A 原图｜StereoSGBM｜RAFT-Stereo｜Camera A 语义分割** 四栏 MP4。旧的三栏对比用 **Regenerate with segmentation** 重生成。四栏使用同一批原始配对帧，分割从对应的 A 原图离线重算。固定 4 FPS 便于逐帧查看，播放中的算法等待消失，深度缺测和分类边缘波动仍可能存在。
 
 ## 复现当前运行方式
 
-在仓库根目录执行。手机端进 `Pair a phone → Wi-Fi · WebRTC`，两台选择 **480 × 640 · WebRTC**。按标定时的顺序安装两台手机，Rice 对应左侧 A，Jia 对应右侧 B。重启桌面服务后重新配对。手机端代码变更后，先在 Safari 重新载入相机页再配对。
+在仓库根目录执行。手机使用 **Pair a phone → Wi-Fi · WebRTC** 获取 A、B 的配对码，两台选择 **480 × 640 · WebRTC**。按标定位置安装两台手机，Rice 对应左侧 A，Jia 对应右侧 B。重启桌面服务后需要重新配对。只重启 Camera A worker 可以保留桌面会话和手机配对，适合更新仅涉及 Python 处理的改动。手机端代码变动后，先在 Safari 重新载入相机页。
 
 ```sh
 (cd web && npm run build -- --webpack)
@@ -24,18 +22,24 @@ VISIONASSIST_PORT=8775 \
 # 另一个终端，从仓库根目录运行。
 .visionassist/rtc-env/bin/python -u cv/live_camera.py \
   --server http://127.0.0.1:8775 --device mps --cpu-threads 4 \
-  --rtc-low-config cv/results/stereo-calibration-2026-11-20/webrtc-480x640.json
+  --rtc-low-config cv/results/stereo-calibration-2026-11-20/webrtc-480x640.json \
+  --plane-ransac --scene-segmentation
 ```
 
-桌面入口是 [localhost:8775](http://localhost:8775/)。手机 HTTPS 入口由本机 `.visionassist/phone-origin-8775.txt` 指定。网卡地址变化时，按 [Web README](../web/README.md#双手机-webrtc) 核对 8776 代理和证书。若深度界面提示某台相机缺采集时间，先确认两路都在发帧，再查对应帧的 `X-RTC-Timing-Source`，以及 `web/phone-proxy.cjs` 是否转发了 `X-Capture-Stream`。没有 Apple MPS 的机器可用 `--device cpu`。
+桌面入口是 [localhost:8775](http://localhost:8775/)，手机 HTTPS 源由本机 `.visionassist/phone-origin-8775.txt` 指定。局域网变化时按 [Web README](../web/README.md#双手机-webrtc) 核对 8776 代理、证书和网卡地址。没有 MPS 的机器可用 `--device cpu`。当前分割使用 `cv/models/scene-segformer-b0.onnx`，RAFT 使用本机 `.visionassist/RAFT-Stereo/raftstereo-realtime.pth` 和对应模型代码。下载及依赖见 [CV README](README.md#camera-a-室内外语义分割) 和 [Web README](../web/README.md#录制用于测试的-ab-素材)。
 
-对比生成和实时 RAFT 需要本地 `.visionassist/RAFT-Stereo/raftstereo-realtime.pth`、对应的 RAFT-Stereo 代码与 Python 依赖。环境和校准说明见 [CV README](README.md) 与 [Web README](../web/README.md)。47 对帧的本机录像目录为 `.visionassist/recordings/ee46fb76-ed87-5db5-b36f-6e568225a3a7/`，含 `stereo.mp4` 和 `stereo-depth-comparison.mp4`。实拍素材与本机证书均保存在 Git 忽略目录。
+480 × 640 WebRTC 的配对上界包括 A/B 拍摄时间差和两台设备的校时误差，当前门槛为 65 ms。若控制台提示缺采集时间，先确认两路都在发帧，再检查 `X-RTC-Timing-Source` 与手机代理转发的 `X-Capture-Stream`。此前实机确认两端均使用 `frame-capture-time`，抽查 8 对同步帧的上界为 27–52 ms。Apple GPU 加速 YOLO，现有 RAFT 路径仍使用 CPU。
 
-## 验证与下一步
+## 验证与证据边界
 
-- `2a5fb59` 提交前通过 19 项网页与接口测试、1 项生产前端测试、6 项深度测试、3 项 WebRTC 测试，以及 TypeScript 检查。网页命令为 `cd web && npm test && npm run typecheck && npm run test:frontend`，最后一项需要已完成生产构建。
-- 保持已标定的机位，下一轮可用同一段静止及轻微运动的实拍录像对照两种算法。记录同步帧比例、有效深度覆盖、已知距离误差和端到端延迟。当前已验证同步、显示和导出链路。绝对距离准确性及桌面拟合仍需独立验收。
-- 本机桌面拟合与纸杯高度实验的独立记录在 `.visionassist/handoffs/2026-11-20/HANDOFF.md`。
+| 项目 | 已有证据 |
+| --- | --- |
+| M1–M5 | 支撑平面拟合、离线评测、实时 3D/2D 回退、动态姿态、路沿落差及控制台已接通。M1/M2 整改、M3 与 M4 已通过项目审查。M5 有完整回归和叠层启闭的同帧 HTTP 验证。 |
+| 真实桌面评测 | 同一段 37 对同步帧，自动掩码下 StereoSGBM 为 0/37，RAFT-Stereo 为 22/37。RAFT 的逐帧留区 P90 中位数为 15.3 mm。手工 ROI 下，只有 7 帧同时拟合通过且有杯身高度，帧间标准差 20.5 mm。固定印花点的高度稳定性与绝对测距精度仍待实测。 |
+| PnP 先验 | 合成运动序列上，快速路径将单帧拟合均值从 8.22 ms 降到 6.93 ms，法向抖动持平。该组计时独立于 PnP 耗时。37 对实拍帧回放中没有通过校验的 PnP 位姿，现场加速仍待验证。 |
+| 最新界面与导出 | 桌面 1440 px 和窄屏 390 px 都验证了三栏对齐。通过真实录像的 4 对同步帧验证旧对比升级、四栏 MP4 解码与 CSV 帧号对齐。最近 Web 21/21、生产前端 3/3、构建与 TypeScript 检查通过。最近全量 CV 70/70 通过于语义分割合并版 `b5a142d`。 |
+
+可分享的自动掩码数据见 [summary.json](results/ransac-m2-auto-mask/summary.json)。本机逐帧数据和日志位于 `.visionassist/plane-eval/`、`.visionassist/scene-merge/`、`.visionassist/ui-layout/` 和 `.visionassist/scene-comparison/`。最近部署日志在 `.visionassist/deploy/comparison-8775.6OGTxM/`。录像、权重和证书保存在本机 Git 忽略目录。桌面与纸杯的实验背景及旧快照说明见 `.visionassist/handoffs/2026-11-20/HANDOFF.md`。
 
 ## 历史记录 · 2026-11-19
 

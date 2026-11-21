@@ -55,13 +55,15 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 ## Camera A 检测与双目深度图
 
-相机配对页的 **Original pixels · lossless PNG** 按浏览器实际采集尺寸上传无损帧，目标节拍为每秒一帧。**Standard** 沿用长边最多 640 px 的 JPEG。实时页默认按帧的宽高比显示，可点 **Actual pixels** 按接收到的像素 1:1 查看。做双目标定时，两台设备应选择相同模式，保持镜头、方向和采集尺寸固定。标定工具可读取保存的 PNG 和 JPEG 帧。
+相机配对页的 **Original pixels · lossless PNG** 按浏览器实际采集尺寸上传无损帧，目标节拍为每秒一帧。**Standard** 沿用长边最多 640 px 的 JPEG。实时预览区预留固定尺寸并按原宽高比适配，可点 **Actual pixels** 在相机区域内按接收像素 1:1 查看。做双目标定时，两台设备应选择相同模式，保持镜头、方向和采集尺寸固定。标定工具可读取保存的 PNG 和 JPEG 帧。
 
 同一控制台配对左右两台手机。Camera A 提供检测画面；Camera B 提供双目匹配所需的另一个视角。控制台读取同一份 `/api/preview/A` 响应中的 JPEG、检测框和深度图，按同一帧一起显示。深度图越亮表示越近，黑色为缺测。B 断开时清除深度图及框上的米数，A 继续更新。运行方法和实机校准步骤见 [CV 说明](../cv/README.md)。
 
 480 × 640 WebRTC 模式下，手机在同一个视频帧回调中复制画面并读取浏览器给出的 `captureTime`。手机定期用往返探测估算与 Mac 的时差，将供深度计算的 JPEG、换算后的采集时间和时间误差一起上传。采集时间可用时，CV 帧响应的 `X-RTC-Timing-Source` 为 `frame-capture-time`。手机视频预览仍通过 WebRTC 发送。当浏览器没有提供采集时间或网络校时暂不可用时，接收端继续按原有 WebRTC 校时规则判断帧能否配对。更新手机端后要重新载入 Safari 相机页，输入新配对码即可使用新版。
 
 实时查看时，在 **Stereo depth map → Depth algorithm** 选择 StereoSGBM（默认）或 RAFT-Stereo。下一对同步帧会使用所选算法。两者共用当前机位的标定，RAFT 首次使用时会加载本机权重。
+
+Camera A、Stereo depth map 和 Camera A segmentation 从左到右同排。窄窗口内可横向滚动。Camera B 位于下一排，**Show Camera B** 仅控制预览可见性。语义分割短暂缺帧时保留上一张结果和图例，并显示 **Last result · waiting for update**。使用中的场景分割、平面拟合及轮换服务的参数见[最新交接](../cv/STEREO-HANDOFF-2026-11-19.md)。
 
 ## 录制用于测试的 A/B 素材
 
