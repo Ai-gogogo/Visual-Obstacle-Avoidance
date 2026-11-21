@@ -1,6 +1,24 @@
 import { requestError } from "../../shared/accessibility.js";
 import { exchangeVideoOffer } from "../../services/rtc-client.js";
 
+// The pairing survives a pause, a dropped connection or a reload of this page, so the phone can
+// resume without a new code. The token only allows camera uploads for this one slot.
+const PAIRING_KEY = 'visionassist-camera-pairing';
+
+export function storedPairing() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PAIRING_KEY) || 'null');
+    return saved && typeof saved.token === 'string' && /^[AB]$/.test(saved.slot) ? saved : null;
+  } catch { return null; }
+}
+
+function savePairing(pairing) {
+  try {
+    if (pairing) localStorage.setItem(PAIRING_KEY, JSON.stringify(pairing));
+    else localStorage.removeItem(PAIRING_KEY);
+  } catch { /* Resume is a convenience; pairing with a code still works. */ }
+}
+
 export function createCameraUpload(video, report) {
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d');
@@ -27,7 +45,8 @@ export function createCameraUpload(video, report) {
     }
   }
 
-  function stop(message = '', invalid = false) {
+  // Stopping keeps the pairing unless the server ended it or the user asks for a new code.
+  function stop(message = '', invalid = false, forget = false) {
     run += 1;
     lastDetails = '';
     clock = undefined;
@@ -41,8 +60,12 @@ export function createCameraUpload(video, report) {
     stream?.getTracks().forEach(track => track.stop());
     stream = undefined;
     video.srcObject = null;
-    report({phase:'idle', message, invalid});
-    if (previousToken) fetch('/api/frame', {method:'DELETE', headers:{Authorization:'Bearer '+previousToken}, keepalive:true}).catch(() => {});
+    const pairing = storedPairing();
+    if (forget) savePairing(null);
+    const release = previousToken || (forget && pairing?.token);
+    const keep = !forget && Boolean(pairing) && pairing.token === previousToken;
+    report({phase:'idle', message, invalid, resumable:!forget && Boolean(pairing)});
+    if (release) fetch('/api/frame'+(keep ? '?keep=1' : ''), {method:'DELETE', headers:{Authorization:'Bearer '+release}, keepalive:true}).catch(() => {});
   }
 
   function nextFrame(currentRun) {
@@ -98,7 +121,7 @@ export function createCameraUpload(video, report) {
         }
         if (!response.ok) {
           const body = await response.json().catch(() => null);
-          throw new Error(body?.error || 'Camera connection ended. Enter a new code to reconnect.');
+          throw Object.assign(new Error(body?.error || 'Camera connection ended. Enter a new code to reconnect.'), {status:response.status});
         }
         if (originalPixels && (!clock || sent-clock.at > 60000)) {
           // Use a small clock request to avoid timing the entire PNG upload.
@@ -127,7 +150,8 @@ export function createCameraUpload(video, report) {
         timer = setTimeout(() => nextFrame(currentRun),delay);
       }
     } catch (error) {
-      if (run === currentRun) stop(requestError(error,'Connection interrupted. Pair again to reconnect.'));
+      if (run === currentRun) stop(requestError(error,'Connection interrupted. Tap Resume camera to reconnect.'),false,
+        error.status === 401 || error.status === 404);
     }
   }
 
@@ -238,7 +262,7 @@ export function createCameraUpload(video, report) {
       });
     }
 
-    async function endRtc(reason) {
+    async function endRtc(reason, forget = false) {
       if (rtcPeer !== peer || run !== currentRun) return;
       rtcPeer = undefined;
       controller.abort();
@@ -247,9 +271,9 @@ export function createCameraUpload(video, report) {
         const response = await fetch('/api/webrtc/offer',{method:'DELETE',headers:auth,signal:AbortSignal.timeout(3000)});
         if (!response.ok) throw new Error('Camera session ended.');
         if (run !== currentRun) return;
-        stop(reason || 'WebRTC interrupted. Check Wi-Fi and reconnect with the same resolution.');
+        stop(reason || 'WebRTC interrupted. Check Wi-Fi, then tap Resume camera.', false, forget);
       } catch {
-        if (run === currentRun) stop('Camera connection interrupted. Pair again to reconnect.');
+        if (run === currentRun) stop('Camera connection interrupted. Tap Resume camera to reconnect.', false, forget);
       }
     }
 
@@ -264,7 +288,7 @@ export function createCameraUpload(video, report) {
         throw error;
       }
       if (response.status === 408 || response.status === 429 || response.status >= 500) return null;
-      throw new Error('Receiver unavailable.');
+      throw Object.assign(new Error('Receiver unavailable.'), {status:response.status});
     }
 
     async function checkReceiver() {
@@ -308,8 +332,8 @@ export function createCameraUpload(video, report) {
           report({phase:'connected',lens:lensDescription+' · WebRTC'+size+fps+timing});
         }
         timer = setTimeout(checkReceiver,1000);
-      } catch {
-        await endRtc();
+      } catch (error) {
+        await endRtc(undefined, error.status === 401);
       }
     }
 
@@ -333,6 +357,22 @@ export function createCameraUpload(video, report) {
   }
 
   async function start(code, format) {
+    return connect(format, () => fetch('/api/join',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code}),signal:AbortSignal.timeout(4500)}));
+  }
+
+  // Reopen the camera with the saved pairing instead of a new code.
+  async function resume(format) {
+    const pairing = storedPairing();
+    if (!pairing) {
+      report({phase:'idle', message:'Enter the six-digit code shown on the computer.'});
+      return;
+    }
+    return connect(format ?? pairing.format, () => fetch('/api/rejoin',{method:'POST',
+      headers:{Authorization:'Bearer '+pairing.token},signal:AbortSignal.timeout(4500)}), true);
+  }
+
+  async function connect(format, pair, resuming = false) {
     if (!navigator.mediaDevices?.getUserMedia) {
       report({phase:'idle', message:'Open the camera site from the local server. A phone on the network needs HTTPS.'});
       return;
@@ -348,7 +388,7 @@ export function createCameraUpload(video, report) {
       if (run !== currentRun) { media.getTracks().forEach(track => track.stop()); return; }
       stream = media;
       const sent = performance.now();
-      const response = await fetch('/api/join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code}),signal:AbortSignal.timeout(4500)});
+      const response = await pair();
       const received = performance.now();
       const result = await response.json();
       if (run !== currentRun) {
@@ -356,12 +396,14 @@ export function createCameraUpload(video, report) {
         return;
       }
       if (!response.ok) {
-        stop(result.error || 'Could not pair the camera.', response.status === 404);
+        const ended = resuming && (response.status === 401 || response.status === 404);
+        stop(result.error || 'Could not pair the camera.', !resuming && response.status === 404, ended);
         return;
       }
       token = result.token;
+      savePairing({token, slot:result.slot, format});
       updateClock(response, sent, received);
-      stream.getVideoTracks().forEach(track => track.addEventListener('ended', () => stop('Camera stopped. Enter a new code to reconnect.')));
+      stream.getVideoTracks().forEach(track => track.addEventListener('ended', () => stop('Camera stopped. Tap Resume camera to reconnect.')));
       video.srcObject = stream;
       lensDescription = description;
       report({phase:'connected', lens:description});
@@ -383,7 +425,10 @@ export function createCameraUpload(video, report) {
     }
   }
 
-  return {start, stop, networkLost() {
+  return {start, resume, stop,
+    pause() { stop('Camera paused. Tap Resume camera to continue.'); },
+    forget() { stop('Enter the six-digit code shown on the computer.', false, true); },
+    networkLost() {
     if (token) {
       lastDetails = '';
       report({phase:'connected', lens:'Network connection lost. Waiting to resume camera uploads…'});

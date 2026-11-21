@@ -203,3 +203,45 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   await publishCrossing(false);
   assert.equal((await crossingAlert()).stationary_zone,false);
 });
+
+test('a paused phone keeps its pairing and rejoins without a new code', async t => {
+  const server = createServer();
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const call = (route, method = 'GET', token, body, extra = {}) => fetch(base+route, {
+    method, body, headers:{...(token ? {Authorization:'Bearer '+token} : {}), ...extra}
+  });
+  const {token:desk} = await (await call('/api/session','POST')).json();
+  const pair = async side => (await (await call('/api/pair/'+side,'POST',desk)).json()).code;
+  const join = async code => (await call('/api/join','POST',undefined,JSON.stringify({code}),{'Content-Type':'application/json'})).json();
+  const cameras = async () => (await (await call('/api/agent/alerts','GET',desk)).json()).cameras;
+  const frame = token => call('/api/frame','PUT',token,Buffer.from([0xff,0xd8,0xff,0xd9]),{'Content-Type':'image/jpeg'});
+
+  const {token} = await join(await pair('A'));
+  assert.equal((await frame(token)).status,204);
+  assert.equal((await cameras()).A,'live');
+
+  assert.equal((await call('/api/frame?keep=1','DELETE',token)).status,204);
+  assert.equal((await cameras()).A,'waiting');
+  assert.equal((await frame(token)).status,204);
+
+  const rejoin = await call('/api/rejoin','POST',token);
+  assert.equal(rejoin.status,200);
+  assert.ok(rejoin.headers.get('X-Server-Ms'));
+  const resumed = await rejoin.json();
+  assert.equal(resumed.token,token);
+  assert.equal(resumed.slot,'A');
+  assert.equal((await frame(token)).status,204);
+  assert.equal((await cameras()).A,'live');
+
+  assert.equal((await call('/api/rejoin','POST','not-a-phone')).status,401);
+  const replaced = await join(await pair('A'));
+  assert.notEqual(replaced.token,token);
+  assert.equal((await call('/api/rejoin','POST',token)).status,401);
+
+  assert.equal((await call('/api/frame','DELETE',replaced.token)).status,204);
+  assert.equal((await cameras()).A,'offline');
+  assert.equal((await call('/api/rejoin','POST',replaced.token)).status,401);
+});
