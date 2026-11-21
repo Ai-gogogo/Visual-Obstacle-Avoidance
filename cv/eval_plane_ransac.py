@@ -1,8 +1,9 @@
 """Compare raw stereo depth on the same timestamped Camera A/B recording."""
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 import csv
 from dataclasses import replace
+from itertools import count, repeat
 import json
 from pathlib import Path
 from time import perf_counter
@@ -12,13 +13,18 @@ import numpy as np
 from PIL import Image
 
 from detect_image import DEFAULT_WEIGHTS, detect
-from path_intrusion import background_mask
+from mask_utils import InstanceMask
+from obstacles import PlaneObstacles
+from path_intrusion import background_mask, support_background_mask
 from plane_ransac import PlaneConfig, fit_support_plane, height_above_plane, object_height_m
 import raft_depth
-from stereo_depth import StereoDepth
+from road_edge import DEFAULT_ROAD_CONFIG
+from stereo_depth import StereoDepth, object_depth_stats
+from tracking import FrameTracker
 
 ROOT = Path(__file__).resolve().parents[1]
 ALGORITHMS = ("StereoSGBM", "RAFT-Stereo")
+DEFAULT_SEG_WEIGHTS = DEFAULT_WEIGHTS.with_name("yolo11n-seg.pt")
 
 
 def recording_rows(directory, first, last, max_skew):
@@ -133,6 +139,170 @@ def summarize(rows):
     return results
 
 
+def segmentation_frame(depth, stereo, objects, pixels, config):
+    """Measure one set of detections on the shared, unfiltered Camera A depth."""
+    start = perf_counter()
+    instances = None if pixels is None else [InstanceMask(mask) if mask is not None else None for mask in pixels]
+    background = support_background_mask(depth.shape, objects, masks=instances).astype(bool)
+    foreground_ms = (perf_counter() - start) * 1000
+    support = np.arange(depth.shape[0])[:, None] >= .45 * depth.shape[0]
+    candidate = background & support
+    start = perf_counter()
+    plane = fit_support_plane(depth, stereo.camera_a, candidate, config=config)
+    ransac_ms = (perf_counter() - start) * 1000
+    start = perf_counter()
+    measurements = []
+    masks = repeat(None) if instances is None else instances
+    for obj, instance in zip(objects, masks):
+        distance = object_depth_stats(depth, obj["bbox"], mask=instance)
+        height = object_height_m(depth, stereo.camera_a, plane, obj["bbox"], mask=instance)
+        measurements.append({
+            "label": obj["label"], "track_id": obj["track_id"], "has_instance_mask": instance is not None,
+            "depth_m": distance["median_m"] if distance is not None else None,
+            "nearest_depth_m": distance["nearest_m"] if distance is not None else None,
+            "depth_source": distance["source"] if distance is not None else None,
+            "height_m": height["median_m"] if height is not None else None,
+        })
+    measurement_ms = (perf_counter() - start) * 1000
+    valid = np.isfinite(depth) & (depth > 0)
+    result = dict(validated=plane.validated, reason=plane.reason,
+                  eligible_depth_pixels=int(np.count_nonzero(valid & candidate)),
+                  train_points=plane.train_points, train_inliers=plane.inliers, grid_cells=plane.grid_cells,
+                  holdout_points=plane.holdout_points, holdout_p90_m=plane.holdout_p90_m,
+                  foreground_ms=foreground_ms, ransac_ms=ransac_ms, measurement_ms=measurement_ms,
+                  postprocess_ms=foreground_ms + measurement_ms)
+    if instances is not None:
+        # Control for the changed detector: keep its boxes fixed and change only the background cutout.
+        start = perf_counter()
+        same_boxes = support_background_mask(depth.shape, objects).astype(bool)
+        result["same_boxes_foreground_ms"] = (perf_counter() - start) * 1000
+        result["same_boxes_depth_pixel_gain"] = result["eligible_depth_pixels"] - int(
+            np.count_nonzero(valid & same_boxes & support))
+    return result, measurements, plane, background, candidate
+
+
+def segmentation_summary(rows, measurements):
+    heights = defaultdict(list)
+    for obj in measurements:
+        if obj["height_m"] is not None:
+            heights[obj["track_id"]].append(obj["height_m"])
+    tracks = {key: {"height_count": len(values), "std_m": float(np.std(values))}
+              for key, values in sorted(heights.items()) if len(values) >= 2}
+    residuals = [row["holdout_p90_m"] for row in rows if row["holdout_p90_m"] is not None]
+    passed = sum(row["validated"] for row in rows)
+    depth_count = sum(obj["depth_m"] is not None for obj in measurements)
+    height_count = sum(obj["height_m"] is not None for obj in measurements)
+    count_objects = len(measurements)
+    result = dict(passed=passed, frames=len(rows), plane_pass_rate=passed / len(rows),
+                  reasons=dict(Counter(row["reason"] for row in rows)),
+                  holdout_frames=len(residuals), holdout_p90_median_m=float(np.median(residuals)) if residuals else None,
+                  holdout_p90_p95_m=float(np.percentile(residuals, 95)) if residuals else None,
+                  detections=count_objects, depth_count=depth_count, height_count=height_count,
+                  depth_rate=depth_count / count_objects if count_objects else None,
+                  height_rate=height_count / count_objects if count_objects else None,
+                  mask_depth_count=sum(obj["depth_source"] == "mask" for obj in measurements),
+                  height_tracks=tracks, height_track_std_median_m=(
+                      float(np.median([track["std_m"] for track in tracks.values()])) if tracks else None))
+    for key in ("eligible_depth_pixels", "train_points", "train_inliers", "grid_cells",
+                "detector_ms", "foreground_ms", "measurement_ms", "ransac_ms", "postprocess_ms",
+                "pipeline_ms", "same_boxes_foreground_ms", "same_boxes_depth_pixel_gain"):
+        samples = [row[key] for row in rows if key in row]
+        if samples:
+            result[key] = {"mean": float(np.mean(samples)), "p95": float(np.percentile(samples, 95))}
+    return result
+
+
+def segmentation_overlay(image, depth, stereo, plane, background, candidate, label, pair, config):
+    canvas = image.copy()
+    canvas[~background] = .55 * canvas[~background] + .45 * np.array([40, 40, 255])
+    if np.isfinite(plane.d):
+        residual = np.abs(height_above_plane(depth, stereo.camera_a, replace(plane, validated=True)))
+        x = np.arange(depth.shape[1])
+        holdout = (x >= .44 * len(x)) & (x < .56 * len(x))
+        for selection, color in (
+            (candidate & ~holdout & (residual <= config.inlier_tol_m), (30, 205, 50)),
+            (candidate & holdout & (residual <= config.holdout_p90_max_m), (0, 222, 250)),
+        ):
+            canvas[selection] = .35 * canvas[selection] + .65 * np.array(color)
+    cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 52), (18, 18, 18), -1)
+    p90 = "n/a" if plane.holdout_p90_m is None else f"{1000 * plane.holdout_p90_m:.1f} mm"
+    for y, text in ((19, f"{pair:04d}  {label}  {plane.reason}"),
+                    (40, f"Inliers {plane.inliers} | Grid {plane.grid_cells} | Holdout P90 {p90}")):
+        cv2.putText(canvas, text, (6, y), cv2.FONT_HERSHEY_SIMPLEX, .47, (255,)*3, 1, cv2.LINE_AA)
+    return canvas
+
+
+def run_segmentation(args, stereo, calibration, selected):
+    from ultralytics import YOLO
+
+    if args.roi_json is not None:
+        raise ValueError("Segmentation comparison uses the live automatic support region")
+    weights = {"bbox": args.weights, "mask": args.seg_weights}
+    models = {}
+    for label, checkpoint in weights.items():
+        if not checkpoint.is_file():
+            raise ValueError(f"Missing local weights: {checkpoint}")
+        models[label] = YOLO(str(checkpoint))
+    if models["bbox"].task != "detect" or models["mask"].task != "segment":
+        raise ValueError("Comparison requires detection baseline and segmentation experiment checkpoints")
+    config = PlaneObstacles.load(DEFAULT_ROAD_CONFIG, force=True).fit
+    trackers = {label: FrameTracker(label, "A", count(1)) for label in models}
+    raft_depth._load_model()
+    out = ROOT / ".visionassist" / "seg-eval" / args.run_id
+    (out / "overlay").mkdir(parents=True, exist_ok=False)
+    (out / "calibration.json").write_bytes(calibration.read_bytes())
+    results, measurements = [], []
+    for index, row in enumerate(selected):
+        pair = int(row["pair"])
+        images = [cv2.imread(str(args.recording / (row.get(f"{side.lower()}_file")
+                               or f"{pair:04d}-{side}.jpg"))) for side in "AB"]
+        if any(image is None or image.shape[:2][::-1] != stereo.size for image in images):
+            raise ValueError(f"Pair {pair} has a missing image or mismatched calibration size")
+        left = Image.fromarray(cv2.cvtColor(images[0], cv2.COLOR_BGR2RGB))
+        if index == 0:
+            for model in models.values():
+                detect(model, left, device=args.device, return_masks=True)
+        start = perf_counter()
+        depth = raft_depth.compute(stereo, *images)
+        depth_ms = (perf_counter() - start) * 1000
+        depth.setflags(write=False)
+        tiles = {}
+        # Alternate order so each model sees both first and second use of the shared frame.
+        for label in (("bbox", "mask") if index % 2 == 0 else ("mask", "bbox")):
+            start = perf_counter()
+            objects, pixels = detect(models[label], left, device=args.device, return_masks=True)
+            detector_ms = (perf_counter() - start) * 1000
+            trackers[label].update(objects, round(float(row["elapsed_s"]) * 1000))
+            result, objects_measured, plane, background, candidate = segmentation_frame(
+                depth, stereo, objects, pixels, config)
+            results.append(dict(pair=pair, pipeline=label, elapsed_s=float(row["elapsed_s"]),
+                                skew_bound_ms=float(row["skew_bound_ms"]), depth_ms=depth_ms,
+                                detections=len(objects), detector_ms=detector_ms,
+                                pipeline_ms=detector_ms + result["postprocess_ms"] + result["ransac_ms"],
+                                **result))
+            measurements.extend(dict(pair=pair, pipeline=label, **obj) for obj in objects_measured)
+            tiles[label] = segmentation_overlay(images[0], depth, stereo, plane, background, candidate,
+                                                "YOLO bbox" if label == "bbox" else "YOLO Seg mask", pair, config)
+        path = out / "overlay" / f"{pair:04d}-bbox-vs-mask.jpg"
+        if not cv2.imwrite(str(path), np.hstack((tiles["bbox"], tiles["mask"]))):
+            raise OSError(f"Cannot write {path}")
+        print(f"Processed pair {pair:04d}", flush=True)
+    for name, records in (("per-frame", results), ("per-object", measurements)):
+        with (out / f"{name}.csv").open("w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=list(dict.fromkeys(key for row in records for key in row)))
+            writer.writeheader()
+            writer.writerows(records)
+    summary = dict(recording=str(args.recording), calibration=str(calibration), depth="raw RAFT-Stereo",
+                   device=args.device, cpu_threads=args.cpu_threads, weights={k: str(v) for k, v in weights.items()},
+                   first_pair=int(selected[0]["pair"]), last_pair=int(selected[-1]["pair"]),
+                   max_skew_bound_ms=max(float(row["skew_bound_ms"]) for row in selected),
+                   pipelines={label: segmentation_summary(
+                       [row for row in results if row["pipeline"] == label],
+                       [obj for obj in measurements if obj["pipeline"] == label]) for label in models})
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
+    print(out)
+
+
 def run(args):
     import torch
     from ultralytics import YOLO
@@ -144,6 +314,8 @@ def run(args):
     if stereo is None or stereo.square_units:
         raise ValueError("Evaluation requires enabled metric stereo calibration")
     selected = recording_rows(args.recording, args.first_pair, args.last_pair, stereo.skew_ms)
+    if args.segmentation_comparison:
+        return run_segmentation(args, stereo, calibration, selected)
     roi = json.loads(args.roi_json.read_text()) if args.roi_json else None
     if roi is not None and roi.get("image_size_px") != list(stereo.size):
         raise ValueError("ROI and calibration image sizes differ")
@@ -212,6 +384,10 @@ def main():
     parser.add_argument("--last-pair", type=int)
     parser.add_argument("--cpu-threads", type=int, default=4)
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
+    parser.add_argument("--segmentation-comparison", action="store_true",
+                        help="Compare YOLO bbox vs YOLO instance masks on the same raw RAFT depth")
+    parser.add_argument("--seg-weights", type=Path, default=DEFAULT_SEG_WEIGHTS)
+    parser.add_argument("--device", default="cpu", help="YOLO device for the segmentation comparison")
     args = parser.parse_args()
     if Path(args.run_id).name != args.run_id or args.run_id in {".", ".."}:
         parser.error("--run-id must be a single directory name")

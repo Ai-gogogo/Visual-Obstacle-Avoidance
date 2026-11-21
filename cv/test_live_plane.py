@@ -21,6 +21,48 @@ from test_plane_ransac import scene
 
 
 class LivePlaneTests(unittest.TestCase):
+    def test_segmented_foreground_shared_by_pose_fit_and_unknown_obstacle_deduplication(self):
+        depth, camera, support, _, _, _ = scene(noisy=False)
+        chair = dict(label="chair", bbox=[.25, .65, .50, .90], confidence=.9, position="center")
+        table = dict(label="dining table", bbox=[.70, .65, .90, .90], confidence=.9, position="right")
+        silhouette = np.zeros(depth.shape, bool)
+        silhouette[420:572, 120:133] = True
+        silhouette[420:572, 225:240] = True
+        tabletop = np.zeros_like(silhouette)
+        tabletop[420:572, 336:432] = True
+        jpeg = io.BytesIO()
+        Image.new("RGB", (480, 640)).save(jpeg, format="JPEG")
+        http = Mock()
+        http.post.return_value.status_code = 204
+        worker = CameraWorker("http://local", None, http, stereo=SimpleNamespace(camera_a=camera),
+                              plane=PlaneObstacles())
+        worker.measure_depth = Mock(side_effect=lambda *_: ({"partner_stream": "B"}, depth))
+        plane = fit_support_plane(depth, camera, support)
+        self.assertTrue(plane.validated)
+        for i, masks in enumerate((None, [silhouette, tabletop]), 1):
+            worker.infer = lambda _: ([chair.copy(), table.copy()], masks)
+            http.get.return_value = Mock(status_code=200, content=jpeg.getvalue(), headers={
+                "ETag": f'"{i}"', "X-CV-Stream-Id": "A", "X-CV-Frame-Ms": str(i*100),
+                "X-CV-Sample-Ms": str(i*100),
+            })
+            with (patch("live_camera.fit_support_plane", return_value=plane) as fit,
+                  patch("live_camera.pose_between", return_value=None),
+                  patch("live_camera.unclassified_obstacles", return_value=[]) as dedup):
+                worker.process_frame("source")
+            fit_mask = fit.call_args.args[2]
+            background = dedup.call_args.args[3]
+            pnp = worker.plane_frames["source"].frame.background
+            for region in (fit_mask, background, pnp):
+                self.assertFalse(region[500, 135])
+                self.assertEqual(bool(region[500, 180]), masks is not None)
+            self.assertTrue(fit_mask[500, 380])
+            self.assertTrue(background[500, 380])
+            self.assertEqual(bool(pnp[500, 380]), masks is not None)
+            self.assertIs(fit.call_args.args[0], depth)
+            self.assertIs(dedup.call_args.args[0], depth)
+            json_payload = http.post.call_args.kwargs["json"]
+            self.assertTrue(all("mask" not in obj for obj in json_payload["objects"]))
+
     def test_config_opt_in(self):
         path = Path(__file__).with_name("road_config.json")
         self.assertIsNone(PlaneObstacles.load(path))

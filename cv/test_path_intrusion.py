@@ -5,13 +5,39 @@ import cv2
 import numpy as np
 
 from geometry import ground_axes, pitch_normal
-from path_intrusion import Corridor, IntrusionPredictor
+from mask_utils import InstanceMask, dilate_mask
+from path_intrusion import Corridor, IntrusionPredictor, background_mask
 from road_edge import DEFAULT_ROAD_CONFIG
 from tracking import FrameTracker
 
 W, H = 320, 192
 K = np.array([[240., 0, 160], [0, 240., 96], [0, 0, 1]])
 CAMERA = (K, np.zeros(5))
+
+
+class BackgroundMaskTests(unittest.TestCase):
+    def test_dilation_preserves_openings_and_mixes_bbox_fallback(self):
+        shape = (72, 100)
+        mask = np.zeros(shape, bool)
+        mask[0:24, 0:2] = True
+        mask[0:24, 32:34] = True
+        mask[0:2, :34] = True
+        chair = {"bbox": [0, 0, .34, 24/72]}
+        second = np.zeros_like(mask)
+        second[-12:, -6:] = True
+        person = {"bbox": [.94, .83, 1, 1]}
+        fallback = {"bbox": [.7, .5, .8, .65]}
+        expected_fallback = np.full(shape, 255, np.uint8)
+        expected_fallback[31:52, 65:86] = 0
+        for radius in (0, 4, 8):
+            expected = expected_fallback.copy()
+            expected[dilate_mask(mask, radius) | dilate_mask(second, radius)] = 0
+            for instance in (mask, InstanceMask(mask)):
+                actual = background_mask(shape, [chair, fallback, person],
+                                         masks=[instance, None, second], dilate_px=radius)
+                np.testing.assert_array_equal(actual, expected)
+                self.assertEqual(actual[17, 17], 255)
+        np.testing.assert_array_equal(background_mask(shape, [fallback], masks=[None]), expected_fallback)
 
 
 class Replay:

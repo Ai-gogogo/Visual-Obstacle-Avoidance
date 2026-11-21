@@ -1,11 +1,13 @@
 """Pixel-space morphology for boolean instance masks."""
 
+from functools import lru_cache
 from typing import NamedTuple
 
 import cv2
 import numpy as np
 
 
+@lru_cache(maxsize=8)
 def _kernel(radius_px):
     if radius_px < 0:
         raise ValueError("mask radius must be nonnegative")
@@ -15,13 +17,15 @@ def _kernel(radius_px):
 
 def erode_mask(mask, radius_px=2):
     """Shrink a foreground silhouette, treating pixels outside the frame as background."""
-    return cv2.erode(np.asarray(mask, dtype=np.uint8), _kernel(radius_px),
-                     borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool)
+    pixels = np.asarray(mask, dtype=bool).view(np.uint8)
+    return cv2.erode(pixels, _kernel(radius_px),
+                     borderType=cv2.BORDER_CONSTANT, borderValue=0).view(bool)
 
 
 def dilate_mask(mask, radius_px=4):
     """Expand a foreground silhouette by the given pixel radius."""
-    return cv2.dilate(np.asarray(mask, dtype=np.uint8), _kernel(radius_px)).astype(bool)
+    pixels = np.asarray(mask, dtype=bool).view(np.uint8)
+    return cv2.dilate(pixels, _kernel(radius_px)).view(bool)
 
 
 class MaskSamples(NamedTuple):
@@ -31,10 +35,10 @@ class MaskSamples(NamedTuple):
 
 
 class InstanceMask:
-    """Frame-local mask shared by distance and height for the same raw depth image."""
+    """Frame-local silhouette shared by exclusion, distance and height."""
 
     def __init__(self, pixels):
-        self.pixels = pixels
+        self.pixels = np.asarray(pixels, dtype=bool)
         self._depth = None
         self._samples = None
 

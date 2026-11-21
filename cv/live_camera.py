@@ -26,7 +26,7 @@ from geometry import deproject, ground_axes
 from item_features import item_features
 from mask_utils import InstanceMask
 from obstacles import PlaneObstacles, is_obstacle_candidate, unclassified_obstacles
-from path_intrusion import Corridor, Frame, IntrusionPredictor, background_mask, pose_between
+from path_intrusion import Corridor, Frame, IntrusionPredictor, background_mask, pose_between, support_background_mask
 from plane_ransac import PlaneEstimate, fit_support_plane, height_above_plane, object_height_m, predict_plane
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
@@ -212,15 +212,23 @@ class CameraWorker:
 
             metric_evidence = {}
             dynamic = {}
+            precise_background = None
+            if depth is not None and object_masks and any(mask is not None for mask in object_masks):
+                if self.plane:
+                    precise_background = support_background_mask(depth.shape, objects, masks=object_masks)
+                elif self.corridor and paired:
+                    precise_background = background_mask(depth.shape, objects, masks=object_masks)
             if self.plane:
                 current = pose = prior = None
                 if paired:
-                    current, pose, prior = self.prepare_plane_frame(source, pair, gray, depth, objects, int(capture_ms))
+                    current, pose, prior = self.prepare_plane_frame(
+                        source, pair, gray, depth, objects, int(capture_ms), background=precise_background)
                 else:
                     self.plane_frames.pop(source, None)
                 support = road_masks[0] | road_masks[1] if road_masks is not None else None
                 metric_evidence, measured = self.apply_support_plane(payload, depth, support, masks=object_masks,
-                                                                    prior=prior, overlay=overlay)
+                                                                    prior=prior, overlay=overlay,
+                                                                    background=precise_background)
                 fresh = measured if measured is not None and measured.validated else None
                 orientation = fresh or prior
                 axes = ground_axes(orientation.normal) if orientation is not None else None
@@ -233,6 +241,8 @@ class CameraWorker:
                         *road_masks, depth, axes=axes, plane=fresh, camera=self.stereo.camera_a)
 
             if self.corridor and paired:
+                if precise_background is not None:
+                    dynamic["background"] = precise_background
                 if source not in self.intrusions or self.intrusions[source][0] != pair:
                     self.intrusions[source] = pair, IntrusionPredictor(self.stereo.camera_a, self.corridor)
                 self.intrusions[source][1].update(gray, depth, objects, int(capture_ms), **dynamic)
@@ -299,8 +309,11 @@ class CameraWorker:
         self.etags[source] = etag
         del self.pending[source]
 
-    def prepare_plane_frame(self, source, pair, gray, depth, objects, stamp):
-        frame = Frame(gray, depth, background_mask(gray.shape, objects), stamp, {})
+    def prepare_plane_frame(self, source, pair, gray, depth, objects, stamp, *, background=None):
+        if background is None:
+            # Preserve the detection-only PnP mask, including its legacy table boxes.
+            background = background_mask(gray.shape, objects)
+        frame = Frame(gray, depth, background, stamp, {})
         current = PlaneFrame(pair, frame, None, None)
         previous = self.plane_frames.get(source)
         self.plane_frames[source] = current
@@ -314,7 +327,7 @@ class CameraWorker:
                 current.accepted_stamp = previous.accepted_stamp
         return current, pose, current.plane
 
-    def apply_support_plane(self, payload, depth, support, *, masks=None, prior=None, overlay=False):
+    def apply_support_plane(self, payload, depth, support, *, masks=None, prior=None, overlay=False, background=None):
         stereo = payload.setdefault("stereo", {})
         if depth is None:
             stereo["plane"] = {"validated": False, "reason": "depth_unavailable"}
@@ -322,8 +335,9 @@ class CameraWorker:
 
         objects = payload["objects"]
         h, w = depth.shape
-        foreground = [obj for obj in objects if obj["label"] != "dining table"]
-        background = background_mask(depth.shape, foreground).astype(bool)
+        if background is None:
+            background = support_background_mask(depth.shape, objects, masks=masks)
+        background = background.astype(bool, copy=False)
         if support is None or not support.any():
             support = np.arange(h)[:, None] >= .45 * h
         camera = self.stereo.camera_a

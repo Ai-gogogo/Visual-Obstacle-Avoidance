@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from geometry import deproject
+from mask_utils import InstanceMask, dilate_mask
 from risk import MIN_CONFIDENCE
 from tracking import MAX_GAP_MS
 
@@ -45,14 +46,40 @@ class Corridor:
         return cls(width/2, np.array([0, -math.sin(angle), math.cos(angle)]), horizon, reach, rate)
 
 
-def background_mask(shape, objects):
+def background_mask(shape, objects, *, masks=None, dilate_px=4):
+    """Exclude dilated silhouettes where available, otherwise padded boxes."""
+    if dilate_px < 0:
+        raise ValueError("mask radius must be nonnegative")
     h, w = shape
     mask = np.full(shape, 255, np.uint8)
-    for obj in objects:
+    silhouette = None
+    pairs = ((obj, None) for obj in objects) if masks is None else zip(objects, masks, strict=True)
+    for obj, instance in pairs:
+        if instance is not None:
+            pixels = instance.pixels if isinstance(instance, InstanceMask) else np.asarray(instance, dtype=bool)
+            if pixels.shape != shape:
+                raise ValueError("instance mask and background must have the same shape")
+            if silhouette is None:
+                silhouette = pixels.copy()
+            else:
+                np.logical_or(silhouette, pixels, out=silhouette)
+            continue
         x1, y1, x2, y2 = np.asarray(obj["bbox"]) * [w, h, w, h]
         pad = max(5, round(.06 * max(x2-x1, y2-y1)))
         mask[max(0, int(y1)-pad):int(y2)+pad+1, max(0, int(x1)-pad):int(x2)+pad+1] = 0
+    if silhouette is not None:
+        # Dilation distributes over union, so one operation excludes every silhouette.
+        expanded = dilate_mask(silhouette, radius_px=dilate_px)
+        cv2.subtract(mask, 255, dst=mask, mask=expanded.view(np.uint8))
     return mask
+
+
+def support_background_mask(shape, objects, *, masks=None):
+    """Leave detected tabletops available as support-surface candidates."""
+    pairs = ((obj, None) for obj in objects) if masks is None else zip(objects, masks, strict=True)
+    foreground = [(obj, mask) for obj, mask in pairs if obj["label"] != "dining table"]
+    return background_mask(shape, [obj for obj, _ in foreground],
+                           masks=[mask for _, mask in foreground] if masks is not None else None)
 
 
 @dataclass
@@ -141,7 +168,7 @@ class IntrusionPredictor:
         left, center, right = deproject([(x1, y), ((x1+x2)/2, y), (x2, y)], obj["depth_m"], self.camera)
         return center, (right-left)/2
 
-    def update(self, gray, depth, objects, stamp, *, axes=None, pose=ESTIMATE_MOTION):
+    def update(self, gray, depth, objects, stamp, *, axes=None, pose=ESTIMATE_MOTION, background=None):
         positions = {}
         for obj in objects:
             if (obj["label"] in MOVING_CLASSES and obj.get("track_id") and obj["confidence"] >= MIN_CONFIDENCE
@@ -154,7 +181,9 @@ class IntrusionPredictor:
             self.candidates.clear()
             return
         previous = self.previous
-        current = Frame(gray, depth, background_mask(gray.shape, objects), stamp, positions)
+        if background is None:
+            background = background_mask(gray.shape, objects)
+        current = Frame(gray, depth, background, stamp, positions)
         self.previous = current
         earlier, self.candidates = self.candidates, {}
         if previous is None or not (60 <= stamp-previous.stamp <= MAX_GAP_MS):
