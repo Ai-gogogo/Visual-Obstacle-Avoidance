@@ -58,9 +58,12 @@ class PlaneObstacles:
             return None
         fit = PlaneConfig(**{field.name: options[field.name] for field in fields(PlaneConfig)
                              if field.name in options})
+        # Older plane configurations used a top-level pair of warning distances.
+        legacy_caution = config.get("caution_m", cls.caution_m) if "urgent_m" in config else cls.caution_m
         settings = cls(fit, float(options.get("min_obstacle_height_m", .05)),
-                       float(config["corridor_width_m"]) / 2, float(config["caution_m"]),
-                       float(config["urgent_m"]), float(config["pitch_down_deg"]),
+                       float(config["corridor_width_m"]) / 2, float(options.get("caution_m", legacy_caution)),
+                       float(options.get("urgent_m", config.get("urgent_m", cls.urgent_m))),
+                       float(config["pitch_down_deg"]),
                        options.get("prior_max_age_ms", 500),
                        float(config.get("intrusion", {}).get("max_turn_deg_s", 35.)))
         if not (0 < settings.min_height_m < math.inf and 0 < settings.half_width_m < math.inf

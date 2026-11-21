@@ -30,7 +30,8 @@ class RoadTests(unittest.TestCase):
 
     def test_approach_and_no_depth(self):
         road, sidewalk = crossing()
-        for z, level in [(6, 'clear'), (5.3, 'hold'), (5., 'caution'), (3., 'urgent')]:
+        for z, level in [(5., 'clear'), (4.2, 'clear'), (4., 'hold'), (3.51, 'hold'),
+                         (3.5, 'caution'), (3., 'caution'), (2., 'caution')]:
             result = self.estimator.locate(road, sidewalk, np.full((H, W), z))
             self.assertEqual((result['level'], result['distance_m']), (level, z))
         for z in (None, np.full((H, W), np.nan)):

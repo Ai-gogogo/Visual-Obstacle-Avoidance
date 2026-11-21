@@ -13,6 +13,7 @@
 | 语音与人脸模型目录 | `llm/models` | `-Models` / `VISIONASSIST_MODELS` |
 | YOLO 权重 | `cv/models/yolo11n.pt` | — |
 | 路沿分割权重（关闭路沿告警时不需要） | `cv/models/road-segformer-b0.onnx` | `-NoRoadAlerts` |
+| [ADE20K 门和墙分割权重](../../cv/README.md#前方门提示) | `cv/models/scene-segformer-b0.onnx` | `-DoorAlerts` / `-WallAlerts` |
 | 前端生产构建 | `cd web && npm ci && npm run build -- --webpack` | — |
 
 Ollama 没在运行时脚本会自动启动它。NVIDIA 显卡的 GPU 依赖见 CV README 的 GPU 一节。
@@ -29,6 +30,8 @@ Ollama 没在运行时脚本会自动启动它。NVIDIA 显卡的 GPU 依赖见 
 - `-RtcLowConfig`：当前支架 480 × 640 WebRTC 的双目标定 JSON，开启实时深度和物体米数。不给时没有米制深度。
 - `-StereoConfig`：传给 `--stereo-config`。横穿预测和带米数的路沿读取的是这份配置里的相机几何，只给 `-RtcLowConfig` 时这两项不工作。
 - `-CvDevice`：默认 `auto`，按 CUDA、Apple MPS、CPU 选择。
+- `-DoorAlerts` 开启门分割。在仪表盘的 **Spoken alerts** 选择 **Walking alerts** 后可听到门提示。
+- `-WallAlerts` 开启墙提示。在 Walking 模式下，需要双目确认墙在前方 1.5 米内。
 - `-Port`：默认 8775；不同端口可以同时跑多套。
 
 ## 手机通过 HTTPS 接入

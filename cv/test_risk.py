@@ -4,10 +4,12 @@ from risk import RiskAssessment
 from tracking import MAX_GAP_MS
 
 
-def obstacle(track_id="A-1", *, bottom=.85, depth="near", confidence=.9, candidate=True, depth_m=None):
+def obstacle(track_id="A-1", *, bottom=.85, depth="near", confidence=.9, candidate=True,
+             depth_m=None, label="bench"):
     extra = {} if depth_m is None else {"depth_m": depth_m}
     return {
         **extra,
+        "label": label,
         "track_id": track_id,
         "bbox": [.35, .35, .65, bottom],
         "relative_depth": depth,
@@ -44,6 +46,14 @@ class RiskAssessmentTests(unittest.TestCase):
         self.assertEqual(self.risk(401, bottom=.95, depth_m=2.0), "caution")
         self.assertEqual(self.risk(601, bottom=.95, depth_m=3.5), "normal")
         self.assertEqual(self.risk(801, bottom=.95, depth_m=2.0), "normal")
+
+    def test_chair_requires_two_measurements_inside_1_5_m_and_never_escalates(self):
+        cases = [(3.0, "normal"), (1.51, "normal"), (1.5, "normal"), (1.5, "caution"),
+                 (1.0, "caution"), (.8, "caution"), (None, "normal"), (1.5, "normal"),
+                 (1.5, "caution"), (float("nan"), "normal"), (1.2, "normal")]
+        for i, (depth_m, expected) in enumerate(cases):
+            with self.subTest(index=i, depth_m=depth_m):
+                self.assertEqual(self.risk(1 + i*200, label="chair", depth_m=depth_m), expected)
 
     def test_confirmation_does_not_carry_across_gaps_or_different_tracks(self):
         self.assertEqual(self.risk(1), "normal")

@@ -63,6 +63,8 @@ def main():
     parser.add_argument("--cv-device", default="auto")
     parser.add_argument("--cv-cpu-threads", type=int, default=4)
     parser.add_argument("--no-road-alerts", action="store_true")
+    parser.add_argument("--door-alerts", action="store_true")
+    parser.add_argument("--wall-alerts", action="store_true")
     for name in ("cv-python", "agent-python", "models", "rtc-low-config", "stereo-config",
                  "certificate", "private-key", "dashboard-host", "cv-ca"):
         parser.add_argument("--" + name)
@@ -126,6 +128,12 @@ def launch(a):
     road_model = repo/"cv/models/road-segformer-b0.onnx"
     if road_model.exists() and not a.no_road_alerts:
         worker.append("--road-alerts")
+    if (a.door_alerts or a.wall_alerts) and not (repo/"cv/models/scene-segformer-b0.onnx").is_file():
+        raise ValueError("Download cv/models/scene-segformer-b0.onnx for door or wall alerts. See cv/README.md.")
+    if a.door_alerts:
+        worker.append("--door-alerts")
+    if a.wall_alerts:
+        worker.append("--wall-alerts")
     for flag, file in [("--rtc-low-config", a.rtc_low_config), ("--stereo-config", a.stereo_config)]:
         if file:
             worker.extend([flag, str(Path(file).resolve(strict=True))])

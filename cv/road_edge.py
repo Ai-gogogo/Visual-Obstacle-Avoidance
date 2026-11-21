@@ -76,11 +76,11 @@ class RoadEdge:
     def __init__(self, config, stereo, segment):
         self.stereo = stereo
         self.segment = segment
-        pitch, self.width, self.caution, self.urgent, self.margin, self.confidence = (
-            float(config[key]) for key in ("pitch_down_deg", "corridor_width_m", "caution_m", "urgent_m",
+        pitch, self.width, self.caution, self.margin, self.confidence = (
+            float(config[key]) for key in ("pitch_down_deg", "corridor_width_m", "caution_m",
                                           "rearm_margin_m", "min_confidence"))
         if not (all(math.isfinite(v) for v in (self.width, self.caution, self.margin))
-                and -60 <= pitch <= 60 and self.width > 0 and 0 < self.urgent < self.caution
+                and -60 <= pitch <= 60 and self.width > 0 and self.caution > 0
                 and self.margin > 0 and .5 < self.confidence < 1):
             raise ValueError("Check road pitch, corridor width, confidence and warning distances")
         self.up = pitch_normal(math.radians(pitch))
@@ -139,9 +139,7 @@ class RoadEdge:
                 visual.append((v[j], u[j]))
         if metric:
             distance, x, y = min(metric)
-            if distance <= self.urgent:
-                level = "urgent"
-            elif distance <= self.caution:
+            if distance <= self.caution:
                 level = "caution"
             elif distance > self.caution + self.margin:
                 level = "clear"

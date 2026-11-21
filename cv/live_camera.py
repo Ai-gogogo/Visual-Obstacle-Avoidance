@@ -30,6 +30,7 @@ from path_intrusion import Corridor, Frame, IntrusionPredictor, background_mask,
 from plane_ransac import PlaneEstimate, fit_support_plane, height_above_plane, object_height_m, predict_plane
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
+from scene_alerts import SceneAlertSampler, SceneAlertSegmenter
 from scene_segmentation import DEFAULT_SCENE_MODEL, SceneSampler, SceneSegmenter
 from tracking import FrameTracker
 from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth, object_depth_stats
@@ -48,7 +49,7 @@ class CameraWorker:
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
         item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False,
-        inference_device=None, half=False, plane=None, scene_sampler=None
+        inference_device=None, half=False, plane=None, scene_sampler=None, scene_alert_sampler=None
     ):
         self.side = side
         self.stereo = stereo
@@ -62,6 +63,7 @@ class CameraWorker:
         self.road = road
         self.scene_sampler = scene_sampler if side == "A" else None
         self.plane = plane if side == "A" else None
+        self.scene_alert_sampler = scene_alert_sampler if side == "A" else None
         self.corridor = corridor
         self.intrusions = {}
         self.plane_frames = {}
@@ -136,7 +138,7 @@ class CameraWorker:
         pending = self.pending.get(source)
 
         if pending and pending[0] == etag:
-            payload = pending[1]
+            _, payload, scene_alert_frame = pending
         else:
             try:
                 with Image.open(io.BytesIO(frame.content)) as jpeg:
@@ -183,6 +185,9 @@ class CameraWorker:
                         road_masks = road, sidewalk
                     else:
                         payload["road_edge"] = self.road(image, depth)
+            scene_alert_frame = None
+            if self.scene_alert_sampler is not None:
+                scene_alert_frame = payload["frame_id"], image, depth, payload.get("stereo", {}).get("partner_id")
 
             stream = frame.headers.get("X-CV-Stream-Id")
             frame_stamp = frame.headers.get("X-CV-Frame-Ms")
@@ -289,7 +294,7 @@ class CameraWorker:
                     timestamp_ms=stamp
                 )
 
-            self.pending[source] = (etag, payload)
+            self.pending[source] = (etag, payload, scene_alert_frame)
 
         result = self.http.post(
             self.api + "/detections",
@@ -299,6 +304,8 @@ class CameraWorker:
         )
         if result.status_code not in (404, 409):
             result.raise_for_status()
+            if scene_alert_frame is not None:
+                self.scene_alert_sampler.offer(source, *scene_alert_frame)
             if self.record and "X-CV-Accepted-Ms" in result.headers:
                 self.record(
                     self.side,
@@ -629,6 +636,9 @@ def main():
                         help="Show indoor/outdoor ADE20K masks for Camera A")
     parser.add_argument("--scene-fps", type=float, default=3,
                         help="Maximum background segmentation rate (default: 3 frames/s)")
+    parser.add_argument("--door-alerts", action="store_true", help="Enable ADE20K door alerts on Camera A")
+    parser.add_argument("--wall-alerts", action="store_true", help="Enable ADE20K wall alerts within 1.5 m on Camera A")
+    parser.add_argument("--scene-model", "--door-model", type=Path, default=DEFAULT_SCENE_MODEL)
     inference_options(parser, default_cpu_threads=None)
     args = parser.parse_args()
     if args.cpu_threads is None:
@@ -655,6 +665,8 @@ def main():
         corridor = Corridor.load(args.road_config) if stereo is not None else None
         road = RoadEdge.load(args.road_config, stereo) if args.road_alerts else None
         plane = PlaneObstacles.load(args.road_config, force=args.plane_ransac)
+        scene_alerts = (SceneAlertSegmenter(args.scene_model, doors=args.door_alerts, walls=args.wall_alerts)
+                        if args.door_alerts or args.wall_alerts else None)
     except (ImportError, KeyError, OSError, ValueError, TypeError, RuntimeError) as error:
         parser.error(f"Invalid path warning configuration: {error}")
 
@@ -722,7 +734,7 @@ def main():
         scene_sampler = None
         if args.scene_segmentation:
             try:
-                scene_model = SceneSegmenter(DEFAULT_SCENE_MODEL)
+                scene_model = SceneSegmenter(args.scene_model)
             except (ImportError, OSError, ValueError, RuntimeError) as error:
                 parser.error(str(error))
             scene_sampler = SceneSampler(scene_model, args.server.rstrip("/") + "/api/cv", args.scene_fps)
@@ -748,6 +760,8 @@ def main():
                     writer.writerow(row)
                     output.flush()
 
+        scene_alert_sampler = (stack.enter_context(SceneAlertSampler(scene_alerts, args.server.rstrip("/") + "/api/cv"))
+                               if scene_alerts else None)
         workers = [
             CameraWorker(
                 args.server,
@@ -764,7 +778,8 @@ def main():
                 inference_device=device,
                 half=args.half,
                 plane=plane,
-                scene_sampler=scene_sampler
+                scene_sampler=scene_sampler,
+                scene_alert_sampler=scene_alert_sampler
             )
             for side, infer in zip(sides, predictors)
         ]

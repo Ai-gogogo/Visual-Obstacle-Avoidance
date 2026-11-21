@@ -1,4 +1,5 @@
 const {createAgent, currentDetection, detectionLabelsZh, MAX_FRAME_AGE} = require('./agent.cjs');
+const {acceptSceneAlert, SCENE_ALERT_KINDS, SPEECH_MAX_AGE_MS} = require('./scene-alerts.cjs');
 const {acceptRoadEdge} = require('./road-alerts.cjs');
 const voiceFrames = require('./voice-frames.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
@@ -7,6 +8,7 @@ const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 const DETECTION_SCHEMA_VERSION = 1;
 const SCENE_MAX_AGE = 750;
+const CHAIR_CAUTION_DEPTH_M = 1.5;
 const movingLabels = new Map(Object.entries({
   person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
 }));
@@ -264,7 +266,45 @@ function createAgentRoutes(options, sessions, read, respond) {
         'X-Partner-Skew-Bound-Ms':smallest}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
+    if (camera === 'A' && req.method === 'POST' &&
+        ['/api/cv/door','/api/cv/scene-alerts'].includes(route)) return publishSceneAlerts();
     return error(res,404,'Unknown CV route.');
+
+    async function publishSceneAlerts() {
+      const payload = await asJSON(req,1024);
+      const kinds = route === '/api/cv/door' ? ['door'] :
+        SCENE_ALERT_KINDS.filter(kind => Object.hasOwn(payload ?? {},kind));
+      const validObservation = observation => observation === null || (validBox(observation?.bbox) &&
+        (observation.distance_m === undefined || (Number.isFinite(observation.distance_m) && observation.distance_m > 0)));
+      if (typeof payload?.frame_id !== 'string' || !kinds.length || !kinds.every(kind => validObservation(payload[kind]))) {
+        return error(res,400,'Invalid scene alert observation.');
+      }
+      const captured = slot.cvFrames?.get(payload.frame_id);
+      const now = Date.now();
+      if (session.slots.A !== slot || !captured?.analyzed || now-captured.stamp >= SPEECH_MAX_AGE_MS) {
+        return error(res,409,'Scene alert frame expired or replaced.');
+      }
+      const partner = captured.partner;
+      const right = session.slots.B;
+      const partnerStream = recent(partner) && recent(right) &&
+        partner.id === payload.partner_id && partner.stream === right.streamID ? partner.stream : undefined;
+      const priorSequence = session.alertSeq;
+      for (const kind of kinds) {
+        const observation = payload[kind];
+        const stream = observation?.distance_m === undefined ? undefined : partnerStream;
+        const event = acceptSceneAlert(slot,kind,observation,captured.stamp,stream);
+        if (!event) continue;
+        const id = ++session.alertSeq;
+        slot.sceneAlertStates[kind].alertId = id;
+        session.alerts.push({...event,id,streamID:slot.streamID,judged_ms:now,
+          ...(captured.sample ? {capture_ms:captured.sample.ms,capture_error_ms:captured.sample.error} : {})});
+      }
+      if (session.alertSeq !== priorSequence) {
+        session.alerts = session.alerts.slice(-20);
+        session.alertWaiter?.();
+      }
+      return res.writeHead(204).end();
+    }
 
     async function publish() {
       const payload = await asJSON(req,600_000 + 2*128_000);
@@ -303,6 +343,13 @@ function createAgentRoutes(options, sessions, read, respond) {
           partner.stream === session.slots.B.streamID;
       if (camera === 'A') {
         slot.detection.plane = parsePlane(payload.stereo?.plane, paired);
+      }
+      // Verify a chair's stereo evidence before exposing the CV risk or queuing speech.
+      for (const [i, object] of objects.entries()) {
+        if (object.label !== 'chair' || object.risk === 'normal') continue;
+        const z = payload.objects[i].depth_m;
+        object.risk = paired && object.track_id && Number.isFinite(z) && z > 0 && z <= CHAIR_CAUTION_DEPTH_M
+          ? 'caution' : 'normal';
       }
       if (paired) {
         const plane = slot.detection.plane;
@@ -364,7 +411,8 @@ function createAgentRoutes(options, sessions, read, respond) {
         if (session.alertCooldown.has(id)) continue;
         session.alertCooldown.set(id,now);
         session.alerts.push({kind:'obstacle',id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,streamID:slot.streamID,
-          track_id:obstacle.track_id,stamp:captured.stamp,...obstacleSpeech(obstacle)});
+          track_id:obstacle.track_id,stamp:captured.stamp,...obstacleSpeech(obstacle),
+          ...(obstacle.label === 'chair' ? {metric:true,partnerStream:partner.stream} : {})});
       }
       if (camera === 'A') {
         const warning = acceptRoadEdge(slot, payload.road_edge, captured.stamp, session.slots.B.streamID, paired);
@@ -398,6 +446,7 @@ function createAgentRoutes(options, sessions, read, respond) {
         }
         session.alertWaiter?.();
       }
+      captured.analyzed = true;
       // Measured on one clock, from server receipt of the JPEG to acceptance of CV results.
       return res.writeHead(204, {'X-CV-Accepted-Ms':now, 'X-CV-Latency-Ms':now-captured.stamp,
         ...(captured.sample ? {'X-CV-Capture-Latency-Ms':Math.max(0,now-captured.sample.ms)} : {})}).end();
@@ -443,25 +492,31 @@ function createAgentRoutes(options, sessions, read, respond) {
       }
       const remindersEnabled = requestURL.searchParams.get('reminders') === '1';
       const reminder = remindersEnabled ? agent.cameraReminder(session) : null;
+      const scene = currentDetection(session.slots.A);
       const active = session.alerts.filter(alert => {
         if (alert.id <= after || !recent(alert) || session.slots[alert.camera_id].streamID !== alert.streamID ||
             (alert.partnerStream && session.slots.B.streamID !== alert.partnerStream)) return false;
+        if (SCENE_ALERT_KINDS.includes(alert.kind)) return alert.expires > Date.now() &&
+          session.slots.A.sceneAlertStates?.[alert.kind]?.alertId === alert.id && (!alert.metric || recent(session.slots.B));
+        if (alert.kind === 'road_edge' && alert.metric) {
+          return scene?.road_edge?.level === 'caution' && scene.partnerStream === session.slots.B.streamID &&
+            recent(session.slots.B);
+        }
+        if (alert.kind === 'obstacle' && alert.metric) {
+          return recent(session.slots.B) && scene?.partnerStream === session.slots.B.streamID &&
+            scene.objects.some(obj => obj.track_id === alert.track_id && obj.label === alert.label && obj.risk === 'caution');
+        }
         if (alert.kind !== 'path_intrusion') return true;
-        const scene = session.slots.A.detection;
-        return alert.expires > Date.now() && scene?.partnerStream === session.slots.B.streamID &&
-          scene?.objects.some(obj => obj.track_id === alert.track_id && obj.intrusion?.from_side === alert.from_side);
+        const detection = session.slots.A.detection;
+        return alert.expires > Date.now() && detection?.partnerStream === session.slots.B.streamID &&
+          detection?.objects.some(obj => obj.track_id === alert.track_id && obj.intrusion?.from_side === alert.from_side);
       });
       const cameras = Object.fromEntries(Object.entries(session.slots).map(([side,slot]) => [
         side, !slot.phone ? 'offline' : !recent(slot) ? 'waiting' :
           currentDetection(slot) ? 'detecting' : 'live'
       ]));
-      const scene = currentDetection(session.slots.A);
       const visibleAlerts = active.map(({streamID, partnerStream, ...alert}) => {
-        if (alert.kind === 'road_edge' && alert.metric) {
-          alert.metric = ['caution','urgent'].includes(scene?.road_edge?.level) &&
-            (alert.risk !== 'urgent' || scene.road_edge.level === 'urgent') &&
-            scene.partnerStream === session.slots.B.streamID;
-        } else if (alert.kind === 'path_intrusion' && alert.stationary_zone) {
+        if (alert.kind === 'path_intrusion' && alert.stationary_zone) {
           alert.stationary_zone = Boolean(scene?.objects.some(obj => obj.track_id === alert.track_id &&
             obj.intrusion?.from_side === alert.from_side && obj.intrusion.stationary_zone));
         }
