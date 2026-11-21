@@ -12,6 +12,8 @@ const files = {
   '/camera.html': ['camera.html','text/html; charset=utf-8'],
   '/ui.css': ['ui.css','text/css; charset=utf-8'],
   '/desktop.js': ['desktop.js','text/javascript; charset=utf-8'],
+  '/scene-preview.js': ['scene-preview.js','text/javascript; charset=utf-8'],
+  '/ade20k-labels.json': ['ade20k-labels.json','application/json'],
   '/voice-capture.js': ['voice-capture.js','text/javascript; charset=utf-8'],
   '/camera.js': ['camera.js','text/javascript; charset=utf-8'],
   '/demo-lab.webp': ['demo-lab.webp','image/webp']
@@ -134,14 +136,25 @@ function createServer(options = {}) {
         res.setHeader('X-Server-Ms', slot.stamp);
         return res.writeHead(204).end();
       }
-      const match = /^\/api\/(pair|frame|preview)\/([AB])$/.exec(route);
+      const match = /^\/api\/(pair|frame|preview|segmentation)\/([AB])$/.exec(route);
       if (!match) return respond(res, 404, {error:'Request not found.'});
       const [, action, side] = match;
       const session = sessions.get(token);
       if (!session) return respond(res, 401, {error:'Desktop session ended. Generate a new pairing code.'});
       const slot = session.slots[side];
+      if (method === 'GET' && action === 'segmentation' && side === 'A') {
+        const scene = slot.segmentation;
+        if (!slot.frame || !scene || now >= scene.expires_ms) return res.writeHead(204).end();
+        const etag = '"' + scene.frame_id + '"';
+        res.setHeader('ETag',etag);
+        if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
+        return respond(res,200,{...scene, camera_id:'A', taxonomy:'ade20k-150', remaining_ms:scene.expires_ms-now});
+      }
       if (method === 'GET' && action === 'preview') {
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
+        if (side === 'A' && slot.segmentation?.expires_ms > now) {
+          res.setHeader('X-Segmentation-Frame',slot.segmentation.frame_id);
+        }
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
         const detection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
         const frame = detection?.frame ?? slot.frame;

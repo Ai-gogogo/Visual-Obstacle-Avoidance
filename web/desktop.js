@@ -8,6 +8,7 @@ const sample = [
 
 const feeds = [...document.querySelectorAll('[data-camera]')].map(node => ({node, side:node.dataset.camera}));
 let token;
+const scene = createScenePreview($, () => token);
 let sessionRequest;
 let sampleMode = true;
 let pollVersion = 0;
@@ -163,7 +164,10 @@ function setFeed(feed, connected, message) {
   const image = node.querySelector('.live-frame');
   image.hidden = sampleMode || !connected;
   if (!connected) {
-    if (feed.side === 'A') showDepth(null);
+    if (feed.side === 'A') {
+      scene.clear();
+      showDepth(null);
+    }
     feed.etag = undefined;
     image.getContext('2d').clearRect(0,0,image.width,image.height);
     delete image.dataset.frameId;
@@ -183,7 +187,9 @@ async function readFrame(feed, version) {
     if (feed.etag) headers['If-None-Match'] = feed.etag;
     const path = '/api/preview/' + feed.side;
     const response = await fetch(path, {headers, signal:AbortSignal.timeout(3000)});
-    if (version !== pollVersion || response.status === 304) return;
+    if (version !== pollVersion) return;
+    if (feed.side === 'A') scene.update(response.headers.get('X-Segmentation-Frame'));
+    if (response.status === 304) return;
     if (response.status !== 200) {
       if (response.status === 401) token = undefined;
       setFeed(feed,false,response.status === 401 ? 'Session expired. Pair the phone again.' : undefined);
@@ -216,6 +222,7 @@ async function readFrame(feed, version) {
 
 function refreshPolling() {
   const version = ++pollVersion;
+  scene.clear();
   if (sampleMode || currentPage !== 'monitor') return;
   feeds.forEach(feed => setFeed(feed,false));
   if (!token) return;

@@ -5,29 +5,17 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from obstacles import PATH_LEFT, PATH_RIGHT, is_obstacle_candidate
+from scene_segmentation import SegFormer
 
 DEFAULT_ROAD_CONFIG = Path(__file__).with_name("road_config.json")
 
 
-class RoadSegmenter:
+class RoadSegmenter(SegFormer):
     """Cityscapes SegFormer-B0, logits 0=road and 1=sidewalk."""
-    def __init__(self, path):
-        import onnxruntime as ort
-        if not path.is_file():
-            raise ValueError(f"Missing road model {path}. See cv/README.md for the download.")
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 2
-        self.session = ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
-
     def __call__(self, image, confidence):
-        rgb = np.asarray(image.resize((512, 512), Image.Resampling.BILINEAR), dtype=np.float32) / 255
-        rgb -= np.array([.485, .456, .406], np.float32)
-        rgb /= np.array([.229, .224, .225], np.float32)
-        tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None])
-        logits = self.session.run(None, {"pixel_values": tensor})[0][0]
+        logits = self.logits(image)
         scores = np.exp(logits - logits.max(axis=0))
         probs = scores[:2] / scores.sum(axis=0)
         return tuple(cv2.resize(p, image.size) >= confidence for p in probs)

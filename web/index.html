@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>VisionAssist</title>
   <link rel="stylesheet" href="ui.css">
+  <script src="scene-preview.js" defer></script>
   <script src="desktop.js" defer></script>
 </head>
 <body>
@@ -34,6 +35,11 @@
           <header><div><span class="camera-icon" aria-hidden="true">B</span><h2>Camera B</h2></div><span class="status feed-status">Sample feed</span></header>
           <div class="frame"><div class="sample-image sample-b" role="img" aria-label="Sample lab view with a backpack and water bottle"></div><canvas class="live-frame" role="img" aria-label="Live camera B preview with YOLO detections" hidden></canvas><p class="no-feed" hidden>Waiting for Camera B</p><div class="overlays" aria-hidden="true"></div></div>
           <footer><span>Secondary view</span><span class="feed-summary">2 sample detections</span></footer>
+        </article>
+        <article class="feed" id="scene-view" hidden>
+          <header><h2>Camera A segmentation</h2></header>
+          <canvas id="scene-mask" width="128" height="128" role="img" aria-label="Indoor and outdoor semantic classes in the sampled Camera A frame"></canvas>
+          <ul id="scene-legend" aria-label="Most visible classes"></ul>
         </article>
       </div>
       <figure id="stereo-view" hidden>

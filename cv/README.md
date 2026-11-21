@@ -242,6 +242,21 @@ python cv/stereo_depth.py path/to/A.jpg path/to/B.jpg --config cv/stereo_config.
 
 `depth_m.npy` 保存与 A 图像同尺寸的 float32 米制深度，缺测像素为 NaN。`depth_preview.png` 适合目视查看。Dashboard 为节约带宽显示缩略图，物体读数使用全分辨率深度图。
 
+## Camera A 室内外语义分割
+
+在仓库根目录下载固定版本的 ADE20K SegFormer-B0 权重，然后启动已有的 CV 进程。已有的双目标定和服务器参数可加在同一个命令上。
+
+```sh
+mkdir -p cv/models
+curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/resolve/1e78fb9c976ebbac92d859ef6d7aae4253da869e/onnx/model.onnx -o cv/models/scene-segformer-b0.onnx
+echo '3e5c18a4be395f16646438d54c42377ddc202edfa33d5eced0c9506de75c44c2  cv/models/scene-segformer-b0.onnx' | shasum -a 256 -c -
+cv/.venv/bin/python cv/live_camera.py --scene-segmentation
+```
+
+配对 Camera A 后，实时仪表盘的 **Camera A segmentation** 显示最近一次分割和面积最大的八类。模型识别 150 类，包括地板、桌子、车行道和人行道。后台线程默认最多每秒开始三次推理，每个来源仅保留一张待处理的新帧。用 `--scene-fps 2` 可降低更新率。`--road-alerts` 使用现有 Cityscapes 专用模型，两项同时启用时各自执行推理。
+
+使用桌面会话的 Bearer token 读取 `GET /api/segmentation/A`。响应中的 `mask` 是 Base64 编码的 128 × 128 单通道 PNG，像素值 0–149 对应[类别表](../web/ade20k-labels.json)，255 表示最高类别概率低于 0.55。用最近邻插值缩放到响应中的原图 `width`、`height`，即可与相同 `frame_id` 的 Camera A 深度对齐。分割结果过期后接口返回 204。
+
 ## 前方车行道边缘预警
 
 在上面的双手机标定、配对和 HTTPS 服务可用后，运行：

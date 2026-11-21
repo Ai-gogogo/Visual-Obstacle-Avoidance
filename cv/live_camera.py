@@ -23,6 +23,7 @@ from obstacles import is_obstacle_candidate
 from path_intrusion import Corridor, IntrusionPredictor
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
+from scene_segmentation import DEFAULT_SCENE_MODEL, SceneSampler, SceneSegmenter
 from tracking import FrameTracker
 from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
 
@@ -31,11 +32,12 @@ class CameraWorker:
     def __init__(
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
-        item_encoder=None, road=None, corridor=None
+        item_encoder=None, road=None, corridor=None, scene_sampler=None
     ):
         self.side = side
         self.stereo = stereo
         self.road = road
+        self.scene_sampler = scene_sampler
         self.corridor = corridor
         self.intrusions = {}
         self.record = record
@@ -104,6 +106,8 @@ class CameraWorker:
                 )
                 return
 
+            if self.scene_sampler is not None:
+                self.scene_sampler.offer(source, etag.strip('"'), image)
             candidates = (
                 self.infer(image)
                 if self.infer else detect(self.model, image, confidence=.25)
@@ -380,6 +384,10 @@ def main():
 
     parser.add_argument("--road-alerts", action="store_true", help="Enable sidewalk-to-road warnings on Camera A")
     parser.add_argument("--road-config", type=Path, default=DEFAULT_ROAD_CONFIG)
+    parser.add_argument("--scene-segmentation", action="store_true",
+                        help="Show indoor/outdoor ADE20K masks for Camera A")
+    parser.add_argument("--scene-fps", type=float, default=3,
+                        help="Maximum background segmentation rate (default: 3 frames/s)")
     inference_options(parser)
     args = parser.parse_args()
 
@@ -414,6 +422,9 @@ def main():
             "Use a positive multiple of 32 for --imgsz "
             "and positive thread/poll values."
         )
+
+    if not np.isfinite(args.scene_fps) or args.scene_fps <= 0:
+        parser.error("--scene-fps must be positive and finite")
 
     try:
         device = resolve_device(args.device)
@@ -470,6 +481,15 @@ def main():
     stop = Event()
     with ExitStack() as stack:
         record = None
+        scene_sampler = None
+        if args.scene_segmentation:
+            try:
+                scene_model = SceneSegmenter(DEFAULT_SCENE_MODEL)
+            except (ImportError, OSError, ValueError, RuntimeError) as error:
+                parser.error(str(error))
+            scene_sampler = SceneSampler(scene_model, args.server.rstrip("/") + "/api/cv", args.scene_fps)
+            scene_sampler.thread.start()
+            stack.callback(scene_sampler.close)
 
         if args.metrics:
             output = stack.enter_context(
@@ -501,7 +521,8 @@ def main():
                 infer=infer,
                 item_encoder=item_encoder,
                 road=road if side == "A" else None,
-                corridor=corridor if side == "A" else None
+                corridor=corridor if side == "A" else None,
+                scene_sampler=scene_sampler if side == "A" else None
             )
             for side, infer in zip(sides, predictors)
         ]

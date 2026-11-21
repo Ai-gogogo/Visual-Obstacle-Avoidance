@@ -38,6 +38,10 @@ h1{font-size:clamp(2.15rem,4.2vw,3.65rem);letter-spacing:-.06em}
 .feed{overflow:hidden}
 .feed header,.feed footer{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.7rem .85rem;flex-wrap:wrap}
 .feed header>div,.section-head{display:flex;align-items:center;gap:.65rem}
+#scene-mask { display:block; width:min(100%, 20rem); height:auto; margin:auto; image-rendering:pixelated; }
+#scene-legend { display:flex; flex-wrap:wrap; gap:.35rem .8rem; list-style:none; padding:.5rem 1rem; }
+#scene-legend li { display:flex; align-items:center; gap:.35rem; }
+#scene-legend li span { width:.8em; height:.8em; border-radius:2px; }
 h2{font-size:1.18rem;letter-spacing:-.02em}
 .camera-icon{display:grid;place-items:center;width:1.9rem;height:1.9rem;border-radius:.48rem;background:var(--tint);color:var(--accent);font-weight:750}
 .status{display:inline-block;border-radius:99rem;padding:.23rem .62rem;background:var(--tint);color:var(--accent);font-size:.84rem;font-weight:700}
