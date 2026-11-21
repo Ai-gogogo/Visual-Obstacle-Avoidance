@@ -15,7 +15,8 @@ param(
     [string]$DashboardHost,
     [string]$CvCA,
     [switch]$Stop,
-    [switch]$DoorAlerts
+    [switch]$DoorAlerts,
+    [switch]$WallAlerts
 )
 
 # Starts the web server and the CV worker in the background, waits until both are ready,
@@ -79,7 +80,7 @@ $env:VISIONASSIST_PORT = [string]$Port
 $env:YOLO_CONFIG_DIR = Join-Path $state 'ultralytics'
 $required = @($agentPython, $cvPython, (Join-Path $repo 'cv/models/yolo11n.pt'), (Join-Path $repo 'web/.next/BUILD_ID'))
 if (!$NoRoadAlerts) { $required += Join-Path $repo 'cv/models/road-segformer-b0.onnx' }
-if ($DoorAlerts) { $required += Join-Path $repo 'cv/models/scene-segformer-b0.onnx' }
+if ($DoorAlerts -or $WallAlerts) { $required += Join-Path $repo 'cv/models/scene-segformer-b0.onnx' }
 if ($RtcLowConfig) { $required += $RtcLowConfig }
 if ($StereoConfig) { $required += $StereoConfig }
 foreach ($file in $required) {
@@ -126,6 +127,7 @@ try {
     $cvArgs = @('-u','cv/live_camera.py','--device',$CvDevice,'--cpu-threads',$CvCpuThreads,'--server',$workerUrl)
     if (!$NoRoadAlerts) { $cvArgs += '--road-alerts' }
     if ($DoorAlerts) { $cvArgs += '--door-alerts' }
+    if ($WallAlerts) { $cvArgs += '--wall-alerts' }
     if ($RtcLowConfig) { $cvArgs += @('--rtc-low-config', ('"' + (Resolve-Path -LiteralPath $RtcLowConfig).Path + '"')) }
     if ($StereoConfig) { $cvArgs += @('--stereo-config', ('"' + (Resolve-Path -LiteralPath $StereoConfig).Path + '"')) }
     $cv = Start-Process -FilePath $cvPython -ArgumentList $cvArgs -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput $cvLog -RedirectStandardError (Join-Path $state "cv-$Port.err")

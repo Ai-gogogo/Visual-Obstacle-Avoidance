@@ -105,6 +105,18 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   await event(door(true,'小心，前方约1.0米有门。'),aOnly);
   assert.equal(played.length,9);
   assert.equal(played[8].canPlay(),false);
+  const wall = {kind:'wall',risk:'caution',metric:true,text_zh:'小心，前方约1.5米有墙。'};
+  await event(wall,aOnly);
+  await event({...wall,metric:false});
+  select('stationary');
+  await event(wall);
+  select('desk');
+  await event(wall);
+  assert.equal(played.length,9);
+  select('walking');
+  await event(wall);
+  assert.equal(played[9].text,'小心，前方约1.5米有墙。');
+  assert.equal(played[9].urgent,false);
   controller.abort();
   respond({sequence,alerts:[],cameras});
 });

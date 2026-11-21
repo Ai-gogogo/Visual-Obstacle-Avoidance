@@ -17,10 +17,10 @@ from ultralytics import YOLO
 from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
-from door_alerts import DoorSampler, observe_door
 from live_camera import CameraAWorker, CameraWorker, resolve_device
 from path_intrusion import Corridor
 from road_edge import DEFAULT_ROAD_CONFIG
+from scene_alerts import SceneAlertSampler, observe_door
 from stereo_depth import DEFAULT_CONFIG, StereoDepth
 
 
@@ -340,11 +340,11 @@ class LiveCameraTests(unittest.TestCase):
         def segment(_image, depth):
             segmenting.set()
             release.wait(2)
-            return observe_door(mask, depth)
+            return {"door": observe_door(mask, depth)}
 
         self.worker.infer = lambda _: []
-        with DoorSampler(segment, self.worker.api) as sampler:
-            self.worker.door_sampler = sampler
+        with SceneAlertSampler(segment, self.worker.api) as sampler:
+            self.worker.scene_alert_sampler = sampler
             try:
                 self.upload(phone, self.blank)
                 self.worker.poll()

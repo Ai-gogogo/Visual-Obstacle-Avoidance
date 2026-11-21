@@ -204,7 +204,7 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   assert.equal((await crossingAlert()).stationary_zone,false);
 });
 
-test('doors use distinct accepted A frames and speak meters only for a current stereo pair', async t => {
+test('door and wall events use distinct accepted A frames and current stereo measurements', async t => {
   t.mock.timers.enable({apis:['Date'],now:Date.now()});
   const server = createServer({agent:{filename:':memory:'}});
   server.listen(0,'127.0.0.1');
@@ -221,8 +221,10 @@ test('doors use distinct accepted A frames and speak meters only for a current s
     return (await call('/api/join','POST',undefined,JSON.stringify({code}),json)).json();
   }
   const {token:a,sourceID} = await pair('A');
-  const doors = async () => (await (await call('/api/agent/alerts','GET',desk)).json()).alerts
-    .filter(alert => alert.kind === 'door');
+  const events = async kind => (await (await call('/api/agent/alerts','GET',desk)).json()).alerts
+    .filter(alert => alert.kind === kind);
+  const doors = () => events('door');
+  const walls = () => events('wall');
   const query = '?camera_id=A&source_id='+sourceID;
   const box = [.36,.15,.65,.85];
   await doors(); // Initialize the desktop's CV source.
@@ -276,10 +278,43 @@ test('doors use distinct accepted A frames and speak meters only for a current s
   const [metric] = await doors();
   assert.equal(metric.text_zh,'小心，前方约1.0米有门。');
   assert.equal(metric.metric,true);
-  await pair('B'); // A distance measured with the replaced partner must not play.
+  const {token:newB} = await pair('B'); // A distance from the replaced partner must not play.
   assert.deepEqual(await doors(),[]);
   t.mock.timers.tick(1600);
   assert.equal((await report(measured,{bbox:box})).status,409);
+
+  async function observeWall(distance, right) {
+    const key = await frame(right);
+    await publish(key);
+    const wall = distance === null ? null : {bbox:box,distance_m:distance};
+    const result = await call('/api/cv/scene-alerts'+query,'POST',undefined,JSON.stringify({...key,wall}),json);
+    assert.equal(result.status,204);
+  }
+  await observeWall(1.2);
+  await observeWall(1.2);
+  assert.deepEqual(await walls(),[]);
+  await observeWall(1.51,newB);
+  await observeWall(1.51,newB);
+  assert.deepEqual(await walls(),[]);
+  await observeWall(1.50,newB);
+  assert.deepEqual(await walls(),[]);
+  await observeWall(1.47,newB);
+  const [wall] = await walls();
+  assert.equal(wall.text_zh,'小心，前方约1.5米有墙。');
+  assert.equal(wall.metric,true);
+  await observeWall(1.43,newB);
+  assert.deepEqual((await walls()).map(event => event.id),[wall.id]);
+  for (let i=0; i<5; i++) await observeWall(1.7,newB);
+  await observeWall(1.49,newB);
+  await observeWall(1.49,newB);
+  assert.deepEqual(await walls(),[]); // The wall stayed inside the rearm band.
+  for (let i=0; i<5; i++) await observeWall(1.9,newB);
+  await observeWall(1.4,newB);
+  await observeWall(1.4,newB);
+  const [rearmed] = await walls();
+  assert.ok(rearmed.id > wall.id);
+  await pair('B');
+  assert.deepEqual(await walls(),[]);
 });
 
 test('a paused phone keeps its pairing and rejoins without a new code', async t => {

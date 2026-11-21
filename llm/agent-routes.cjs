@@ -1,5 +1,5 @@
 const {createAgent, currentDetection, detectionLabelsZh, MAX_FRAME_AGE} = require('./agent.cjs');
-const {acceptDoor, SPEECH_MAX_AGE_MS} = require('./door-alerts.cjs');
+const {acceptSceneAlert, SCENE_ALERT_KINDS, SPEECH_MAX_AGE_MS} = require('./scene-alerts.cjs');
 const {acceptRoadEdge} = require('./road-alerts.cjs');
 const voiceFrames = require('./voice-frames.cjs');
 const loopback = address => ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
@@ -198,31 +198,41 @@ function createAgentRoutes(options, sessions, read, respond) {
         'X-Partner-Skew-Bound-Ms':smallest}).end(best.frame);
     }
     if (route === '/api/cv/detections' && req.method === 'POST') return publish();
-    if (route === '/api/cv/door' && req.method === 'POST' && camera === 'A') return publishDoor();
+    if (camera === 'A' && req.method === 'POST' &&
+        ['/api/cv/door','/api/cv/scene-alerts'].includes(route)) return publishSceneAlerts();
     return error(res,404,'Unknown CV route.');
 
-    async function publishDoor() {
+    async function publishSceneAlerts() {
       const payload = await asJSON(req,1024);
-      const door = payload?.door;
-      if (typeof payload?.frame_id !== 'string' || (door !== null && (!validBox(door?.bbox) ||
-          (door.distance_m !== undefined && (!Number.isFinite(door.distance_m) || door.distance_m <= 0))))) {
-        return error(res,400,'Invalid door observation.');
+      const kinds = route === '/api/cv/door' ? ['door'] :
+        SCENE_ALERT_KINDS.filter(kind => Object.hasOwn(payload ?? {},kind));
+      const validObservation = observation => observation === null || (validBox(observation?.bbox) &&
+        (observation.distance_m === undefined || (Number.isFinite(observation.distance_m) && observation.distance_m > 0)));
+      if (typeof payload?.frame_id !== 'string' || !kinds.length || !kinds.every(kind => validObservation(payload[kind]))) {
+        return error(res,400,'Invalid scene alert observation.');
       }
       const captured = slot.cvFrames?.get(payload.frame_id);
       const now = Date.now();
       if (session.slots.A !== slot || !captured?.analyzed || now-captured.stamp >= SPEECH_MAX_AGE_MS) {
-        return error(res,409,'Door frame expired or replaced.');
+        return error(res,409,'Scene alert frame expired or replaced.');
       }
       const partner = captured.partner;
       const right = session.slots.B;
-      const partnerStream = door?.distance_m !== undefined && recent(partner) && recent(right) &&
+      const partnerStream = recent(partner) && recent(right) &&
         partner.id === payload.partner_id && partner.stream === right.streamID ? partner.stream : undefined;
-      const event = acceptDoor(slot,door,captured.stamp,partnerStream);
-      if (event) {
+      const priorSequence = session.alertSeq;
+      for (const kind of kinds) {
+        const observation = payload[kind];
+        const stream = observation?.distance_m === undefined ? undefined : partnerStream;
+        const event = acceptSceneAlert(slot,kind,observation,captured.stamp,stream);
+        if (!event) continue;
         const id = ++session.alertSeq;
-        slot.doorState.alertId = id;
-        session.alerts = [...session.alerts.slice(-19),{...event,id,streamID:slot.streamID,judged_ms:now,
-          ...(captured.sample ? {capture_ms:captured.sample.ms,capture_error_ms:captured.sample.error} : {})}];
+        slot.sceneAlertStates[kind].alertId = id;
+        session.alerts.push({...event,id,streamID:slot.streamID,judged_ms:now,
+          ...(captured.sample ? {capture_ms:captured.sample.ms,capture_error_ms:captured.sample.error} : {})});
+      }
+      if (session.alertSeq !== priorSequence) {
+        session.alerts = session.alerts.slice(-20);
         session.alertWaiter?.();
       }
       return res.writeHead(204).end();
@@ -388,8 +398,8 @@ function createAgentRoutes(options, sessions, read, respond) {
       const active = session.alerts.filter(alert => {
         if (alert.id <= after || !recent(alert) || session.slots[alert.camera_id].streamID !== alert.streamID ||
             (alert.partnerStream && session.slots.B.streamID !== alert.partnerStream)) return false;
-        if (alert.kind === 'door') return alert.expires > Date.now() && session.slots.A.doorState?.alertId === alert.id &&
-          (!alert.metric || recent(session.slots.B));
+        if (SCENE_ALERT_KINDS.includes(alert.kind)) return alert.expires > Date.now() &&
+          session.slots.A.sceneAlertStates?.[alert.kind]?.alertId === alert.id && (!alert.metric || recent(session.slots.B));
         if (alert.kind !== 'path_intrusion') return true;
         const scene = session.slots.A.detection;
         return alert.expires > Date.now() && scene?.partnerStream === session.slots.B.streamID &&

@@ -351,9 +351,15 @@ curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-1024/resol
 echo '3e5c18a4be395f16646438d54c42377ddc202edfa33d5eced0c9506de75c44c2  cv/models/scene-segformer-b0.onnx' | shasum -a 256 -c -
 ```
 
-保留现有的服务器和标定参数，给 `cv/live_camera.py` 加 `--door-alerts`。权重放在其他目录时可以加 `--door-model <文件路径>`。配对 Camera A 后，在桌面选 **Spoken alerts → Walking alerts**，再让门进入画面正前方。
+保留现有的服务器和标定参数，给 `cv/live_camera.py` 加 `--door-alerts`。权重放在其他目录时可以加 `--scene-model <文件路径>`。配对 Camera A 后，在桌面选 **Spoken alerts → Walking alerts**，再让门进入画面正前方。
 
 同一扇门连续两张采样帧确认后，可靠双目距离在 3 米以内时可以听到「小心，前方约1.0米有门。」只有 Camera A 或深度不足时可以听到「请小心，前方可能有门。」门分割在后台采样，测距取同帧门掩膜内部的原始深度。播报描述门的位置，不判断门是否打开或可通行。
+
+## 前方墙提示
+
+给 `cv/live_camera.py` 加 `--wall-alerts`，使用[门提示的 ADE20K 权重](#前方门提示)。门和墙可以同时开启，共用一次分割推理。在 **Spoken alerts** 选择 **Walking alerts**。
+
+墙需要覆盖画面正前方的左、中、右三个窄区域，且三区域的同帧双目测距接近。连续两帧确认墙在 **1.5 米以内**时播报实测约数，例如「小心，前方约1.5米有墙。」缺少可靠双目距离时保持静音。退到 1.8 米外并离开触发区一段时间，或墙持续离开画面后，可以再次触发。
 
 ## 预测人车从侧面进入前方通道
 
