@@ -151,3 +151,59 @@ test('WebRTC keeps the paired video track through temporary receiver status fail
   assert.deepEqual(deletes,['/api/webrtc/offer','/api/frame']);
   assert.equal(timer,undefined);
 });
+
+test('stop keeps the pairing, resume needs no code and a new code forgets it', async t => {
+  const {createCameraUpload, storedPairing} = await import('./features/camera/camera-upload.js');
+  const storage = new Map();
+  install(t,globalThis,'localStorage',{getItem:key => storage.get(key) ?? null,
+    setItem:(key,value) => storage.set(key,String(value)), removeItem:key => storage.delete(key)});
+  const track = {label:'Ultra wide', getSettings:() => ({}), addEventListener(){}, stop(){}};
+  const stream = {getVideoTracks:() => [track], getTracks:() => [track]};
+  const video = {videoWidth:0, readyState:0, play:async () => {}, requestVideoFrameCallback() {}};
+  const calls = [];
+  let rejoinStatus = 200;
+  install(t,globalThis,'document',{createElement:() => ({getContext:() => ({})})});
+  install(t,navigator,'mediaDevices',{getUserMedia:async () => stream});
+  install(t,globalThis,'setTimeout',() => 0);
+  install(t,globalThis,'clearTimeout',() => {});
+  install(t,globalThis,'fetch',async (url,options = {}) => {
+    calls.push([options.method,url,options.headers?.Authorization]);
+    if (url === '/api/join') return Response.json({token:'phone-a',slot:'A'});
+    if (url === '/api/rejoin') return rejoinStatus === 200
+      ? Response.json({token:'phone-a',slot:'A'}) : Response.json({error:'This camera link has ended.'},{status:rejoinStatus});
+    return new Response(null,{status:204});
+  });
+  let state;
+  const upload = createCameraUpload(video,update => { state = update; });
+
+  await upload.start('123456','jpeg');
+  assert.equal(state.phase,'connected');
+  assert.deepEqual(storedPairing(),{token:'phone-a',slot:'A',format:'jpeg'});
+
+  upload.pause();
+  assert.equal(state.phase,'idle');
+  assert.equal(state.resumable,true);
+  assert.deepEqual(calls.at(-1),['DELETE','/api/frame?keep=1','Bearer phone-a']);
+  assert.equal(video.srcObject,null);
+
+  await upload.resume();
+  assert.equal(state.phase,'connected');
+  assert.deepEqual(calls.at(-1),['POST','/api/rejoin','Bearer phone-a']);
+  assert.equal(calls.filter(([,url]) => url === '/api/join').length,1);
+
+  upload.stop();
+  rejoinStatus = 401;
+  await upload.resume();
+  assert.equal(state.phase,'idle');
+  assert.equal(state.resumable,false);
+  assert.equal(storedPairing(),null);
+
+  await upload.start('654321','jpeg');
+  assert.equal(state.phase,'connected');
+  const before = calls.length;
+  upload.forget();
+  assert.equal(calls.length,before+1);
+  assert.equal(state.resumable,false);
+  assert.deepEqual(calls.at(-1),['DELETE','/api/frame','Bearer phone-a']);
+  assert.equal(storedPairing(),null);
+});

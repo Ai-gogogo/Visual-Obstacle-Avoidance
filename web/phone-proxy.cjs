@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const ip = process.env.PHONE_HOST, port = Number(process.env.PHONE_PORT || 8776);
 if (!ip) throw new Error('Set PHONE_HOST to the LAN address in the phone certificate.');
 const origin = 'https://' + ip + ':' + port;
-const routes = new Set(['GET /camera','POST /api/join','PUT /api/frame','DELETE /api/frame',
+const routes = new Set(['GET /camera','POST /api/join','POST /api/rejoin','PUT /api/frame','DELETE /api/frame','DELETE /api/frame?keep=1',
   'GET /api/webrtc/status','GET /api/webrtc/clock','POST /api/webrtc/clock','DELETE /api/webrtc/offer']);
 function phoneRoute(method, path) {
   return routes.has(method+' '+path) || (method === 'POST' &&

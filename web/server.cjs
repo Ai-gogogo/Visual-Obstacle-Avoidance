@@ -243,6 +243,22 @@ function createServer(options = {}) {
         res.setHeader('X-Server-Ms', Date.now());
         return respond(res, 200, {token:phone,slot:entry.slot,sourceID:session.sourceID,webrtc:Boolean(rtc?.ready)});
       }
+      if (method === 'POST' && route === '/api/rejoin') {
+        const ip = req.socket.remoteAddress;
+        const attempt = attempts.get(ip) || {count:0,until:now+60_000};
+        if (attempt.count >= 15) return respond(res, 429, {error:'Too many attempts. Wait a minute and retry.'});
+        const entry = phones.get(token);
+        const session = entry && sessions.get(entry.session);
+        if (!session || session.slots[entry.slot]?.phone !== token) {
+          attempt.count += 1;
+          attempts.set(ip, attempt);
+          return respond(res, 401, {error:'This camera link has ended. Enter a new code from the computer.'});
+        }
+        // A fresh stream ID keeps frames from before the pause out of stereo pairs and tracks.
+        resetSource(session,entry.slot);
+        res.setHeader('X-Server-Ms', Date.now());
+        return respond(res, 200, {token,slot:entry.slot,sourceID:session.sourceID,webrtc:Boolean(rtc?.ready)});
+      }
       if (['/api/webrtc/offer','/api/webrtc/status','/api/webrtc/clock'].includes(route)) {
         const entry = phones.get(token);
         const session = entry && sessions.get(entry.session);
@@ -369,8 +385,11 @@ function createServer(options = {}) {
         const slot = session.slots[entry.slot];
         if (method === 'DELETE') {
           resetSource(session,entry.slot);
-          session.slots[entry.slot] = {};
-          phones.delete(token);
+          // keep=1 pauses the camera but keeps its pairing, so the phone can rejoin without a new code.
+          if (url.searchParams.get('keep') !== '1') {
+            session.slots[entry.slot] = {};
+            phones.delete(token);
+          }
           return res.writeHead(204).end();
         }
         const type = req.headers['content-type'];
