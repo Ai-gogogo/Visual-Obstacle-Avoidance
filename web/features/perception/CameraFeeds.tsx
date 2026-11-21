@@ -41,45 +41,6 @@ export function CameraFeeds() {
           <span className="rtc-status" role="status"></span>
         </footer>
       </article>
-      <article className="feed" id="camera-b-feed" data-camera="B">
-        <header>
-          <div>
-            <span className="camera-icon" aria-hidden="true">
-              B
-            </span>
-            <h2>Camera B</h2>
-          </div>
-          <span className="status feed-status">Sample feed</span>
-        </header>
-        <div
-          className="frame camera-frame"
-          role="region"
-          aria-label="Camera B image"
-        >
-          <div
-            className="sample-image sample-b"
-            role="img"
-            aria-label="Sample lab view with a backpack and water bottle"
-          ></div>
-          <canvas
-            className="live-frame"
-            role="img"
-            aria-label="Live camera B preview"
-            hidden
-          ></canvas>
-          <video className="live-frame rtc-preview" aria-label="Live video from Camera B" autoPlay muted playsInline hidden />
-          <p className="no-feed" hidden>
-            Waiting for Camera B
-          </p>
-          <div className="overlays" aria-hidden="true"></div>
-        </div>
-        <footer>
-          <span className="frame-size" hidden></span>
-          <span className="feed-summary">2 sample detections</span>
-          <button className="quiet rtc-toggle" type="button" aria-pressed="false" hidden>Live video</button>
-          <span className="rtc-status" role="status"></span>
-        </footer>
-      </article>
       <article className="feed" id="stereo-view">
         <header>
           <h2>Stereo depth map</h2>
@@ -140,6 +101,57 @@ export function CameraFeeds() {
           <span id="depth-scale"></span>
         </footer>
         </div>
+      </article>
+      <article className="feed" id="scene-view">
+        <header><h2>Camera A segmentation</h2></header>
+        <div className="frame" id="scene-stage">
+          <canvas id="scene-mask" width={128} height={128} role="img"
+                  aria-label="Semantic classes in the sampled Camera A frame" hidden />
+          <p id="scene-placeholder" className="no-feed">Waiting for Camera A segmentation.</p>
+          <span id="scene-stale" className="analysis-frame-label" role="status" hidden>
+            Last result · waiting for update
+          </span>
+        </div>
+        <ul id="scene-legend" aria-label="Most visible classes"></ul>
+      </article>
+      <article className="feed" id="camera-b-feed" data-camera="B">
+        <header>
+          <div>
+            <span className="camera-icon" aria-hidden="true">
+              B
+            </span>
+            <h2>Camera B</h2>
+          </div>
+          <span className="status feed-status">Sample feed</span>
+        </header>
+        <div
+          className="frame camera-frame"
+          role="region"
+          aria-label="Camera B image"
+        >
+          <div
+            className="sample-image sample-b"
+            role="img"
+            aria-label="Sample lab view with a backpack and water bottle"
+          ></div>
+          <canvas
+            className="live-frame"
+            role="img"
+            aria-label="Live camera B preview"
+            hidden
+          ></canvas>
+          <video className="live-frame rtc-preview" aria-label="Live video from Camera B" autoPlay muted playsInline hidden />
+          <p className="no-feed" hidden>
+            Waiting for Camera B
+          </p>
+          <div className="overlays" aria-hidden="true"></div>
+        </div>
+        <footer>
+          <span className="frame-size" hidden></span>
+          <span className="feed-summary">2 sample detections</span>
+          <button className="quiet rtc-toggle" type="button" aria-pressed="false" hidden>Live video</button>
+          <span className="rtc-status" role="status"></span>
+        </footer>
       </article>
     </div>
   );

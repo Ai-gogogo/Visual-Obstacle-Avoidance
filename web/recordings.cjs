@@ -59,8 +59,10 @@ function stereoRecordings(root,respond) {
       : [join(cv,'export_stereo_recording.py'),dir];
     try {
       await run(python,['-u',...args],{maxBuffer:4*1024*1024});
-      if (comparison) take.comparison = true;
-      else take.video = true;
+      if (comparison) {
+        take.comparison = true;
+        take.comparisonSegmentation = true;
+      } else take.video = true;
       take.status = 'saved';
     } catch (error) {
       take.status = 'error';

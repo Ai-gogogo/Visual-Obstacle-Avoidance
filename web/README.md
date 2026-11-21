@@ -69,6 +69,6 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 每次录制保存在项目本机的 `.visionassist/recordings/<id>/`。A/B 文件保留接收端的原始 JPEG 或 PNG；`timestamps.csv` 记录左右帧 ID、各自的采样时间、帧间时差及含时钟误差的上界（最多 65 ms）。`stereo.mp4` 按采样时间回放。刷新网页或重启服务后可以重新选择已保存的录像。
 
-本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成 Camera A、StereoSGBM、RAFT-Stereo 三栏 MP4。两种方法读取同一对原始帧。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**；颜色和帧号在三栏之间对齐。改变机位、镜头或裁切后需要更新对应标定。
+本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成 Camera A 原图、StereoSGBM、RAFT-Stereo 和 Camera A 语义分割四栏 MP4。每一帧的分割都取自该同步帧对中的 Camera A 原图。旧版对比视频可用 **Regenerate with segmentation** 重新生成。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**；四栏按帧号对齐。改变机位、镜头或裁切后需要更新对应标定。
 
-原片导出需要安装了 PyAV 和 Pillow 的 Python。对比导出还需要 CV 依赖及 `opt_einsum`，并使用 `.visionassist/RAFT-Stereo/` 的官方代码和 `raftstereo-realtime.pth` 权重。服务优先使用 `VISIONASSIST_CV_PYTHON`，其次使用项目中的 `.visionassist/rtc-env/bin/python`。导出失败时原始帧和时间戳仍然保留，可修复依赖后重试。
+原片导出需要安装了 PyAV 和 Pillow 的 Python。对比导出还需要 CV 依赖、`opt_einsum` 和 [ADE20K 场景分割权重](../cv/README.md#camera-a-室内外语义分割)，并使用 `.visionassist/RAFT-Stereo/` 的官方代码和 `raftstereo-realtime.pth` 权重。服务优先使用 `VISIONASSIST_CV_PYTHON`，其次使用项目中的 `.visionassist/rtc-env/bin/python`。导出失败时原始帧和时间戳仍然保留，可修复依赖后重试。

@@ -43,6 +43,10 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   const planeToggle = html.match(/<input[^>]*id="depth-plane-overlay"[^>]*>/)?.[0];
   assert.ok(planeToggle);
   assert.match(html,/<article[^>]*id="scene-view"/);
+  const position = marker => html.indexOf(marker);
+  assert.ok(position('data-camera="A"') < position('id="stereo-view"'));
+  assert.ok(position('id="stereo-view"') < position('id="scene-view"'));
+  assert.ok(position('id="scene-view"') < position('id="camera-b-feed"'));
   assert.match(html,/<canvas[^>]*id="scene-mask"[^>]*hidden/);
   assert.match(html,/Waiting for Camera A segmentation/);
   const labels = await call('/ade20k-labels.json');

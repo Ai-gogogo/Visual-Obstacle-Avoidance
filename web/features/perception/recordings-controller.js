@@ -25,11 +25,12 @@ export function connectRecordings({$,scope,session}) {
     if (!take) { detail.textContent = ''; return; }
     $('#record-play').disabled = !take.video;
     $('#record-export').hidden = take.video || !take.pairs || processing(take);
-    $('#record-compare').hidden = take.comparison;
+    $('#record-compare').hidden = take.comparisonSegmentation === true;
+    $('#record-compare').textContent = take.comparison ? 'Regenerate with segmentation' : 'Generate depth comparison';
     $('#record-compare').disabled = busy || processing(take) || !take.pairs || !take.calibration;
     $('#record-play-depth').hidden = !take.comparison;
     const message = {recording:'Recording synchronized pairs…',saving:'Saving A/B video…',
-      comparing:'Generating StereoSGBM and RAFT-Stereo comparison…',saved:'Saved on this Mac.'}[take.status];
+      comparing:'Generating depth and segmentation comparison…',saved:'Saved on this Mac.'}[take.status];
     const requiresCalibration = !take.calibration && take.pairs ? ' Depth comparison needs a calibration for this camera mode.' : '';
     detail.textContent = [message,take.message].filter(Boolean).join(' ')+requiresCalibration;
   }
@@ -71,9 +72,10 @@ export function connectRecordings({$,scope,session}) {
       }
       if (takes.some(take=>take.id===current)) select.value=current;
       selection();
-      if (pendingPlay && selected()?.id===pendingPlay && selected().comparison) {
+      const take = selected();
+      if (pendingPlay && take?.id===pendingPlay && !processing(take)) {
         pendingPlay=undefined;
-        void showVideo('comparison');
+        if (take.comparisonSegmentation) void showVideo('comparison');
       }
       if (takes.some(processing)) timer=scope.delay(refresh,750);
     } catch (error) {
