@@ -18,6 +18,18 @@ The official YOLO11n detection checkpoint used here has SHA-256 `0ebbc80d4a7680d
 
 ## Run on one image
 
+The single-image and live commands also accept `--weights cv/models/yolo11n-seg.pt`.
+Download the optional checkpoint for instance masks and the real-model segmentation test:
+
+```sh
+curl -fL https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt -o cv/models/yolo11n-seg.pt
+```
+
+Its SHA-256 is `55ed65c56c91713d23e8402371c6c49a6fd84f257f7dce452e8d70e41dcbe152`.
+In Python, `detect(model, image, return_masks=True)` returns `(objects, masks)`.
+Each boolean mask follows the corresponding object's index and the input image's height and width.
+Detection-only weights and empty predictions return `None` for masks. JSON output contains only the object metadata.
+
 ```sh
 python cv/detect_image.py path/to/photo.jpg --output cv/results/my-photo
 ```
@@ -136,6 +148,17 @@ camera and a theoretical input limit of about 4.55 FPS per camera.
 The workspace had no CUDA GPU. CUDA and physical-phone results require a run
 on the deployment machine.
 
+## GPU
+
+On an NVIDIA computer, install the CUDA build of PyTorch so `--device auto` selects `cuda:0`
+for YOLO and RAFT-Stereo (`VISIONASSIST_RAFT_DEVICE` overrides RAFT, for example `mps`).
+The `+cu128` tag is required; otherwise pip keeps an installed CPU wheel.
+
+```sh
+python -m pip install --force-reinstall --no-deps "torch==2.9.0+cu128" "torchvision==0.24.0+cu128" --index-url https://download.pytorch.org/whl/cu128
+```
+
+StereoSGBM, optical flow and the OpenCV face models remain on CPU with the pip OpenCV build. For the road-edge SegFormer, replace `onnxruntime` with `onnxruntime-gpu==1.23.2` (CUDA 12); it reuses the CUDA and cuDNN libraries of the CUDA torch build and falls back to CPU otherwise. Measured on an RTX 4060: about 20 ms instead of 159 ms per frame, including resizing.
 
 ## Obstacle risk
 
@@ -146,6 +169,12 @@ meet the urgency rule to reach `urgent`. The box must occupy at least 25% of ima
 its bottom at or below 80% of image height for relative depth `near`, or 90% for unknown depth.
 A relatively `far` candidate can still reach `caution`. The live worker tracks evidence separately
 for each paired camera stream and reuses the result when retrying the same frame.
+
+For a chair, both frames must have a valid stereo distance of 1.5 m or less to reach
+`caution`. With no valid distance the chair stays `normal`.
+
+For other obstacles with measured `depth_m`, distance replaces the box-size rule. Both frames
+at 1.2 m or closer reach `urgent`, and candidates farther than 3 m stay `normal`.
 
 These image-space thresholds are intended for controlled demos with a forward-facing camera.
 Relative depth represents ordering within one image. A `normal` result means this rule did
@@ -312,6 +341,27 @@ Chrome 实时深度图提供三个独立开关，初始均关闭。Edge-aware fi
 
 Show meters 显示相对于 Camera A 光轴的前向距离。若标定 JSON 带有 `"units":"checker_squares_only"`，在页面输入同一张棋盘连续五格的**实测总毫米数**，转换系数为该数除以 5000。未量格长时保持空白。公制标定直接使用米。对准中心圆圈可读该点的距离；目标框内的距离沿用项目的可靠深度聚合。没有足够观测时显示未知。输入的尺度适用于当前页面会话；更换镜头、机位或标定后请重新核对。
 
+## 实时支撑平面与调试叠层
+
+用 `--plane-ransac`（或在 [road_config.json](road_config.json) 设置 `plane.enabled`）启用支撑平面拟合。拟合与 3D 几何使用原始公制深度，WLS 和时间中值用于显示。独立中央留区门控通过时，控制台显示 **Plane OK**、估计俯仰角和留区 P90。开启 **Show meters** 后，适用的框标签同时显示前向距离和离面高度。
+
+**Show plane overlay** 默认关闭。开启时，训练内点和通过误差门槛的中央留区点标绿，超过误差带的有效凸起标橙。橙色默认从至少 0.05 m 起，到 2.0 m 为止。它展示逐帧几何，告警由 3D 走廊和风险规则单独判断。失去有效平面或深度时走 2D 降级。路沿和横穿的动态姿态可在有效 PnP 的支持下短暂沿用，默认最多 500 ms。
+
+## Camera A 室内外语义分割
+
+在仓库根目录下载固定版本的 ADE20K SegFormer-B0 权重，然后启动已有的 CV 进程。已有的双目标定和服务器参数可加在同一个命令上。
+
+```sh
+mkdir -p cv/models
+curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/resolve/1e78fb9c976ebbac92d859ef6d7aae4253da869e/onnx/model.onnx -o cv/models/scene-segformer-b0.onnx
+echo '3e5c18a4be395f16646438d54c42377ddc202edfa33d5eced0c9506de75c44c2  cv/models/scene-segformer-b0.onnx' | shasum -a 256 -c -
+cv/.venv/bin/python cv/live_camera.py --scene-segmentation
+```
+
+配对 Camera A 后，实时仪表盘的 **Camera A segmentation** 显示最近一次分割和面积最大的八类。短暂缺结果时保留上一张图，标记 **Last result · waiting for update**。模型识别 150 类，包括地板、桌子、车行道和人行道。后台线程默认最多每秒开始三次推理，每个来源仅保留一张待处理的新帧。用 `--scene-fps 2` 可降低更新率。`--road-alerts` 使用现有 Cityscapes 专用模型，两项同时启用时各自执行推理。
+
+使用桌面会话的 Bearer token 读取 `GET /api/segmentation/A`。响应中的 `mask` 是 Base64 编码的 128 × 128 单通道 PNG，像素值 0–149 对应[类别表](../web/public/ade20k-labels.json)，255 表示最高类别概率低于 0.55。用最近邻插值缩放到响应中的原图 `width`、`height`，即可与相同 `frame_id` 的 Camera A 深度对齐。分割结果过期后接口返回 204。
+
 ## 前方车行道边缘预警
 
 在上面的双手机标定、配对和 HTTPS 服务可用后，运行：
@@ -322,10 +372,30 @@ cv/.venv/bin/python cv/live_camera.py --road-alerts --server https://localhost:8
 
 Camera A 用 Cityscapes SegFormer-B0 分割车行道和人行道，寻找从脚下方向的人行道走向前方车行道的交界。程序在交界附近取多个地面像素的双目深度，使用 A 的标定射线计算横向位置和水平前向距离，选择行走通道内最近且有一段连续像素支持的交界。Dashboard 在对应的 A 帧上用黄色圆圈标出取值位置，图下显示距离。B 为 A 提供双目匹配；运行 worker 时加上 `--dual-yolo` 也可独立检测 B。
 
-- 默认在 **5 米**内提醒，进入 **3 米**再升级，每档需要连续两张已接受的不同帧确认，间隔不超过 1.2 秒。退到 5.6 米外或持续看不到交界至少一秒后可重新提示。按 Dashboard 的语音语言设置通过现有 Piper 播报。[语音模型和浏览器播放设置](../llm/README.md)
+- 默认在 **3.5 米内**播报一次普通提示，需要连续两张已接受的不同帧确认，间隔不超过 1.2 秒。退到 4.1 米外或持续看不到交界至少一秒后可重新提示。按 Dashboard 的语音语言设置通过现有 Piper 播报。[语音模型和浏览器播放设置](../llm/README.md)
 - 未标定、缺少同步帧或交界纹理不足时，连续看到前方交界可播报「前方可能是车行道」，并显示距离不可用。道路延伸到侧面时，程序以朝前通道筛选交界。当前假设手机朝向与行走方向一致，地面近似水平。
-- [road_config.json](road_config.json) 中的 `pitch_down_deg` 默认 0，镜头从水平向下倾斜 10° 时填 10。`corridor_width_m` 是通道总宽，默认 0.9 米。`caution_m`、`urgent_m` 和 `rearm_margin_m` 分别控制两级提示和重新触发的距离余量。改完重启 worker。匹配范围还取决于 [stereo_config.json](stereo_config.json) 中的有效深度范围和标定参数。
-- 首次实机验证可用卷尺在封闭路段标出 5 米和 3 米，分别从正面、斜向接近并沿路沿平行行走。没有可见人行道、已走上车道、路口被车辆遮挡或在坡道上时，可能漏报或误报。
+- [road_config.json](road_config.json) 中的 `pitch_down_deg` 默认 0，镜头从水平向下倾斜 10° 时填 10。`corridor_width_m` 是通道总宽，默认 0.9 米。`caution_m` 控制提示距离，`rearm_margin_m` 控制再次触发的距离余量。改完重启 worker。匹配范围还取决于 [stereo_config.json](stereo_config.json) 中的有效深度范围和标定参数。
+- 首次实机验证可用卷尺在封闭路段标出 3.5 米，分别从正面、斜向接近并沿路沿平行行走。没有可见人行道、已走上车道、路口被车辆遮挡或在坡道上时，可能漏报或误报。
+
+## 前方门提示
+
+门提示使用 ADE20K SegFormer-B0 的 `door` 类。在仓库根目录下载并校验权重。
+
+```sh
+mkdir -p cv/models
+curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-1024/resolve/1e78fb9c976ebbac92d859ef6d7aae4253da869e/onnx/model.onnx -o cv/models/scene-segformer-b0.onnx
+echo '3e5c18a4be395f16646438d54c42377ddc202edfa33d5eced0c9506de75c44c2  cv/models/scene-segformer-b0.onnx' | shasum -a 256 -c -
+```
+
+保留现有的服务器和标定参数，给 `cv/live_camera.py` 加 `--door-alerts`。权重放在其他目录时可以加 `--scene-model <文件路径>`。配对 Camera A 后，在桌面选 **Spoken alerts → Walking alerts**，再让门进入画面正前方。
+
+同一扇门连续两张采样帧确认后，可靠双目距离在 3 米以内时可以听到「小心，前方约1.0米有门。」只有 Camera A 或深度不足时可以听到「请小心，前方可能有门。」门分割在后台采样，测距取同帧门掩膜内部的原始深度。播报描述门的位置，不判断门是否打开或可通行。
+
+## 前方墙提示
+
+给 `cv/live_camera.py` 加 `--wall-alerts`，使用[门提示的 ADE20K 权重](#前方门提示)。门和墙可以同时开启，共用一次分割推理。在 **Spoken alerts** 选择 **Walking alerts**。
+
+墙需要覆盖画面正前方的左、中、右三个窄区域，且三区域的同帧双目测距接近。连续两帧确认墙在 **1.5 米以内**时播报实测约数，例如「小心，前方约1.5米有墙。」缺少可靠双目距离时保持静音。退到 1.8 米外并离开触发区一段时间，或墙持续离开画面后，可以再次触发。
 
 ## 预测人车从侧面进入前方通道
 

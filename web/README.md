@@ -5,7 +5,7 @@
 ## 先看设计
 
 - 电脑打开 `http://localhost:8765/`。默认进入 **Judge view**，显示两路示例画面和物体框。配对后进入实时模式，显示 Camera A 的 YOLO 检测、Camera B 和双目深度图。首次测距前需要为当前支架完成双目标定。顶部 **Voice assistant** 切到用户页。
-- 手机打开相机路由 `/camera`。首屏显示配对操作。配对、授权并启动相机后，页面显示取景和镜头状态。离开页面会结束采集。原有 `/index.html` 和 `/camera.html` 链接会跳转到对应路由。
+- 手机打开相机路由 `/camera`。首屏显示配对操作。配对、授权并启动相机后，页面显示取景和镜头状态，右上角 **Stop camera** 可暂停采集。暂停、断线、离开或刷新页面都会保留配对，回到相机页点 **Resume camera** 即可继续，不需要新配对码；电脑为同一路重新配对，或点 **Use a new pairing code** 后，旧配对失效。原有 `/index.html` 和 `/camera.html` 链接会跳转到对应路由。
 
 ## 试实际配对
 
@@ -39,9 +39,15 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 在桌面页的 **Spoken alerts** 选模式。每次打开页面默认 **Desk · quiet**，CV 告警仍显示在页面上。**Test warning audio** 可以单独检查输出设备和 Piper 语音。
 
 - **Stationary monitoring · fixed rig** 用于固定、已标定的双目支架。相机连续稳定、移动目标预计进入相机前方走廊的前 1.5 米时，才播报接近。
-- **Walking alerts · moving rig** 用于受控场地测试。将已标定的支架朝向行进方向，开始移动时手动选此模式，停下后选回 Desk。有效横穿预测和有双目距离支持的路沿事件可以播报。路沿检测还需要 CV 启动参数 `--road-alerts`。
+- **Walking alerts · moving rig** 用于受控场地测试。将已标定的支架朝向行进方向，开始移动时手动选此模式，停下后选回 Desk。行进走廊内的静态障碍（同一目标每个风险级别只播一次，有双目距离时带上约数米数，按 0.5 米取整）、有效横穿预测和路沿事件可以播报。双目测到路沿在 3.5 米以内时播报一次普通提示，测不到距离时可播「前方可能是车行道」。
 
-两种模式都需要两路画面和相机 A 的分析。失流、切换模式或错过事件时限时，当前等待开播的告警会取消。行走模式目前依赖操作者切换，静态障碍仍以页面提示为主。只在受控测试中验证这些提示。
+静态障碍和没有距离的「前方可能是车行道」只需要相机 A 在检测；横穿和带距离的路沿需要两路画面和相机 A 的分析。路沿检测要在 CV 启动时加 `--road-alerts`。失流、切换模式或错过事件时限时，当前等待开播的告警会取消。行走模式目前依赖操作者切换。只在受控测试中验证这些提示。
+
+启动 CV 时加 `--door-alerts` 可在 Walking 模式播报前方的门。Camera A 可单独提供定性提示，有可靠双目深度时可带米数。 [门分割配置](../cv/README.md#前方门提示)
+
+加 `--wall-alerts` 后，Walking 模式也会播报双目确认在正前方 1.5 米内的墙。 [墙分割配置](../cv/README.md#前方墙提示)
+
+通道内的椅子需要双目连续两帧测到 **1.5 米以内**才会发出普通提示。开启 **Show meters** 可在提示中听到距离。
 
 运行 `npm test` 检查配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。运行 `npm run typecheck` 检查 TypeScript。完成 `npm run build` 后，运行 `npm run test:frontend` 验证告警模式、生产服务的两个页面、静态资源和同源配对接口。
 
@@ -64,7 +70,7 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 ## Camera A 检测与双目深度图
 
-相机配对页的 **Original pixels · lossless PNG** 按浏览器实际采集尺寸上传无损帧，目标节拍为每秒一帧。**Standard** 沿用长边最多 640 px 的 JPEG。实时页默认按帧的宽高比显示，可点 **Actual pixels** 按接收到的像素 1:1 查看。做双目标定时，两台设备应选择相同模式，保持镜头、方向和采集尺寸固定。标定工具可读取保存的 PNG 和 JPEG 帧。
+相机配对页的 **Original pixels · lossless PNG** 按浏览器实际采集尺寸上传无损帧，目标节拍为每秒一帧。**Standard** 沿用长边最多 640 px 的 JPEG。实时预览区预留固定尺寸并按原宽高比适配，可点 **Actual pixels** 在相机区域内按接收像素 1:1 查看。做双目标定时，两台设备应选择相同模式，保持镜头、方向和采集尺寸固定。标定工具可读取保存的 PNG 和 JPEG 帧。
 
 同一控制台配对左右两台手机。Camera A 提供检测画面；Camera B 提供双目匹配所需的另一个视角。控制台读取同一份 `/api/preview/A` 响应中的 JPEG、检测框和深度图，按同一帧一起显示。深度图越亮表示越近，黑色为缺测。B 断开时清除深度图及框上的米数，A 继续更新。运行方法和实机校准步骤见 [CV 说明](../cv/README.md)。
 
@@ -72,12 +78,14 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 实时查看时，在 **Stereo depth map → Depth algorithm** 选择 StereoSGBM（默认）或 RAFT-Stereo。下一对同步帧会使用所选算法。两者共用当前机位的标定，RAFT 首次使用时会加载本机权重。
 
+Camera A、Stereo depth map、Camera A segmentation 和 Fused depth + segmentation 在宽屏上同排，中屏分为两列，窄屏为一列。Camera B 默认隐藏，可用 **Show Camera B** 展开。语义分割短暂缺帧时保留上一张结果和图例，并显示 **Last result · waiting for update**。融合栏优先使用同帧语义，或选取相差 350 ms 以内的语义帧。它用相近的实测深度帮助恢复缺失语义，再在语义区域内拟合深度渐变。补出的深度用略暗的相同配色显示。深度断帧或分割过期时，融合栏保留上一张并标明正在等待。使用中的场景分割、平面拟合及轮换服务的参数见[最新交接](../cv/STEREO-HANDOFF-2026-11-19.md)。
+
 ## 录制用于测试的 A/B 素材
 
 在本机 Judge view 配对 A、B 后，点击 **Record A + B**。数字表示已经写入磁盘的同步帧对数。点击 **Stop and save** 后，在 **Saved recordings** 中选录像，可播放和下载左右并排的原片。手机换机或超过 5 秒没有新帧时，录制自动结束，已经保存的帧仍可使用。短暂缺少同步帧时跳过该时刻。
 
 每次录制保存在项目本机的 `.visionassist/recordings/<id>/`。A/B 文件保留接收端的原始 JPEG 或 PNG；`timestamps.csv` 记录左右帧 ID、各自的采样时间、帧间时差及含时钟误差的上界（最多 65 ms）。`stereo.mp4` 按采样时间回放。刷新网页或重启服务后可以重新选择已保存的录像。
 
-本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成 Camera A、StereoSGBM、RAFT-Stereo 三栏 MP4。两种方法读取同一对原始帧。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**；颜色和帧号在三栏之间对齐。改变机位、镜头或裁切后需要更新对应标定。
+本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成带 YOLO 叠加的 Camera A、StereoSGBM、RAFT-Stereo 和 Camera A 语义分割四栏 MP4。导出从每对同步帧重算检测、追踪和分割。Camera A 上的距离和可用高度来自同帧的原始 RAFT-Stereo 公制深度。旧版对比视频可用 **Regenerate with segmentation** 重新生成。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**，四栏按帧号对齐。改变机位、镜头或裁切后需要更新对应标定。
 
-原片导出需要安装了 PyAV 和 Pillow 的 Python。对比导出还需要 CV 依赖及 `opt_einsum`，并使用 `.visionassist/RAFT-Stereo/` 的官方代码和 `raftstereo-realtime.pth` 权重。服务优先使用 `VISIONASSIST_CV_PYTHON`，其次使用项目中的 `.visionassist/rtc-env/bin/python`。导出失败时原始帧和时间戳仍然保留，可修复依赖后重试。
+原片导出需要安装了 PyAV 和 Pillow 的 Python。对比导出还需要 CV 依赖、`opt_einsum` 和 [ADE20K 场景分割权重](../cv/README.md#camera-a-室内外语义分割)，并使用 `.visionassist/RAFT-Stereo/` 的官方代码和 `raftstereo-realtime.pth` 权重。服务优先使用 `VISIONASSIST_CV_PYTHON`，其次使用项目中的 `.visionassist/rtc-env/bin/python`。导出失败时原始帧和时间戳仍然保留，可修复依赖后重试。

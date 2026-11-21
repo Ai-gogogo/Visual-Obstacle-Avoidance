@@ -715,6 +715,57 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     return output([prefix,description].filter(Boolean).join(' '), 'history', {observation:last});
   }
 
+  // One compact report of what CV measured, shared by the text model, the vision model and the fallbacks.
+  function sceneReport(session, cameras) {
+    const report = {cameras:[], recent_alerts:[]};
+    for (const id of cameras) {
+      const scene = detections(session.slots[id]);
+      if (!scene) {
+        report.cameras.push({camera:id, status:copyFrame(session.slots[id]) ? 'waiting_for_detections' : 'offline'});
+        continue;
+      }
+      const objects = scene.objects.filter(object => object.confidence >= .5).map(object => ({
+        label:object.label, label_zh:detectionLabelsZh.get(object.label) ?? object.label, position:object.position,
+        ...(Number.isFinite(object.depth_m) ? {distance_m:Math.round(object.depth_m*10)/10} : {}),
+        ...(object.relative_depth && object.relative_depth !== 'unknown' ? {relative_depth:object.relative_depth} : {}),
+        ...(object.risk && object.risk !== 'normal' ? {risk:object.risk} : {}),
+        ...(object.track_id ? {track_id:object.track_id} : {})
+      })).sort((a,b) => (a.distance_m ?? Infinity)-(b.distance_m ?? Infinity)).slice(0,10);
+      report.cameras.push({camera:id, status:'detecting', objects,
+        ...(scene.road_edge?.level && scene.road_edge.level !== 'unseen' ? {road_edge:scene.road_edge} : {})});
+    }
+    const recent = (session.alerts || []).filter(alert => Date.now()-alert.stamp <= 30_000).slice(-5);
+    report.recent_alerts = recent.map(alert => ({text:alert.text_zh || alert.text, risk:alert.risk,
+      seconds_ago:Math.round((Date.now()-alert.stamp)/1000)}));
+    return report;
+  }
+
+  const groundedRules = 'Answer only from the JSON camera report. It comes from YOLO detection and stereo depth on the user\'s cameras and can miss objects. ' +
+    'Positions: left, center and right of the camera view, which faces forward. Distances are approximate; say "about" or "约". ' +
+    'Never invent objects, distances or alerts that are not in the report. You may say where obstacles were detected and where none were detected, ' +
+    'but never say a direction is safe and never give turn-by-turn walking directions. Only when the user asks whether it is safe or which way to go, give the measured facts and add that the system cannot guarantee safety. ' +
+    'recent_alerts lists spoken warnings from the last 30 seconds; mention them only when the user asks about a warning. ' +
+    'Reply only in reply_language (zh: simplified Chinese, en: English), even though some report fields are Chinese. Use one to three short sentences. No lists or emoji.';
+
+  async function groundedAnswer(session, text, cameras, fallback, signal) {
+    const report = sceneReport(session, cameras);
+    if (!report.cameras.some(camera => camera.status === 'detecting')) return fallback();
+    const messages = [{role:'system',content:'You are VisionAssist, an on-device assistant for people with low vision. '+groundedRules},
+      {role:'user',content:JSON.stringify({question:text, reply_language:cn(text) ? 'zh' : 'en', camera_report:report})}];
+    try {
+      const timeout = AbortSignal.timeout(9000);
+      const reply = await runResource('model', () => generate(messages,null,undefined,recordPlacement,
+        signal ? AbortSignal.any([signal,timeout]) : timeout));
+      signal?.throwIfAborted();
+      return output(reply,'scene');
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (error?.status === 429) throw error;
+      // The deterministic detection summary keeps the demo answering if the local model is slow or missing.
+      return fallback();
+    }
+  }
+
   async function chat(session, input, signal, voiceFrames = {}, route = null) {
     signal?.throwIfAborted();
     const text = clean(input.text);
@@ -886,12 +937,19 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       const habits = records('habit').map(row => row.name);
       return output(habits.length ? habits.join(isChinese ? '；' : '. ') : isChinese ? '还没有保存习惯。' : 'No habits are saved yet.');
     }
-    if (/\b(?:is it safe to (?:walk|cross)|which way should i (?:walk|go)|can i (?:walk|cross))\b|可以(?:往|走|过马路)|(?:往哪|怎么走|能通行|能过马路)/iu.test(text)) {
-      return output(isChinese ? '我无法判断是否可以通行。你可以问我画面里检测到了什么。' :
-        'I cannot determine whether it is safe to proceed. You can ask what was detected in the frame.', 'unavailable');
-    }
+    const asksPath = /\b(?:is it safe to (?:walk|cross)|which way should i (?:walk|go)|can i (?:walk|cross))\b|可以(?:往|走|过马路)|(?:往哪|怎么走|能通行|能过马路)/iu.test(text);
     const slot = session.slots[side];
     const cameras = twoCameras ? ['A','B'] : [side];
+    if (asksPath) {
+      // Measured facts only; the model is told never to call a direction safe.
+      return groundedAnswer(session,text,cameras,() => output(isChinese ? '我无法判断是否可以通行。你可以问我画面里检测到了什么。' :
+        'I cannot determine whether it is safe to proceed. You can ask what was detected in the frame.', 'unavailable'),signal);
+    }
+    if (!input.mode && /为什么(?:要)?(?:提醒|警告|报警|告警)|刚才(?:的|那个|那句)?(?:提醒|警告|报警|告警)|(?:提醒|警告|告警)(?:我)?(?:的)?是什么|\bwhy did you (?:warn|alert)|\bwhat was (?:that|the) (?:warning|alert)\b/iu.test(text)) {
+      const alerts = sceneReport(session,['A']).recent_alerts;
+      if (!alerts.length) return output(isChinese ? '最近 30 秒没有发出告警。' : 'No alert was issued in the last 30 seconds.', 'scene');
+      return groundedAnswer(session,text,['A'],() => output(alerts.map(alert => alert.text).join(' '),'scene'),signal);
+    }
     const liveCameras = cameras.filter(id => copyFrame(session.slots[id]));
     const cameraLabel = id => (isChinese ? '相机 ' : 'Camera ') + id;
     const cameraStatus = id => {
@@ -932,6 +990,11 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     const depthQuestion = /(?:哪个|哪些|哪一个|谁|什么东西)(?:物体|东西|人)?(?:看起来|离我|距离我)?(?:比较|更|最|较)?(?:近|远)|\b(?:which|what)(?: object| objects| one| person)? (?:is|are|looks?|seems?) (?:the )?(?:closer|closest|nearer|nearest|farther|furthest|farthest|further)\b/iu;
     if (input.mode !== 'image' && depthQuestion.test(text)) {
       if (twoCameras) return oneCamera();
+      // Without any distance or ordering evidence the model would only guess.
+      const evidence = sceneReport(session,[side]).cameras[0].objects?.some(o => o.distance_m || o.relative_depth);
+      return evidence ? groundedAnswer(session,text,[side],relativeDepthAnswer,signal) : relativeDepthAnswer();
+    }
+    function relativeDepthAnswer() {
       const scene = detections(slot);
       if (!scene) return output(isChinese ? '当前没有可用的 YOLO 检测。' : 'There are no recent YOLO detections.', 'unavailable');
       const far = /远|\b(?:farther|furthest|farthest|further)\b/iu.test(text);
@@ -949,6 +1012,9 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
       (!explainsOcr && readText) || visualDetail.test(text) || appearanceQuestion.test(text);
     const sceneQuestion = /(?:面前|前面|眼前|前方|周围|附近|身边|外[面边](?:[里中])?|画面[里中])(?:都)?(?:有(?:些)?|是)(?:什么|啥|哪些|哪几)|(?:看到|看见)(?:了|过)?什么|(?:播报|描述|看看|说说)(?:一下)?(?:我)?(?:面前|前面|眼前|周围|身边|附近)(?:的)?(?:(?:场景|环境|情况|物体|东西)|[吧。！!？?]*$)|in front|surroundings|what (?:can|do) you see/iu;
     if (input.mode === 'scene' || route?.intent === 'scene' || (!wantsImage && sceneQuestion.test(text))) {
+      return groundedAnswer(session,text,cameras,detectionSummary,signal);
+    }
+    function detectionSummary() {
       const reports = cameras.map(id => {
         const scene = detections(session.slots[id]);
         const prefix = (isChinese ? '相机 ' : 'Camera ') + id;
@@ -1056,7 +1122,11 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
     const refersToPrevious = /^(?:那[，, ]*)?(?:它|他|她|上面|拍到的那个|这个呢|那个呢)|^(?:(?:and|what about)\s+)?(?:it|its|he|she)\b|\b(?:is|does|was) (?:it|he|she)\b/iu.test(text);
     const followUp = frame && previousVisual && (refersToPrevious || route) ?
       'Earlier user question for reference only. Draw all visual facts from the current images. '+JSON.stringify(previousVisual)+'\n' : '';
-    const message = {role:'user',content:(temporal ? temporalPrompt : Array.isArray(frame) ? cameraPrompt : '') + followUp + (readText ? readingPrompt : '') + text};
+    const report = frame && !readText && sceneReport(session, imageCameras);
+    const measured = report && report.cameras.some(camera => camera.objects?.length) ?
+      'Camera analysis for reference (YOLO labels, positions and approximate stereo distances; it can miss objects). Use the image for appearance and these numbers for distance: ' +
+      JSON.stringify(report.cameras.map(({camera,objects = []}) => ({camera,objects}))) + '\n' : '';
+    const message = {role:'user',content:(temporal ? temporalPrompt : Array.isArray(frame) ? cameraPrompt : '') + followUp + measured + (readText ? readingPrompt : '') + text};
     const messages = Array.isArray(frame) ? [message] : [system,...history,message];
     let reply;
     try {
@@ -1130,4 +1200,4 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   };
 }
 
-module.exports = {createAgent,currentDetection,MAX_FRAME_AGE,PREVIEW_MAX_ANALYSIS_LAG_MS};
+module.exports = {createAgent,currentDetection,detectionLabelsZh,MAX_FRAME_AGE,PREVIEW_MAX_ANALYSIS_LAG_MS};

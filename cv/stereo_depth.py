@@ -8,6 +8,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from mask_utils import sample_instance
+
 DEFAULT_CONFIG = Path(__file__).with_name("stereo_config.json")
 
 
@@ -158,19 +160,33 @@ class StereoDepth:
         return out
 
 
-def object_depth(depth, box):
-    """Representative surface in the central half of a detection, in axial meters."""
+def _depth_stats(values, area, source):
+    if values.size < max(24, area * .4):
+        return None
+    nearest, low, middle, high = np.percentile(values, [10, 25, 50, 75])
+    if high-low > middle * .2:
+        return None
+    return {"median_m": round(float(middle), 3), "nearest_m": round(float(nearest), 3), "source": source}
+
+
+def object_depth_stats(depth, box, *, mask=None) -> dict | None:
+    """Representative and nearest (P10) raw axial depths, in meters."""
+    samples = sample_instance(depth, mask)
+    if samples is not None:
+        stats = _depth_stats(samples.values, samples.mask_area, "mask")
+        if stats is not None:
+            return stats
     h, w = depth.shape
     x1, y1, x2, y2 = np.asarray(box) * [w, h, w, h]
     dx, dy = (x2-x1)/4, (y2-y1)/4
     region = depth[math.ceil(y1+dy):math.ceil(y2-dy), math.ceil(x1+dx):math.ceil(x2-dx)]
     values = region[np.isfinite(region)]
-    if values.size < max(24, region.size * .4):
-        return None
-    low, middle, high = np.percentile(values, [25, 50, 75])
-    if high-low > middle * .2:
-        return None
-    return round(float(middle), 3)
+    return _depth_stats(values, region.size, "bbox")
+
+
+def object_depth(depth, box, *, mask=None):
+    stats = object_depth_stats(depth, box, mask=mask)
+    return stats["median_m"] if stats is not None else None
 
 
 def main():

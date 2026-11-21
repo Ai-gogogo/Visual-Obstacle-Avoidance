@@ -35,6 +35,17 @@ Ollama 需要在本机 127.0.0.1:11434 运行。建议在启动 Ollama 的环境
 | `VISIONASSIST_EMBED_MODEL` | 语义记忆使用的本地 Ollama 嵌入模型，默认为 embeddinggemma |
 | `VISIONASSIST_DB` | 单用户 SQLite 文件路径。默认位于 Agent 同目录 .visionassist/ |
 
+### GPU
+
+有 NVIDIA 显卡时，转写和实时 OCR 会优先使用 GPU，缺运行库时自动回退 CPU。
+
+| 组件 | 需要的额外依赖 |
+|---|---|
+| faster-whisper | `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*`。首次 CUDA 失败后，本次进程固定改用 CPU |
+| PaddleOCR | 安装 GPU 版 `paddlepaddle-gpu` |
+
+Ollama 自动使用 GPU。Piper 留在 CPU：短告警合成约 0.15 秒，CUDA 版 ONNX Runtime 的预热反而多出数秒。Vosk 唤醒词只在 CPU 上运行。
+
 ## Dashboard 演示流程
 
 ### 免手操作

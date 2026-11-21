@@ -9,12 +9,12 @@ function depthColors(stops) {
   }
   return lut;
 }
-const depthPalettes = {
+export const depthPalettes = {
   turbo:depthColors('30123b 4040a2 466be3 4294ff 28bceb 18ddc2 32f298 6dfe62 a4fc3c cbed34 ecd13a fdae35 fb8122 ec530f d23105 ac1701 7a0403'),
   viridis:depthColors('440154 48186a 472d7b 424086 3b528b 33638d 2c728e 26828e 21918c 1f9f88 27ad81 3dbc74 5cc863 81d34d aadc32 d5e21a fde725')
 };
 
-export function createPerceptionView($, signal) {
+export function createPerceptionView($, signal, onDepth) {
   const sample = [
     {label:'Chair', camera:'A', distance:1.4, position:'Center', box:[36,22,33,77]},
     {label:'Desk', camera:'A', distance:2.3, position:'Right', box:[78,32,22,65], align:'right'},
@@ -22,7 +22,7 @@ export function createPerceptionView($, signal) {
     {label:'Water bottle', camera:'B', distance:2.1, position:'Right', box:[65,36,7,24]}
   ];
 
-  let lastDepthFrame, holdTimer;
+  let lastDepthFrame, holdTimer, holdingDepth = false;
   signal?.addEventListener('abort', () => clearTimeout(holdTimer), {once:true});
 
   function depthOptions() {
@@ -32,12 +32,13 @@ export function createPerceptionView($, signal) {
       spatial: $('#depth-spatial').checked,
       temporal: $('#depth-temporal').checked,
       meters: $('#depth-meters').checked,
+      ...($('#depth-plane-overlay').checked ? {planeOverlay:true} : {}),
       fiveMm: 73.025 // Measured span of five printed squares (2⅞ inches), in mm.
     };
   }
 
   function repaintDepth() {
-    if (lastDepthFrame && $('#depth-hold-status').hidden) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false);
+    if (lastDepthFrame && !holdingDepth) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false, lastDepthFrame.overlay, false);
   }
 
   function makeAnnotations(feeds) {
@@ -83,14 +84,34 @@ export function createPerceptionView($, signal) {
     $('#detection-measure').textContent = sampleMode ? 'Distance' : 'Confidence';
     $('#detection-count').textContent = waiting ? 'Waiting' :
       list.length + (list.length === 1 ? ' object' : ' objects');
-    $('.table-wrap').hidden = !list.length;
     $('#empty-detections').hidden = Boolean(list.length);
     $('#empty-detections').textContent = waiting ? 'Waiting for camera detections.' :
       'No objects detected in the processed views.';
   }
 
-  function showDepth(snapshot, preview, sampleMode) {
+  function showDepth(snapshot, preview, sampleMode, overlay=null, publish=true) {
     clearTimeout(holdTimer);
+    holdingDepth = false;
+    if (!preview && publish) onDepth?.(null);
+    const plane = sampleMode ? null : snapshot?.plane;
+    const opt = depthOptions();
+    const protrusions = preview && plane?.validated && $('#depth-obstacle-labels').checked &&
+      snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id
+      ? (snapshot.unclassified_obstacles ?? [])
+        .filter(item => item.semantic_label && item.semantic_label !== 'unknown' && Number.isFinite(item.depth_m))
+        .sort((a,b) => a.depth_m-b.depth_m)
+        .slice(0,3)
+        .map(item => item.semantic_label.replaceAll('_',' ') + ' ' + item.depth_m.toFixed(1) + 'm')
+      : [];
+    const protrusionStatus = $('#protrusion-status');
+    protrusionStatus.textContent = protrusions.join(' · ');
+    protrusionStatus.hidden = !protrusions.length;
+    const planeStatus = $('#plane-status');
+    planeStatus.hidden = !plane;
+    planeStatus.textContent = plane ? [plane.validated ? 'Plane OK' : 'Plane Rejected',
+      Number.isFinite(plane.pitch_deg) ? 'Pitch '+plane.pitch_deg.toFixed(1)+'°' : null,
+      Number.isFinite(plane.holdout_p90_m) ? 'P90 '+(1000*plane.holdout_p90_m).toFixed(1)+' mm' : null
+    ].filter(Boolean).join(' · ') : '';
     const notice = $('#depth-hold-status');
     notice.hidden = true;
     const age = lastDepthFrame ? Date.now() - (lastDepthFrame.snapshot.depth_timestamp_ms ?? lastDepthFrame.snapshot.timestamp_ms) : Infinity;
@@ -98,6 +119,7 @@ export function createPerceptionView($, signal) {
       (!snapshot.objects && !snapshot.stereo_status));
     if (!preview && !sampleMode && waiting && age >= 0 && age < 3500 &&
         snapshot.depth_rig === lastDepthFrame.snapshot.depth_rig) {
+      holdingDepth = true;
       notice.textContent = 'Last depth frame · '+(age/1000).toFixed(1)+' s ago · waiting for update';
       notice.hidden = false;
       $('#depth-reading').textContent = '';
@@ -107,7 +129,7 @@ export function createPerceptionView($, signal) {
       holdTimer = setTimeout(() => showDepth(snapshot,null,false),Math.min(500,3500-age));
       return;
     }
-    lastDepthFrame = preview ? {snapshot, preview} : null;
+    lastDepthFrame = preview ? {snapshot, preview, overlay} : null;
     const status = snapshot?.stereo_status ?? (snapshot?.objects ? 'uncalibrated' : 'waiting_for_a');
     const messages = {
       waiting_for_a:'Waiting for a processed Camera A frame.',
@@ -122,7 +144,10 @@ export function createPerceptionView($, signal) {
       no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
     };
     $('#stereo-view').hidden = false;
-    $('#stereo-caption').textContent = messages[status] ?? '';
+    // Sample feeds never produce depth, so say so instead of reporting a live waiting state.
+    $('#stereo-caption').textContent = sampleMode && !preview
+      ? 'Sample feeds have no depth. Select Show live cameras to see depth aligned to Camera A.'
+      : messages[status] ?? '';
     const canvas = $('#stereo-map');
     canvas.hidden = !preview;
     $('#stereo-caption').hidden = Boolean(preview);
@@ -135,7 +160,6 @@ export function createPerceptionView($, signal) {
     const [near, far] = snapshot?.depth_range_m ?? [];
     const palette = $('#depth-palette').value;
     const [nearColor,farColor] = {gray:['bright','dark'],turbo:['red','purple'],viridis:['yellow','purple']}[palette];
-    const opt = depthOptions();
     $('#depth-reading').textContent = !opt.meters ? '' : near
       ? (Number.isFinite(snapshot.center_m) ? 'Center: '+snapshot.center_m.toFixed(2)+' m' : 'Center: no reliable depth')
       : 'Waiting for measured depth…';
@@ -150,8 +174,24 @@ export function createPerceptionView($, signal) {
       const ctx = canvas.getContext('2d',{willReadFrequently:true});
       ctx.drawImage(preview,0,0);
       const lut = depthPalettes[palette];
+      const capture = onDepth && publish && !sampleMode;
+      const frame = lut || capture ? ctx.getImageData(0,0,canvas.width,canvas.height) : null;
+      if (capture) {
+        // Capture the measured grayscale values before the palette and plane overlay.
+        const gray = new Uint8Array(canvas.width*canvas.height);
+        for (let i = 0; i < gray.length; i++) gray[i] = frame.data[i*4];
+        onDepth({
+          gray,
+          width:canvas.width, height:canvas.height,
+          id:snapshot.depth_frame_id,
+          // The scene preview timestamps receipt; use the receipt time of this same depth frame.
+          timestamp:snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id
+            ? snapshot.timestamp_ms ?? snapshot.depth_timestamp_ms : snapshot.depth_timestamp_ms,
+          expiresAt:snapshot.depth_expires_ms ?? snapshot.analysis_expires_ms,
+          partner:snapshot.depth_rig?.split('/')[1]
+        });
+      }
       if (lut) {
-        const frame = ctx.getImageData(0,0,canvas.width,canvas.height);
         for (let i=0;i<frame.data.length;i+=4) {
           const index = frame.data[i]*3;
           frame.data[i] = lut[index];
@@ -160,6 +200,7 @@ export function createPerceptionView($, signal) {
         }
         ctx.putImageData(frame,0,0);
       }
+      if (overlay && opt.planeOverlay) ctx.drawImage(overlay,0,0,canvas.width,canvas.height);
       canvas.dataset.frameId = snapshot.depth_frame_id ?? snapshot.frame_id;
       if (snapshot.depth_expires_ms) {
         const lag = Math.max(0, Date.now()-snapshot.depth_timestamp_ms);
@@ -188,8 +229,18 @@ export function createPerceptionView($, signal) {
       ctx.setLineDash(object.weak ? [5,3] : []);
       ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
       ctx.setLineDash([]);
-      let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
-        ($('#depth-meters').checked && Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
+      let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position;
+      if ($('#depth-meters').checked) {
+        if (Number.isFinite(object.depth_m)) caption += ' · '+object.depth_m.toFixed(2)+' m';
+        if (Number.isFinite(object.height_above_plane_m)) caption += ' · H '+object.height_above_plane_m.toFixed(2)+' m';
+        const nearest = object.nearest_depth_m;
+        if (snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id &&
+            Number.isFinite(object.depth_m) && Number.isFinite(nearest) &&
+            nearest > 0 && nearest <= .85*object.depth_m &&
+            object.depth_m-nearest >= .20) {
+          caption += ' · min '+nearest.toFixed(2)+'m';
+        }
+      }
       if (object.intrusion && object.intrusion.expires > Date.now()) {
         caption += ' · may cross from '+object.intrusion.from_side+' (~'+object.intrusion.eta_s.toFixed(1)+' s)';
       }

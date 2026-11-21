@@ -9,7 +9,7 @@ function acceptRoadEdge(slot, raw, stamp, rightStream, paired) {
     delete slot.roadState;
     return;
   }
-  const level = raw.level;
+  const level = raw.level === 'urgent' ? 'caution' : raw.level; // Older CV workers used two levels.
   const edge = {level};
   if (level !== 'unseen') {
     if (!Array.isArray(raw.point) || raw.point.length !== 2 ||
@@ -24,10 +24,14 @@ function acceptRoadEdge(slot, raw, stamp, rightStream, paired) {
       edge.distance_m = raw.distance_m;
     }
   }
+  if (paired && slot.detection.plane?.validated && level !== 'unseen' && Number.isFinite(raw.curb_drop_m)) {
+    edge.curb_drop_m = raw.curb_drop_m;
+    if (['supported','uncertain'].includes(raw.curb_confidence)) edge.curb_confidence = raw.curb_confidence;
+  }
   slot.detection.road_edge = edge;
   let state = slot.roadState;
   if (!state || state.right !== rightStream || stamp-state.last > MAX_FRAME_AGE) {
-    state = slot.roadState = {right:rightStream, announced:0};
+    state = slot.roadState = {right:rightStream, announced:false};
   }
   const consecutive = stamp > state.last && stamp-state.last <= MAX_GAP_MS;
   if (state.level !== level || !consecutive) {
@@ -37,20 +41,14 @@ function acceptRoadEdge(slot, raw, stamp, rightStream, paired) {
   state.last = stamp;
   state.level = level;
   state.count++;
-  state.closeCount = (level === 'urgent' || level === 'caution')
-    ? (consecutive ? state.closeCount : 0) + 1 : 0;
   if ((level === 'clear' || level === 'unseen') && state.count >= 2 && stamp-state.since >= 1000) {
-    state.announced = 0;
+    state.announced = false;
   }
-  let rank = 0;
-  if (level === 'urgent' && state.count >= 2) rank = 3;
-  else if (state.closeCount >= 2) rank = 2;
-  else if (level === 'visual' && state.count >= 2) rank = 1;
-  if (rank <= state.announced) return;
-  state.announced = rank;
+  if (state.announced || state.count < 2 || (level !== 'caution' && level !== 'visual')) return;
+  state.announced = true;
   const meters = edge.distance_m?.toFixed(1);
   return {
-    kind:'road_edge', camera_id:'A', risk:rank === 3 ? 'urgent' : 'caution', stamp,
+    kind:'road_edge', camera_id:'A', risk:'caution', stamp,
     text:meters ? 'Caution. Road edge about '+meters+' meters ahead.' : 'Caution. There may be a road ahead.',
     text_zh:meters ? '小心，前方约'+meters+'米是车行道边缘。' : '请小心，前方可能是车行道。'
   };

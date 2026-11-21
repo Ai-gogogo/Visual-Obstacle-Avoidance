@@ -6,6 +6,8 @@ import math
 import cv2
 import numpy as np
 
+from geometry import deproject
+from mask_utils import InstanceMask, dilate_mask
 from risk import MIN_CONFIDENCE
 from tracking import MAX_GAP_MS
 
@@ -13,6 +15,8 @@ MOVING_CLASSES = {"person", "bicycle", "motorcycle", "car", "bus", "truck", "dog
 MIN_FEATURES = 18
 # Fixed-camera monitoring covers the first 1.5 m of the calibrated corridor.
 STATIONARY_REACH_M = 1.5
+CAMERA_RIGHT = np.array([1., 0., 0.])
+ESTIMATE_MOTION = object()
 
 
 @dataclass(frozen=True)
@@ -44,19 +48,40 @@ class Corridor:
         return cls(width/2, np.array([0, -math.sin(angle), math.cos(angle)]), horizon, reach, rate)
 
 
-def background_mask(shape, objects):
+def background_mask(shape, objects, *, masks=None, dilate_px=4):
+    """Exclude dilated silhouettes where available, otherwise padded boxes."""
+    if dilate_px < 0:
+        raise ValueError("mask radius must be nonnegative")
     h, w = shape
     mask = np.full(shape, 255, np.uint8)
-    for obj in objects:
+    silhouette = None
+    pairs = ((obj, None) for obj in objects) if masks is None else zip(objects, masks, strict=True)
+    for obj, instance in pairs:
+        if instance is not None:
+            pixels = instance.pixels if isinstance(instance, InstanceMask) else np.asarray(instance, dtype=bool)
+            if pixels.shape != shape:
+                raise ValueError("instance mask and background must have the same shape")
+            if silhouette is None:
+                silhouette = pixels.copy()
+            else:
+                np.logical_or(silhouette, pixels, out=silhouette)
+            continue
         x1, y1, x2, y2 = np.asarray(obj["bbox"]) * [w, h, w, h]
         pad = max(5, round(.06 * max(x2-x1, y2-y1)))
         mask[max(0, int(y1)-pad):int(y2)+pad+1, max(0, int(x1)-pad):int(x2)+pad+1] = 0
+    if silhouette is not None:
+        # Dilation distributes over union, so one operation excludes every silhouette.
+        expanded = dilate_mask(silhouette, radius_px=dilate_px)
+        cv2.subtract(mask, 255, dst=mask, mask=expanded.view(np.uint8))
     return mask
 
 
-def deproject(pixels, depth, camera):
-    xy = cv2.undistortPoints(np.asarray(pixels, np.float32).reshape(-1, 1, 2), *camera).reshape(-1, 2)
-    return np.column_stack((xy, np.ones(len(xy)))) * np.asarray(depth).reshape(-1, 1)
+def support_background_mask(shape, objects, *, masks=None):
+    """Leave detected tabletops available as support-surface candidates."""
+    pairs = ((obj, None) for obj in objects) if masks is None else zip(objects, masks, strict=True)
+    foreground = [(obj, mask) for obj, mask in pairs if obj["label"] != "dining table"]
+    return background_mask(shape, [obj for obj, _ in foreground],
+                           masks=[mask for _, mask in foreground] if masks is not None else None)
 
 
 @dataclass
@@ -118,6 +143,17 @@ def background_pose(previous, current, camera, max_turn_rate):
     return rotation, trans.ravel()
 
 
+def pose_between(previous, current, camera, max_turn_rate):
+    if (previous is None or current.gray.shape != previous.gray.shape
+            or not 60 <= current.stamp - previous.stamp <= MAX_GAP_MS):
+        return None
+    try:
+        return background_pose(previous, current, camera, max_turn_rate)
+    except cv2.error:
+        # Feature geometry can be degenerate.
+        return None
+
+
 class IntrusionPredictor:
     def __init__(self, camera, corridor):
         self.camera = camera
@@ -133,9 +169,9 @@ class IntrusionPredictor:
             return None
         y = (y1+y2)/2
         left, center, right = deproject([(x1, y), ((x1+x2)/2, y), (x2, y)], obj["depth_m"], self.camera)
-        return center, (right[0]-left[0])/2
+        return center, (right-left)/2
 
-    def update(self, gray, depth, objects, stamp):
+    def update(self, gray, depth, objects, stamp, *, axes=None, pose=ESTIMATE_MOTION, background=None):
         was_stationary, self.was_stationary = self.was_stationary, False
         positions = {}
         for obj in objects:
@@ -149,21 +185,21 @@ class IntrusionPredictor:
             self.candidates.clear()
             return
         previous = self.previous
-        current = Frame(gray, depth, background_mask(gray.shape, objects), stamp, positions)
+        if background is None:
+            background = background_mask(gray.shape, objects)
+        current = Frame(gray, depth, background, stamp, positions)
         self.previous = current
         earlier, self.candidates = self.candidates, {}
         if previous is None or not (60 <= stamp-previous.stamp <= MAX_GAP_MS):
             return
         if not (positions.keys() & previous.positions.keys()):
             return
-        try:
-            pose = background_pose(previous, current, self.camera, self.corridor.max_turn_rate)
-        except cv2.error:
-            # Degenerate feature geometry may make the OpenCV pose solver fail.
-            return
+        if pose is ESTIMATE_MOTION:
+            pose = pose_between(previous, current, self.camera, self.corridor.max_turn_rate)
         if pose is None:
             return
         rotation, translation = pose
+        lateral = CAMERA_RIGHT if axes is None else axes[1]
         dt = (stamp-previous.stamp)/1000
         turn = math.degrees(np.linalg.norm(cv2.Rodrigues(rotation)[0]))
         self.was_stationary = turn <= min(1.0, 4*dt) and np.linalg.norm(translation) <= min(.03, .12*dt)
@@ -171,41 +207,45 @@ class IntrusionPredictor:
             key = obj.get("track_id")
             if key not in positions or key not in previous.positions:
                 continue
-            center, half_width = positions[key]
-            old_center, old_width = previous.positions[key]
+            center, span = positions[key]
+            old_center, old_span = previous.positions[key]
+            half_width = abs(span @ lateral)
+            old_width = abs((old_span if axes is None else rotation @ old_span) @ lateral)
             if abs(half_width-old_width) > max(.12, .25*old_width):
                 continue
             # Rotate old measurements onto today's axes. Retain relative translation
             # for corridor entry, but require the object itself to be moving inward too.
             delta = center - rotation @ old_center
-            sign = np.sign(center[0])
-            if -sign*(delta-translation)[0] < max(.05, .25*dt) or np.linalg.norm(delta)/dt > 22:
+            sign = np.sign(center @ lateral)
+            if -sign*((delta-translation) @ lateral) < max(.05, .25*dt) or np.linalg.norm(delta)/dt > 22:
                 continue
             velocity = delta/dt
-            eta = self.entry_time(center, half_width, velocity)
+            eta = self.entry_time(center, half_width, velocity, axes)
             if eta is None:
                 continue
             self.candidates[key] = (sign, velocity)
             if key not in earlier or earlier[key][0] != sign:
                 continue
             old_velocity = rotation @ earlier[key][1]
-            if abs(velocity[0]-old_velocity[0]) > max(.45, .5*abs(velocity[0])):
+            if abs((velocity-old_velocity) @ lateral) > max(.45, .5*abs(velocity @ lateral)):
                 continue
             velocity = (velocity+old_velocity)/2
-            eta = self.entry_time(center, half_width, velocity)
+            eta = self.entry_time(center, half_width, velocity, axes)
+            forward = self.corridor.forward_axis if axes is None else axes[0]
             if eta is not None:
                 obj["intrusion"] = {"from_side": "right" if sign > 0 else "left", "eta_s": round(eta, 2)}
                 if (was_stationary and self.was_stationary and
-                        0 < (center + eta*velocity) @ self.corridor.forward_axis <= STATIONARY_REACH_M):
+                        0 < (center + eta*velocity) @ forward <= STATIONARY_REACH_M):
                     obj["intrusion"]["stationary_zone"] = True
 
-    def entry_time(self, center, half_width, velocity):
-        clearance = abs(center[0]) - self.corridor.half_width - half_width
-        inward = -np.sign(center[0])*velocity[0]
+    def entry_time(self, center, half_width, velocity, axes=None):
+        forward, lateral = (self.corridor.forward_axis, CAMERA_RIGHT) if axes is None else axes
+        side = center @ lateral
+        clearance = abs(side) - self.corridor.half_width - half_width
+        inward = -np.sign(side) * (velocity @ lateral)
         if clearance <= 0 or inward < .25:
             return None
         eta = clearance/inward
-        forward = self.corridor.forward_axis
         if (eta <= self.corridor.horizon and center @ forward > 0 and
                 0 < (center + eta*velocity) @ forward <= self.corridor.reach):
             return eta

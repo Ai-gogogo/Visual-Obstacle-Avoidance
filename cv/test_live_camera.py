@@ -7,6 +7,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -17,8 +19,10 @@ from ultralytics.utils import ASSETS
 
 from detect_image import DEFAULT_WEIGHTS
 from live_camera import CameraAWorker, CameraWorker, resolve_device
+from obstacles import PlaneObstacles
 from path_intrusion import Corridor
 from road_edge import DEFAULT_ROAD_CONFIG
+from scene_alerts import SceneAlertSampler, observe_door
 from stereo_depth import DEFAULT_CONFIG, StereoDepth
 
 
@@ -84,6 +88,51 @@ class LiveCameraTests(unittest.TestCase):
     def scene(self, side="A"):
         return self.request("POST", "/api/agent/chat", self.desk,
                             json={"camera_id": side, "text": "What is in front of me?"}).json()
+
+    def test_masked_measurements_on_wire_use_raw_meters_and_preserve_object_indices(self):
+        from test_stereo_depth import configuration
+
+        stereo = StereoDepth(configuration())
+        stereo.square_units = True
+        raw = np.full((192, 320), 120., dtype=np.float32)  # 3 m, at 25 mm per grid unit.
+        masks = []
+        for x, units in [(10, 100), (50, 80), (225, 60)]:
+            mask = np.zeros_like(raw, dtype=bool)
+            mask[40:120, x:x+12] = True
+            raw[mask] = units
+            raw[40:57, x:x+12] = units - 4
+            masks.append(mask)
+        def infer(_):
+            return ([dict(label="person", confidence=c, position="center", bbox=[0., .1, 1., .9])
+                     for c in (.3, .9, .8)], masks)
+        worker = CameraWorker(self.base, None, self.cv, stereo=stereo, infer=infer, plane=PlaneObstacles())
+        plane = SimpleNamespace(validated=True, reason="ok", normal=np.array([0., 0., -1.]),
+                                d=3., holdout_p90_m=.01, pitch_deg=90., roll_deg=0., inlier_ratio=1.)
+        jpeg = phone_jpeg(Image.new("RGB", stereo.size))
+        phones = [self.pair(side) for side in "BA"]
+        stamp = str(int(time.time()*1000))
+        for phone in phones:
+            self.request("PUT", "/api/frame", phone, data=jpeg, headers={
+                "Content-Type": "image/jpeg", "X-Sample-Ms": stamp, "X-Clock-Error-Ms": "2"})
+        self.request("GET", "/api/preview/A", self.desk, headers={"X-Depth-Options": json.dumps(
+            dict(spatial=True, temporal=True, fiveMm=125, meters=True))})
+        replies = []
+        self.cv.hooks["response"].append(lambda response, **_: replies.append(response))
+        with (patch.object(stereo, "compute", return_value=raw),
+              patch("live_camera.spatial_depth", return_value=np.full_like(raw, 7)) as spatial,
+              patch("live_camera.StaticMedian.apply", return_value=np.full_like(raw, 9)) as temporal,
+              patch("live_camera.fit_support_plane", return_value=plane)):
+            worker.poll()
+        spatial.assert_called_once()
+        temporal.assert_called_once()
+        response, = [r for r in replies if r.request.method == "POST"]
+        self.assertTrue(response.ok, response.text)
+        self.assertIn("/api/cv/detections?", response.url)
+        self.assertNotIn(b"mask", response.request.body.lower())
+        self.assertLess(len(response.request.body), 4000)
+        objects = json.loads(response.request.body)["objects"]
+        self.assertEqual([(o["depth_m"], o["nearest_depth_m"], o["height_above_plane_m"]) for o in objects],
+                         [(2., 1.9, 1.), (1.5, 1.4, 1.5)])
 
     def test_agent_uses_fetched_frame_when_camera_changes_twice(self):
         a = self.pair("A")
@@ -327,6 +376,36 @@ class LiveCameraTests(unittest.TestCase):
         self.upload(phones["B"], frame_at(40))
         b_worker.poll()
         self.assertEqual(people("B")[0], b_ids)
+
+    def test_door_segmentation_publishes_in_the_background(self):
+        phone = self.pair("A")
+        segmenting = Event()
+        release = Event()
+        mask = np.zeros((128, 128), dtype=bool)
+        mask[18:108, 43:85] = True
+
+        def segment(_image, depth):
+            segmenting.set()
+            release.wait(2)
+            return {"door": observe_door(mask, depth)}
+
+        self.worker.infer = lambda _: []
+        with SceneAlertSampler(segment, self.worker.api) as sampler:
+            self.worker.scene_alert_sampler = sampler
+            try:
+                self.upload(phone, self.blank)
+                self.worker.poll()
+                self.assertTrue(segmenting.wait(2))
+                self.upload(phone, self.bus)
+                self.worker.poll()
+                response = self.request("GET", "/api/agent/alerts", self.desk).json()
+                self.assertEqual(response["cameras"]["A"], "detecting")
+                self.assertEqual(response["alerts"], [])
+            finally:
+                release.set()
+            response = self.request("GET", "/api/agent/alerts?wait=1&after=0", self.desk).json()
+            self.assertEqual([alert["text_zh"] for alert in response["alerts"]],
+                             ["请小心，前方可能有门。"])
 
     def test_predict_crossing_before_entry_and_drop_alert_after_b_repair(self):
         phones = {side: self.pair(side) for side in "AB"}

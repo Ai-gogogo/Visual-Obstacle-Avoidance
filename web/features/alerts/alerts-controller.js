@@ -1,6 +1,8 @@
 const spokenMessages = {
+  door: ['Caution. There may be a door ahead.', '请小心，前方可能有门。'],
   road: ['Caution. Road edge ahead.', '小心，前方有车行道边缘。'],
   stationary: ['Caution. Movement nearby.', '小心，有物体正在靠近。'],
+  wall: ['Caution. There is a wall ahead.', '小心，前方有墙。'],
   walking: ['Caution. Possible crossing ahead.', '小心，前方可能有横穿目标。']
 };
 
@@ -17,15 +19,21 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
   let mode = 'desk';
   let modeSince = 0;
   let stereoFeedsOnline = false;
+  // Static obstacles and unmeasured road cues come from Camera A alone; crossings and measured road edges need the stereo pair.
+  let cameraADetecting = false;
   modeControl.value = mode;
 
   function updateAudioStatus(cameras) {
-    stereoFeedsOnline = cameras?.A === 'detecting' && receivingCamera(cameras?.B);
-    if (!stereoFeedsOnline) cancelSpokenAlert();
+    const hadStereo = stereoFeedsOnline;
+    cameraADetecting = cameras?.A === 'detecting';
+    stereoFeedsOnline = cameraADetecting && receivingCamera(cameras?.B);
+    if (!cameraADetecting || (hadStereo && !stereoFeedsOnline)) cancelSpokenAlert();
     const text = mode === 'desk' ? 'Automatic alert speech is off.' :
+      mode === 'walking' && cameraADetecting && !stereoFeedsOnline ?
+        'Walking alerts selected. Camera B is offline, so only obstacles in the walking path, doors and possible road ahead can trigger speech.' :
       !stereoFeedsOnline ? 'Spoken alerts paused. Waiting for both camera feeds and analysis on Camera A.' :
         mode === 'stationary' ? 'Stationary monitoring selected. Only verified nearby movement can trigger speech.' :
-          'Walking alerts selected. Only timely stereo crossing and measured road-edge events can trigger speech.';
+          'Walking alerts selected. Obstacles in the walking path, doors, walls, timely stereo crossings and measured road edges can trigger speech.';
     if (audioStatus.textContent !== text) audioStatus.textContent = text;
   }
 
@@ -44,20 +52,35 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
 
   function handleSpokenAlerts(alerts) {
     const selectedMode = mode;
-    const canSpeak = alert => selectedMode !== 'desk' && mode === selectedMode && stereoFeedsOnline &&
+    const canSpeak = alert => selectedMode !== 'desk' && mode === selectedMode &&
+      (!alert.metric && ['obstacle','road_edge','door'].includes(alert.kind) ? cameraADetecting : stereoFeedsOnline) &&
       alert.stamp >= modeSince &&
       Date.now() < Math.min(alert.expires ?? Infinity, alert.stamp + 1500);
     const crossing = alerts.filter(alert => alert.kind === 'path_intrusion' && canSpeak(alert) &&
       (mode === 'walking' || alert.stationary_zone === true))
       .sort((a,b) => a.expires-b.expires)[0];
-    const road = mode === 'walking' && alerts.findLast(alert => alert.kind === 'road_edge' &&
-      alert.metric === true && canSpeak(alert));
-    const alert = road?.risk === 'urgent' ? road : crossing || road;
+    const road = mode === 'walking' && alerts.findLast(alert => alert.kind === 'road_edge' && canSpeak(alert));
+    // Static obstacles in the walking corridor speak in walking mode, once per track and risk level.
+    const obstacle = mode === 'walking' && alerts.filter(alert => alert.kind === 'obstacle' && canSpeak(alert) &&
+      newObstacleLevel(alert)).sort((a,b) => Number(b.risk === 'urgent')-Number(a.risk === 'urgent'))[0];
+    const door = mode === 'walking' && alerts.findLast(alert => alert.kind === 'door' && canSpeak(alert));
+    const wall = mode === 'walking' && alerts.findLast(alert => alert.kind === 'wall' && alert.metric && canSpeak(alert));
+    const alert = obstacle?.risk === 'urgent' ? obstacle : crossing || road || obstacle || door || wall;
     if (!alert) return;
     const urgent = alert.risk === 'urgent' || (crossing === alert && alert.expires-Date.now() <= 1200);
     if (!urgent && isConversationBusy('chunks')) return;
-    const messages = spokenMessages[alert.kind === 'road_edge' ? 'road' : mode];
-    playSpokenAlert(messages[transcriptionLanguage() === 'zh' ? 1 : 0],urgent,() => canSpeak(alert));
+    if (alert === obstacle) spokenObstacles.set(alert.track_id ?? alert.label,{risk:alert.risk,at:Date.now()});
+    const chinese = transcriptionLanguage() === 'zh';
+    const fallback = alert.kind === 'obstacle' ? [alert.text,alert.text] :
+      spokenMessages[alert.kind === 'road_edge' ? 'road' : alert.kind] ?? spokenMessages[mode];
+    const text = (chinese ? alert.text_zh : alert.text) || fallback[chinese ? 1 : 0];
+    playSpokenAlert(text,urgent,() => canSpeak(alert));
+  }
+  const spokenObstacles = new Map();
+  function newObstacleLevel(alert) {
+    const previous = spokenObstacles.get(alert.track_id ?? alert.label);
+    if (!previous || Date.now()-previous.at > 10_000) return true;
+    return alert.risk === 'urgent' && previous.risk !== 'urgent';
   }
   const lostCameras = new Set();
   const receivingCamera = value => value === 'live' || value === 'detecting';
@@ -101,9 +124,9 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
       if (pendingRoadAlert && Date.now()-pendingRoadAlert.stamp >= 5000) pendingRoadAlert = undefined;
       const intrusion = alerts.filter(alert => alert.kind === 'path_intrusion' && alert.expires > Date.now())
         .sort((a,b) => a.expires-b.expires)[0];
-      const others = alerts.filter(alert => alert.kind !== 'road_edge' && alert.kind !== 'path_intrusion');
-      const warning = pendingRoadAlert?.risk === 'urgent' ? pendingRoadAlert :
-        others.findLast(alert => alert.risk === 'urgent') || intrusion || pendingRoadAlert || others.at(-1);
+      const others = alerts.filter(alert => !['road_edge','path_intrusion','door','wall'].includes(alert.kind));
+      const warning = others.findLast(alert => alert.risk === 'urgent') || intrusion || pendingRoadAlert || others.at(-1) ||
+        alerts.findLast(alert => alert.kind === 'door') || alerts.findLast(alert => alert.kind === 'wall');
       if (warning && (Date.now() >= warningUntil ||
           ((warning.risk === 'urgent' || warning.kind === 'path_intrusion') && activeWarningRisk !== 'urgent'))) {
         activeWarningRisk = warning.risk;
