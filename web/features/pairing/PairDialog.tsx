@@ -12,11 +12,10 @@ export function PairDialog() {
       <h2 id="pair-title" tabIndex={-1} data-initial-focus>
         Pair a phone
       </h2>
-      <p>
-        Open the camera site on the phone and enter the code for the camera
-        slot you want.
-      </p>
-      <p id="phone-address" className="address"></p>
+      <details id="wifi-pairing">
+      <summary>Wi-Fi · WebRTC</summary>
+      <p>Scan each camera’s code in Safari on the same Wi-Fi. Use Camera A on the left and Camera B on the right.</p>
+      <p id="phone-address" className="address" hidden></p>
       <div className="pair-options">
         <button type="button" className="primary" data-pair="A">
           Code for Camera A
@@ -30,6 +29,28 @@ export function PairDialog() {
         Copy pairing code
       </button>
       <p id="copy-status" role="status"></p>
+      </details>
+      <details id="usb-controls" hidden>
+        <summary>USB cameras</summary>
+        <p>Plug both iPhones into this Mac and open WiredCamera on each phone.</p>
+        <div className="pair-options">
+          <label>Camera A · left <select id="usb-A" /></label>
+          <label>Camera B · right <select id="usb-B" /></label>
+        </div>
+        <label>Camera output · both phones
+          <select id="usb-resolution" defaultValue="1080x1920">
+            <option value="1080x1920">1080 × 1920 · full frame</option>
+            <option value="480x640">480 × 640 · centered crop</option>
+          </select>
+        </label>
+        <p id="usb-status" role="status" aria-live="polite"></p>
+        <div className="pair-options">
+          <button type="button" className="primary" id="usb-connect" disabled>Connect USB cameras</button>
+          <button type="button" className="quiet" id="usb-refresh">Refresh devices</button>
+          <button type="button" className="quiet" id="usb-disconnect" hidden>Disconnect USB</button>
+        </div>
+      </details>
+
     </dialog>
   );
 }

@@ -17,6 +17,9 @@ export function QuickActions() {
         <button type="button" className="quiet" id="describe">
           Describe surroundings
         </button>
+        <button type="button" className="quiet" id="compare-cameras">
+          Compare cameras
+        </button>
         <button type="button" className="quiet" data-question="find">
           Find my item
         </button>

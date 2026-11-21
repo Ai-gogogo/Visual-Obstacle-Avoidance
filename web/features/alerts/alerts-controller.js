@@ -1,4 +1,4 @@
-export function connectAlerts({$, scope, agentRequest, isAssist, isConversationBusy, transcriptionLanguage, speakWarning, speakReminder}) {
+export function connectAlerts({$, scope, agentRequest, isAssist, isConversationBusy, transcriptionLanguage, showWarningTiming}) {
   let alertSequence = 0;
   let warningUntil = 0;
   let pendingReminder;
@@ -34,7 +34,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
     try {
       const allowReminder = isAssist();
       const {sequence,alerts,reminder,cameras} = await agentRequest('/api/agent/alerts?after='+alertSequence+
-        (allowReminder ? '&reminders=1' : ''),'GET');
+        '&wait=1'+(allowReminder ? '&reminders=1' : ''),'GET');
       if (scope.signal.aborted) return;
       updateCameraReadiness(cameras);
       if (reminder && allowReminder) pendingReminder = {text:reminder,until:Date.now()+15_000};
@@ -55,7 +55,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
         const text = transcriptionLanguage() === 'zh' && warning.text_zh ? warning.text_zh : warning.text;
         warningUntil = Date.now()+3000;
         $('#obstacle-alert').textContent = text;
-        if (warning.risk === 'urgent' || !isConversationBusy('chunks')) speakWarning(text);
+        showWarningTiming(warning);
         scope.delay(() => {
           if ($('#obstacle-alert').textContent === text && Date.now() >= warningUntil) $('#obstacle-alert').textContent = '';
         },3400);
@@ -64,7 +64,6 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
         const message = prefix + pendingReminder.text;
         pendingReminder = undefined;
         $('#voice-message').textContent = message;
-        speakReminder(message);
       }
     } catch (error) {
       if (scope.signal.aborted) return;
@@ -75,8 +74,10 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
         pendingReminder = undefined;
         pendingRoadAlert = undefined;
       }
+      scope.delay(pollAlerts,450);
+      return;
     }
-    scope.delay(pollAlerts,450);
+    void pollAlerts();
   }
   void pollAlerts();
 }

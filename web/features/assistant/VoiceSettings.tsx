@@ -1,10 +1,10 @@
 export function VoiceSettings() {
   return (
-    <details className="assist-details">
+    <details className="assist-details" id="voice-settings">
       <summary>Voice controls and settings</summary>
       <p>
-        Say “Only look left”, “Use both cameras”, “Switch to Mandarin”, or
-        “Export the conversation”.
+        Say “Voice commands” to hear examples. When asked to confirm a change,
+        say “confirm” or “cancel”.
       </p>
       <button
         type="button"
@@ -16,12 +16,13 @@ export function VoiceSettings() {
       </button>
       <p>
         Say “Hey VisionAssist” or “你好，视觉助手” to start. Wake-word mode uses
-        the microphone on this page and transcribes speech locally.
+        the microphone on this page. Local speech transcription starts after the
+        wake phrase is detected.
       </p>
       <div className="voice-options">
         <label>
           Camera for visual questions
-          <select id="agent-camera" defaultValue="A">
+          <select id="agent-camera" defaultValue="both">
             <option value="both">Both cameras</option>
             <option value="A">Left camera (A)</option>
             <option value="B">Right camera (B)</option>

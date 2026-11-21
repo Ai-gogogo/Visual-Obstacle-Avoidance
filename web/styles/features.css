@@ -91,3 +91,8 @@ td{font-size:.94rem}
 #calibration-dialog { width: min(850px, 92vw); max-height: 90vh; overflow: auto; }
 #calibration-dialog canvas { display: block; width: 100%; max-height: 48vh; object-fit: contain; background: #111; }
 #lens-status { position: fixed; bottom: max(1rem, env(safe-area-inset-bottom)); left: 1rem; right: 1rem; width: fit-content; padding: .4rem .7rem; border-radius: .4rem; background: #171717; color: white; }
+
+.model-compute{display:flex;flex-wrap:wrap;gap:.4rem 1.3rem;padding:.65rem .85rem;margin-bottom:1rem;border:1px solid var(--line);border-radius:.65rem;background:var(--surface);font-size:.9rem}
+.model-compute p{margin:0;max-width:100%;overflow-wrap:anywhere}
+.model-compute strong{margin-inline-end:.35rem}
+.pair-qr{display:block;width:auto;max-width:100%;height:auto;image-rendering:pixelated;margin:.75rem 0}
