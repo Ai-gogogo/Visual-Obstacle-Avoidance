@@ -322,9 +322,9 @@ test('semantic routing reuses read-only tools and still requires confirmation to
     objects:[cup,{label:'person',confidence:.95,position:'left'}]}},B:{}}};
   const chat = text => agent.chat(session,{text,camera_id:'A'});
   try {
-    assert.equal((await chat('我前面有什么')).source,'yolo');
+    assert.equal((await chat('我前面有什么')).source,'scene');
     assert.equal(stages.length,0);
-    assert.equal((await chat('眼跟前摆的都是啥')).source,'yolo');
+    assert.equal((await chat('眼跟前摆的都是啥')).source,'scene');
     assert.match((await chat('有几个身影')).reply_text,/检测到 1 人/);
     assert.equal((await chat('这个杯子什么颜色')).source,'image');
     assert.equal((await chat('那上头印的呢')).source,'ocr');
@@ -432,25 +432,51 @@ test('live appearance, nearby people and camera status use the current camera', 
   } finally { agent.close(); }
 });
 
-test('equivalent surroundings questions use current YOLO detections with localized labels', async () => {
-  const agent = createAgent({filename:':memory:',generate:async () => 'General answer'});
+test('surroundings questions answer from the shared camera report, with a template fallback', async () => {
+  const reports = [];
+  let modelDown = false;
+  let lastMessages;
+  const agent = createAgent({filename:':memory:',generate:async messages => {
+    lastMessages = messages;
+    if (!messages[0].content.includes('JSON camera report')) return 'General answer';
+    if (modelDown) throw new Error('Ollama is not running');
+    reports.push(JSON.parse(messages[1].content));
+    return '正前方约1.2米有人，左侧有椅子。';
+  }});
   const frame = Buffer.from('current');
   const session = {slots:{A:{phone:'paired',stamp:Date.now(),frame,
     detection:{timestamp_ms:Date.now(),frame,objects:[
-      {label:'person',confidence:.95,position:'center'},
+      {label:'person',confidence:.95,position:'center',depth_m:1.234,risk:'urgent',track_id:'A-1'},
       {label:'chair',confidence:.92,position:'left'}
-    ]}},B:{}}};
+    ]}},B:{}},alerts:[{risk:'urgent',text:'Stop.',text_zh:'注意，正前方约1米有人。',stamp:Date.now()-2000}]};
   const chat = text => agent.chat(session,{text,camera_id:'A'});
   try {
     for (const text of ['我面前有什么东西','我前面有什么？','我眼前都有哪些物体？',
       '帮我看看我身边有什么','描述一下我周围的环境','我面前有什么障碍物吗？',
       '播报附近','帮我播报一下附近的物体','描述一下周围']) {
       const result = await chat(text);
-      assert.equal(result.source,'yolo',text);
-      assert.equal(result.reply_text,'相机 A 画面中央有人，左侧有椅子。');
+      assert.equal(result.source,'scene',text);
+      assert.equal(result.reply_text,'正前方约1.2米有人，左侧有椅子。');
     }
+    const report = reports.at(-1).camera_report;
+    assert.deepEqual(report.cameras[0].objects[0],
+      {label:'person',label_zh:'人',position:'center',distance_m:1.2,risk:'urgent',track_id:'A-1'});
+    assert.equal(report.cameras[0].objects[1].label_zh,'椅子');
+    assert.equal(report.recent_alerts[0].text,'注意，正前方约1米有人。');
+    assert.equal((await chat('刚才为什么提醒我？')).source,'scene');
+    assert.equal(reports.at(-1).question,'刚才为什么提醒我？');
+    assert.equal((await chat('我可以往前走吗？')).source,'scene');
+    modelDown = true;
+    const fallback = await chat('我面前有什么东西');
+    assert.equal(fallback.source,'yolo');
+    assert.equal(fallback.reply_text,'相机 A 画面中央有人，左侧有椅子。');
     assert.match((await chat('What is in front of me?')).reply_text,/person \(center\)/);
+    assert.equal((await chat('我可以往前走吗？')).source,'unavailable');
+    modelDown = false;
+    session.alerts = [];
+    assert.match((await chat('刚才为什么提醒我？')).reply_text,/没有发出告警/);
     assert.equal((await chat('我面前的椅子是什么颜色？')).source,'image');
+    assert.match(lastMessages.at(-1).content,/Camera analysis for reference.*"distance_m":1\.2/);
     assert.equal((await chat('我面前的瓶子上写的什么字？')).source,'image');
     assert.equal((await chat('面前遇到困难应该怎么解决？')).source,'llm');
     session.slots.A.stamp = session.slots.A.detection.timestamp_ms = Date.now()-10_000;
@@ -626,7 +652,8 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
 
   assert.equal((await publish(latestFrame)).status,204);
   assert.equal((await publish(latestFrame)).status,204);
-  assert.match((await chat('我前面有什么')).reply_text,/瓶子/);
+  assert.equal((await chat('我前面有什么')).source,'scene');
+  assert.match(generated.at(-1).messages[1].content,/瓶子/);
   assert.equal(ocrRequests.length,0);
   assert.match((await chat('哪个物体更近？')).reply_text,/无法判断/);
   assert.match((await chat('哪个物体更远？', {camera_id:'B'})).reply_text,/没有可用/);
@@ -660,7 +687,8 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   const {observations} = await json(await call('/api/memory/items/'+saved.id+'/history',{token:desk}),200);
   assert.deepEqual(observations,[live.observation]);
   assert.equal((await chat('上次在哪里看到我的水杯？',{camera_id:'both'})).source,'history');
-  assert.equal((await chat('Is it safe to walk forward?')).source,'unavailable');
+  assert.equal((await chat('Is it safe to walk forward?')).source,'scene');
+  assert.match(generated.at(-1).messages[0].content,/never say a direction is safe/);
   assert.equal((await call('/api/memory/items/'+saved.id,{method:'PATCH',token:desk,body:{name:'蓝水杯'}})).status,204);
   assert.equal((await chat('我的蓝水杯在哪里？')).source,'camera');
   await push(phone,8);
@@ -685,14 +713,15 @@ test('paired camera, exact-frame YOLO, alerts, assisted vision and local model a
   assert.equal(image.source,'image');
   assert.deepEqual(generated.at(-1).image,frame(9));
   assert.match((await chat('Compare cameras',{camera_id:'both'})).reply_text,/Camera B has no recent frame/);
-  const generatedBeforeScene = generated.length;
   for (const fields of [{camera_id:'both'},{camera_id:'both',mode:'scene'}]) {
     const surroundings = await chat('What is in front of me?',fields);
-    assert.equal(surroundings.source,'yolo');
-    assert.match(surroundings.reply_text,/Camera A detects bottle/);
-    assert.match(surroundings.reply_text,/Camera B has no recent detections/);
+    assert.equal(surroundings.source,'scene');
+    assert.equal(generated.at(-1).image,null);
+    const {camera_report:report} = JSON.parse(generated.at(-1).messages[1].content);
+    assert.equal(report.cameras[0].objects[0].label,'bottle');
+    assert.equal(report.cameras[1].camera,'B');
+    assert.notEqual(report.cameras[1].status,'detecting');
   }
-  assert.equal(generated.length,generatedBeforeScene);
   await push(await pair('B'),3);
   assert.equal((await chat('Compare cameras',{camera_id:'both'})).source,'image');
   assert.deepEqual(generated.at(-1).image,[frame(9),frame(3)]);

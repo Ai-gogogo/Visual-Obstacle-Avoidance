@@ -4,7 +4,7 @@ export function connectConversation({$, scope, agentFetch}) {
   const conversation = readConversation();
   const replySources = new Map([
     ['history','Historical observation'], ['memory','Saved memory'],
-    ['yolo','Current detection'], ['camera','Recent camera frame'],
+    ['yolo','Current detection'], ['scene','Detection + depth · local LLM'], ['camera','Recent camera frame'],
     ['unavailable','Unavailable']
   ]);
   function readConversation() {
