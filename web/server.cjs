@@ -436,21 +436,33 @@ function createServer(options = {}) {
         res.setHeader('X-Server-Ms', slot.stamp);
         return res.writeHead(204).end();
       }
-      const match = /^\/api\/(pair|frame|preview)\/([AB])$/.exec(route);
+      const match = /^\/api\/(pair|frame|preview|segmentation)\/([AB])$/.exec(route);
       if (!match) return respond(res, 404, {error:'Request not found.'});
       const [, action, side] = match;
       const session = sessions.get(token);
       if (!session) return respond(res, 401, {error:'Desktop session ended. Generate a new pairing code.'});
       const slot = session.slots[side];
+      if (method === 'GET' && action === 'segmentation' && side === 'A') {
+        const scene = slot.segmentation;
+        if (!slot.frame || !scene || now >= scene.expires_ms) return res.writeHead(204).end();
+        const etag = '"' + scene.frame_id + '"';
+        res.setHeader('ETag',etag);
+        if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
+        return respond(res,200,{...scene, camera_id:'A', taxonomy:'ade20k-150', remaining_ms:scene.expires_ms-now});
+      }
       if (method === 'GET' && action === 'preview') {
         if (side === 'A' && req.headers['x-depth-options'] !== undefined) {
           const opt = JSON.parse(req.headers['x-depth-options']);
           const mm = Number(opt.fiveMm);
           session.depthOptions = {...(opt.algorithm === 'raft' || opt.algorithm === 'sgbm' ? {algorithm:opt.algorithm} : {}),
             ...(typeof opt.low === 'boolean' ? {low:opt.low} : {}), spatial:opt.spatial === true, temporal:opt.temporal === true,
-            meters:opt.meters === true, fiveMm:Number.isFinite(mm) && mm>0 ? mm : 0};
+            meters:opt.meters === true, fiveMm:Number.isFinite(mm) && mm>0 ? mm : 0,
+            ...(opt.planeOverlay === true ? {planeOverlay:true} : {})};
         }
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
+        if (side === 'A' && slot.segmentation?.expires_ms > now) {
+          res.setHeader('X-Segmentation-Frame',slot.segmentation.frame_id);
+        }
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
         const recentDetection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
         const captureStamp = recentDetection?.capture_ms ?? recentDetection?.timestamp_ms;
@@ -463,10 +475,12 @@ function createServer(options = {}) {
           ? recentDetection : null;
         const depthDetection = freshAnalysis ?? raftDepth;
         const partner = depthDetection?.stereoPartner;
-        const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
+        const right = session.slots.B;
+        const lostPartner = partner && (!right.frame || right.streamID !== partner.stream || now - partner.stamp > FRESH);
         // Delayed RAFT results keep the matched YOLO image even if depth or meter labels are unavailable.
         const raftAnalysis = withinRaftWindow && side === 'A' && session.depthOptions?.algorithm === 'raft';
         const detection = freshAnalysis ?? (raftAnalysis ? recentDetection : null);
+        const matchedDepth = !lostPartner && depthDetection?.depthPreview && detection === depthDetection;
         const frame = detection?.frame ?? slot.frame;
         const format = detection?.frameType ?? slot.frameType;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
@@ -474,6 +488,10 @@ function createServer(options = {}) {
         const activeForecasts = [];
         const objects = detection?.objects.map(({item_feature, intrusion, ...object}, i) => {
           if (lostPartner) delete object.depth_m;
+          if (!matchedDepth) {
+            delete object.height_above_plane_m;
+          }
+          if (!matchedDepth || session.depthOptions?.meters === false) delete object.nearest_depth_m;
           if (freshAnalysis && !lostPartner && intrusion && intrusion.expires > now && detection.partnerStream === session.slots.B.streamID) {
             object.intrusion = intrusion;
             activeForecasts.push(i);
@@ -484,9 +502,22 @@ function createServer(options = {}) {
         const waitingClocks = side === 'A' && stereoStatus === 'waiting_for_pair'
           ? Object.entries(session.slots).filter(([,camera]) => camera.rtcID && now-camera.stamp < FRESH &&
             camera.rtcStats?.capture_timing_available === false).map(([name]) => name) : [];
+        const plane = !lostPartner && depthDetection?.plane;
+        const overlay = plane?.validated && depthDetection?.depthPreview && session.depthOptions?.planeOverlay
+          ? depthDetection.planeOverlay : undefined;
+        const protrusions = matchedDepth && plane?.validated ? depthDetection.unclassifiedObstacles : undefined;
+        let edge = freshAnalysis?.road_edge;
+        if (lostPartner && edge) {
+          if (edge.distance_m !== undefined) edge = undefined;
+          else {
+            const {curb_drop_m,curb_confidence,...visualEdge} = edge;
+            edge = visualEdge;
+          }
+        }
         const forecastTag = activeForecasts.length ? '-cross-' + activeForecasts.join('-') : '';
+        const nearestTag = objects?.some(obj => obj.nearest_depth_m !== undefined) ? '-nearest' : '';
         const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + forecastTag + waitingClocks.join('') +
-          (raftAnalysis ? '-raft-overlay' : '') + (raftDepth ? '-depth-' + raftDepth.frame_id : '') + (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + '"';
+          (raftAnalysis ? '-raft-overlay' : '') + (raftDepth ? '-depth-' + raftDepth.frame_id : '') + (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + (overlay ? '-plane' : '') + nearestTag + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
         return respond(res,200,{
@@ -497,7 +528,10 @@ function createServer(options = {}) {
             analysis_capture_ms:captureStamp, preview_objects:detection.previewObjects} : {}),
           ...(slot.rtcStats ? {webrtc:slot.rtcStats} : {}),
           ...(format === 'image/png' ? {png:frame.toString('base64')} : {jpeg:frame.toString('base64')}), objects,
-          ...(freshAnalysis?.road_edge && (!lostPartner || detection.road_edge.distance_m === undefined) ? {road_edge:detection.road_edge} : {}),
+          ...(edge ? {road_edge:edge} : {}),
+          ...(plane ? {plane} : {}),
+          ...(overlay ? {plane_overlay:overlay} : {}),
+          ...(protrusions ? {unclassified_obstacles:protrusions} : {}),
           ...(analysisDelayed ? {analysis_delayed:true} : {}),
           ...(waitingClocks.length ? {waiting_for_camera_clock:waitingClocks} : {}),
           ...(stereoStatus ? {stereo_status:stereoStatus} : {}),

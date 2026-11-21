@@ -148,6 +148,21 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Reduce motion/);
   assert.match(html,/Stereo calibration/);
   assert.match(html,/Depth algorithm/);
+  const planeToggle = html.match(/<input[^>]*id="depth-plane-overlay"[^>]*>/)?.[0];
+  assert.ok(planeToggle);
+  assert.match(html,/<article[^>]*id="scene-view"/);
+  const position = marker => html.indexOf(marker);
+  assert.ok(position('data-camera="A"') < position('id="stereo-view"'));
+  assert.ok(position('id="stereo-view"') < position('id="scene-view"'));
+  assert.ok(position('id="scene-view"') < position('id="camera-b-feed"'));
+  assert.match(html,/<canvas[^>]*id="scene-mask"[^>]*hidden/);
+  assert.match(html,/Waiting for Camera A segmentation/);
+  const labels = await call('/ade20k-labels.json');
+  assert.equal(labels.status,200);
+  assert.equal((await labels.json()).length,150);
+  assert.doesNotMatch(planeToggle,/checked/);
+  assert.match(html,/id="plane-status"[^>]*hidden/);
+  assert.match(html,/id="protrusion-status"[^>]*hidden/);
   assert.match(html,/RAFT-Stereo/);
   assert.match(html,/Record A \+ B/);
   assert.match(html,/Generate depth comparison/);
@@ -175,4 +190,132 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   const pair = await call('/api/pair/A',{method:'POST',headers:{Origin:base,Authorization:'Bearer '+token}});
   assert.equal(pair.status,201);
   assert.match((await pair.json()).code,/^\d{6}$/);
+});
+
+test('plane status, overlay and box height follow the display controls', async () => {
+  const {createPerceptionView} = await import('./features/perception/perception-view.js');
+  const nodes = new Map();
+  function $(selector) {
+    if (!nodes.has(selector)) nodes.set(selector,{dataset:{}});
+    return nodes.get(selector);
+  }
+  $('#depth-palette').value = 'gray';
+  const calls = [];
+  const ctx = {
+    drawImage: (...args) => calls.push(args),
+    setLineDash() {}, strokeRect() {}, fillRect() {},
+    measureText: () => ({width:30}),
+    fillText: caption => calls.push(caption),
+  };
+  $('#stereo-map').getContext = () => ctx;
+  const view = createPerceptionView($);
+  const depth = {naturalWidth:180,naturalHeight:240};
+  const overlay = {};
+  const snapshot = {frame_id:'sample',depth_frame_id:'sample',
+    plane:{validated:true,pitch_deg:12.8,holdout_p90_m:.011},
+    unclassified_obstacles:[
+      {semantic_label:'wall',depth_m:1.4}, {semantic_label:'pole',depth_m:1.1},
+      {semantic_label:'unknown',depth_m:.9}, {depth_m:.7}
+    ]};
+  view.showDepth(snapshot,depth,false,overlay);
+  assert.deepEqual(calls.splice(0),[[depth,0,0]]);
+  assert.equal($('#plane-status').textContent,'Plane OK · Pitch 12.8° · P90 11.0 mm');
+  assert.equal($('#protrusion-status').hidden,true);
+  $('#depth-plane-overlay').checked = true;
+  view.repaintDepth();
+  assert.deepEqual(calls.splice(0),[[depth,0,0],[overlay,0,0,180,240]]);
+  assert.equal($('#protrusion-status').textContent,'pole 1.1m · wall 1.4m');
+  assert.equal($('#protrusion-status').hidden,false);
+  view.showDepth({...snapshot,depth_frame_id:'different'},depth,false,overlay);
+  assert.equal($('#protrusion-status').textContent,'');
+  assert.equal($('#protrusion-status').hidden,true);
+  view.showDepth(snapshot,null,false);
+  assert.equal($('#protrusion-status').hidden,true);
+  $('#depth-plane-overlay').checked = false;
+  view.showDepth(snapshot,depth,false,overlay);
+  assert.equal($('#protrusion-status').hidden,true);
+  view.showDepth({plane:{validated:false}},null,false);
+  assert.equal($('#plane-status').textContent,'Plane Rejected');
+  const canvas = {getContext:() => ctx,dataset:{}};
+  const frame = {...snapshot,objects:[{label:'cup',position:'center',confidence:.9,bbox:[.4,.4,.6,.65],
+    depth_m:1.5,nearest_depth_m:1.2,height_above_plane_m:.14}]};
+  view.paintCamera(canvas,depth,frame);
+  assert.doesNotMatch(calls.pop(),/H 0\.14|min/);
+  $('#depth-meters').checked = true;
+  view.paintCamera(canvas,depth,frame);
+  assert.match(calls.pop(),/1\.50 m · H 0\.14 m · min 1\.20m/);
+  view.paintCamera(canvas,depth,{...frame,depth_frame_id:'different'});
+  assert.doesNotMatch(calls.pop(),/min/);
+  frame.objects[0].nearest_depth_m = 1.45;
+  view.paintCamera(canvas,depth,frame);
+  assert.equal(calls.pop(),'cup · 90% · center · 1.50 m · H 0.14 m');
+});
+
+test('segmentation stays visible across gaps and clears on Camera A replacement', async t => {
+  const {createScenePreview} = await import('./features/perception/scene-preview.js');
+  t.mock.timers.enable({apis:['setTimeout']});
+  const ctx = {fillRect() {}, drawImage() {}, putImageData() {},
+    getImageData: () => ({data:new Uint8ClampedArray(256*4)})};
+  const canvas = {hidden:true,dataset:{},style:{},getContext:() => ctx};
+  const placeholder = {hidden:false};
+  const stale = {hidden:true};
+  const legend = {items:[],replaceChildren(...items) { this.items = items; }};
+  const elements = {'#scene-mask':canvas,'#scene-placeholder':placeholder,'#scene-stale':stale,'#scene-legend':legend};
+  const fakeDocument = {createElement:() => ({style:{},append() {},getContext:() => ctx})};
+  const saved = {document:globalThis.document,Image:globalThis.Image};
+  globalThis.document = fakeDocument;
+  globalThis.Image = class { async decode() {} };
+  t.after(() => {
+    for (const [name,value] of Object.entries(saved)) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
+  });
+
+  const reply = frame_id => Response.json({frame_id,mask:'AA==',remaining_ms:500,width:480,height:640});
+  let next = Promise.resolve(reply('first'));
+  let fetchCount = 0;
+  t.mock.method(globalThis,'fetch',url => {
+    if (url === '/ade20k-labels.json') return Promise.resolve(Response.json(['wall']));
+    assert.equal(url,'/api/segmentation/A');
+    fetchCount++;
+    return next;
+  });
+  const controller = new AbortController();
+  const view = createScenePreview(id => elements[id], () => 'desk', controller.signal);
+  await view.update('first','camera-a');
+  assert.equal(canvas.hidden,false);
+  assert.equal(stale.hidden,true);
+  assert.equal(legend.items.length,1);
+  t.mock.timers.tick(501);
+  await view.update(null,'camera-a');
+  assert.equal(stale.hidden,false);
+  assert.equal(canvas.dataset.frameId,'first');
+  assert.equal(canvas.hidden,false);
+
+  next = Promise.resolve(new Response(null,{status:204}));
+  await view.update('expired','camera-a');
+  assert.equal(canvas.dataset.frameId,'first');
+  let finish;
+  next = new Promise(resolve => { finish = resolve; });
+  const loading = view.update('second','camera-a');
+  await view.update(null,'camera-a');
+  await view.update('newer','camera-a');
+  assert.equal(fetchCount,3);
+  assert.equal(canvas.dataset.frameId,'first');
+  assert.equal(placeholder.hidden,true);
+  finish(reply('second'));
+  await loading;
+  assert.equal(canvas.dataset.frameId,'second');
+  assert.equal(stale.hidden,true);
+
+  next = new Promise(resolve => { finish = resolve; });
+  const old = view.update('old-stream','camera-a');
+  await view.update(null,'replacement-camera');
+  finish(reply('old-stream'));
+  await old;
+  assert.equal(canvas.hidden,true);
+  assert.equal(placeholder.hidden,false);
+  assert.equal(legend.items.length,0);
+  controller.abort();
 });

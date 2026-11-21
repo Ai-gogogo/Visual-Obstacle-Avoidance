@@ -13,11 +13,13 @@ export default function DesktopPage() {
       </a>
       <DesktopHeader />
       <main id="main" className="shell" tabIndex={-1}>
-        <p className="obstacle-alert" id="obstacle-alert" role="alert" />
-        <p className="toast" id="warning-audio-status" role="status" />
-        <p className="toast" id="warning-timing" hidden />
-        <p className="connection-alert" id="connection-alert" role="alert" />
-        <p className="toast" id="ui-feedback" role="status" />
+        <div className="live-notices">
+          <p className="obstacle-alert" id="obstacle-alert" role="alert" />
+          <p className="toast" id="warning-audio-status" role="status" />
+          <p className="toast" id="warning-timing" hidden />
+          <p className="connection-alert" id="connection-alert" role="alert" />
+          <p className="toast" id="ui-feedback" role="status" />
+        </div>
         <section className="alert-settings" aria-labelledby="alert-settings-heading">
           <header>
             <h2 id="alert-settings-heading">

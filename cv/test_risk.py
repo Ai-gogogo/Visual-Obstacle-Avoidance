@@ -61,3 +61,12 @@ class RiskAssessmentTests(unittest.TestCase):
                 self.assertEqual(self.risk(201), "urgent")
                 self.assertEqual(self.risk(401, **fields), "normal")
                 self.assertEqual(self.risk(601), "normal")
+
+    def test_metric_distance_and_fallback_keep_independent_confirmation(self):
+        values = []
+        for stamp, mode in enumerate((False, False, True, True, None, True), 1):
+            obj = obstacle(bottom=.95)
+            evidence = {} if mode is None else {0: (True, mode)}
+            self.assessment.update([obj], stamp, metric_evidence=evidence)
+            values.append(obj["risk"])
+        self.assertEqual(values, ["normal", "caution", "caution", "urgent", "urgent", "normal"])

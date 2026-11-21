@@ -64,7 +64,7 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 ## Camera A 检测与双目深度图
 
-相机配对页的 **Original pixels · lossless PNG** 按浏览器实际采集尺寸上传无损帧，目标节拍为每秒一帧。**Standard** 沿用长边最多 640 px 的 JPEG。实时页默认按帧的宽高比显示，可点 **Actual pixels** 按接收到的像素 1:1 查看。做双目标定时，两台设备应选择相同模式，保持镜头、方向和采集尺寸固定。标定工具可读取保存的 PNG 和 JPEG 帧。
+相机配对页的 **Original pixels · lossless PNG** 按浏览器实际采集尺寸上传无损帧，目标节拍为每秒一帧。**Standard** 沿用长边最多 640 px 的 JPEG。实时预览区预留固定尺寸并按原宽高比适配，可点 **Actual pixels** 在相机区域内按接收像素 1:1 查看。做双目标定时，两台设备应选择相同模式，保持镜头、方向和采集尺寸固定。标定工具可读取保存的 PNG 和 JPEG 帧。
 
 同一控制台配对左右两台手机。Camera A 提供检测画面；Camera B 提供双目匹配所需的另一个视角。控制台读取同一份 `/api/preview/A` 响应中的 JPEG、检测框和深度图，按同一帧一起显示。深度图越亮表示越近，黑色为缺测。B 断开时清除深度图及框上的米数，A 继续更新。运行方法和实机校准步骤见 [CV 说明](../cv/README.md)。
 
@@ -72,12 +72,14 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 实时查看时，在 **Stereo depth map → Depth algorithm** 选择 StereoSGBM（默认）或 RAFT-Stereo。下一对同步帧会使用所选算法。两者共用当前机位的标定，RAFT 首次使用时会加载本机权重。
 
+Camera A、Stereo depth map 和 Camera A segmentation 从左到右同排。窄窗口内可横向滚动。Camera B 位于下一排，**Show Camera B** 仅控制预览可见性。语义分割短暂缺帧时保留上一张结果和图例，并显示 **Last result · waiting for update**。使用中的场景分割、平面拟合及轮换服务的参数见[最新交接](../cv/STEREO-HANDOFF-2026-11-19.md)。
+
 ## 录制用于测试的 A/B 素材
 
 在本机 Judge view 配对 A、B 后，点击 **Record A + B**。数字表示已经写入磁盘的同步帧对数。点击 **Stop and save** 后，在 **Saved recordings** 中选录像，可播放和下载左右并排的原片。手机换机或超过 5 秒没有新帧时，录制自动结束，已经保存的帧仍可使用。短暂缺少同步帧时跳过该时刻。
 
 每次录制保存在项目本机的 `.visionassist/recordings/<id>/`。A/B 文件保留接收端的原始 JPEG 或 PNG；`timestamps.csv` 记录左右帧 ID、各自的采样时间、帧间时差及含时钟误差的上界（最多 65 ms）。`stereo.mp4` 按采样时间回放。刷新网页或重启服务后可以重新选择已保存的录像。
 
-本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成 Camera A、StereoSGBM、RAFT-Stereo 三栏 MP4。两种方法读取同一对原始帧。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**；颜色和帧号在三栏之间对齐。改变机位、镜头或裁切后需要更新对应标定。
+本机以当前标定支架录制 **480 × 640 WebRTC** 或已标定的 USB 档位时，录制目录同时保存所用的标定文件。选中录像后点击 **Generate depth comparison**，即可生成 Camera A 原图、StereoSGBM、RAFT-Stereo 和 Camera A 语义分割四栏 MP4。每一帧的分割都取自该同步帧对中的 Camera A 原图。旧版对比视频可用 **Regenerate with segmentation** 重新生成。对比视频以 4 FPS 回放，支持 **Previous frame / Next frame**；四栏按帧号对齐。改变机位、镜头或裁切后需要更新对应标定。
 
-原片导出需要安装了 PyAV 和 Pillow 的 Python。对比导出还需要 CV 依赖及 `opt_einsum`，并使用 `.visionassist/RAFT-Stereo/` 的官方代码和 `raftstereo-realtime.pth` 权重。服务优先使用 `VISIONASSIST_CV_PYTHON`，其次使用项目中的 `.visionassist/rtc-env/bin/python`。导出失败时原始帧和时间戳仍然保留，可修复依赖后重试。
+原片导出需要安装了 PyAV 和 Pillow 的 Python。对比导出还需要 CV 依赖、`opt_einsum` 和 [ADE20K 场景分割权重](../cv/README.md#camera-a-室内外语义分割)，并使用 `.visionassist/RAFT-Stereo/` 的官方代码和 `raftstereo-realtime.pth` 权重。服务优先使用 `VISIONASSIST_CV_PYTHON`，其次使用项目中的 `.visionassist/rtc-env/bin/python`。导出失败时原始帧和时间戳仍然保留，可修复依赖后重试。

@@ -1,9 +1,11 @@
 import { createPerceptionView } from "./perception-view";
 import { createRtcPreview } from "./rtc-preview";
+import { createScenePreview } from "./scene-preview";
 
 export function createPerceptionController({$, scope, root, session, isMonitor, onModeChange}) {
   const {listen} = scope;
   const VisionPerceptionView = createPerceptionView($, scope.signal);
+  const scene = createScenePreview($, () => session.token, scope.signal);
   const feeds = [...root.querySelectorAll('[data-camera]')].map(node => ({
     node,side:node.dataset.camera,rtc:createRtcPreview(node,node.dataset.camera,scope,session)
   }));
@@ -26,9 +28,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     frame.toggleAttribute('data-has-pixels', !size.hidden);
     frame.tabIndex = !size.hidden && $('#camera-feeds').hasAttribute('data-actual-pixels') ? 0 : -1;
     if (!connected) {
-      if (sampleMode) frame.style.removeProperty('--camera-aspect');
       if (feed.side === 'A') {
-        if (sampleMode) $('#stereo-map').parentElement.style.removeProperty('--camera-aspect');
         VisionPerceptionView.showDepth(null, null, sampleMode);
       }
       feed.etag = undefined;
@@ -43,9 +43,6 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       const video = feed.rtc.playing && node.querySelector('.rtc-preview');
       const width = video?.videoWidth || image.width;
       const height = video?.videoHeight || image.height;
-      const aspect = width + ' / ' + height;
-      frame.style.setProperty('--camera-aspect', aspect);
-      if (feed.side === 'A') $('#stereo-map').parentElement.style.setProperty('--camera-aspect',image.width+' / '+image.height);
       size.textContent = width + ' × ' + height + ' px';
     }
     const empty = node.querySelector('.no-feed');
@@ -63,30 +60,46 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       if (feed.etag) headers['If-None-Match'] = feed.etag;
       const path = '/api/preview/' + feed.side;
       const response = await fetch(path, {headers, signal:AbortSignal.any([scope.signal, AbortSignal.timeout(3000)])});
-      if (version !== pollVersion || response.status === 304) return;
+      if (version !== pollVersion) return;
+      const sceneId = response.headers.get('X-Segmentation-Frame');
+      if (response.status === 304) {
+        if (feed.side === 'A') scene.update(sceneId);
+        return;
+      }
       if (response.status !== 200) {
+        if (feed.side === 'A' && (response.status === 204 || response.status === 401)) scene.clear();
         if (response.status === 401) session.invalidate(requestToken);
         setFeed(feed,false,response.status === 401 ? 'Session expired. Pair the phone again.' : undefined);
         return;
       }
       const snapshot = await response.json();
+      if (version !== pollVersion) return;
       if (snapshot.camera_id !== undefined && snapshot.camera_id !== feed.side) {
         throw new Error('Preview camera does not match the requested feed.');
       }
+      if (feed.side === 'A') scene.update(sceneId, snapshot.depth_rig?.split('/')[0]);
       const image = new Image();
       image.src = snapshot.png ? 'data:image/png;base64,' + snapshot.png : 'data:image/jpeg;base64,' + snapshot.jpeg;
       let depth = snapshot.depth_preview ? new Image() : null;
       if (depth) depth.src = 'data:image/png;base64,' + snapshot.depth_preview;
-      await Promise.all([image.decode(), depth?.decode()]);
+      let overlay = depth && snapshot.plane_overlay && VisionPerceptionView.depthOptions().planeOverlay ? new Image() : null;
+      if (overlay) overlay.src = 'data:image/png;base64,' + snapshot.plane_overlay;
+      await Promise.all([image.decode(), depth?.decode(), overlay?.decode().catch(() => { overlay = null; })]);
       if (version !== pollVersion) return;
       if (snapshot.depth_options && Object.entries(VisionPerceptionView.depthOptions()).some(
-        ([key, value]) => snapshot.depth_options[key] !== value
+        ([key, value]) => key !== 'planeOverlay' && snapshot.depth_options[key] !== value
       )) {
-        depth = null;
+        depth = overlay = null;
+        delete snapshot.plane;
+        delete snapshot.unclassified_obstacles;
         snapshot.stereo_status = 'waiting_for_a';
         delete snapshot.depth_range_m;
         delete snapshot.center_m;
-        for (const object of snapshot.objects ?? []) delete object.depth_m;
+        for (const object of snapshot.objects ?? []) {
+          delete object.depth_m;
+          delete object.nearest_depth_m;
+          delete object.height_above_plane_m;
+        }
       }
       const canvas = feed.node.querySelector('canvas');
       scope.cancelDelay(feed.expiry);
@@ -98,7 +111,8 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       feed.etag = response.headers.get('etag');
       const hasDetections = feed.objects != null || snapshot.objects != null;
       feed.objects = hasAnalysis ? snapshot.objects : null;
-      if (feed.side === 'A') VisionPerceptionView.showDepth(snapshot,hasAnalysis || snapshot.depth_expires_ms > Date.now() ? depth : null,sampleMode);
+      if (feed.side === 'A') VisionPerceptionView.showDepth(
+        snapshot,hasAnalysis || snapshot.depth_expires_ms > Date.now() ? depth : null,sampleMode,overlay);
       feed.rtc.update(Boolean(snapshot.webrtc));
       feed.rtc.updateAnalysis(hasAnalysis && hasBoxes);
       setFeed(feed,true);
@@ -134,10 +148,14 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     const version = ++pollVersion;
     if (sampleMode || !isMonitor()) return;
     feeds.forEach(feed => setFeed(feed,false));
-    if (!session.token) return;
+    if (!session.token) { scene.clear(); return; }
     async function poll(feed) {
       if (version !== pollVersion) return;
-      if (!session.token) { setFeed(feed,false,'Pair the phone again.'); return; }
+      if (!session.token) {
+        if (feed.side === 'A') scene.clear();
+        setFeed(feed,false,'Pair the phone again.');
+        return;
+      }
       await readFrame(feed,version);
       if (version === pollVersion) scope.delay(() => poll(feed),feed.side === 'A' ? 100 : feed.rtc.playing ? 450 : 220);
     }
@@ -147,6 +165,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   function renderMode(demo) {
     onModeChange();
     sampleMode = demo;
+    if (demo) scene.clear();
     $('#camera-feeds').toggleAttribute('data-live', !demo);
     $('#pixel-preview').hidden = demo;
     $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
@@ -188,7 +207,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   });
   scope.signal.addEventListener('abort',clearReplay,{once:true});
   listen($('#depth-palette'), 'change', VisionPerceptionView.repaintDepth);
-  for (const id of ['depth-algorithm','depth-spatial','depth-temporal','depth-meters']) {
+  for (const id of ['depth-algorithm','depth-spatial','depth-temporal','depth-meters','depth-plane-overlay']) {
     listen($('#'+id), 'change', () => {
       refreshPolling();
       VisionPerceptionView.renderDetections(sampleMode, feeds);
@@ -220,6 +239,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   VisionPerceptionView.showDepth(null, null, sampleMode);
   return {refreshPolling, stopPolling() {
     ++pollVersion;
+    scene.clear();
     feeds.forEach(feed => feed.rtc.update(false));
   }, paired() { if (sampleMode) renderMode(false); else refreshPolling(); }};
 }

@@ -6,6 +6,7 @@ const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 const DETECTION_SCHEMA_VERSION = 1;
+const SCENE_MAX_AGE = 750;
 const movingLabels = new Map(Object.entries({
   person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
 }));
@@ -25,6 +26,9 @@ function obstacleSpeech({label, position, risk, depth_m}) {
     text_zh:(urgent ? '注意，' : '小心，') + whereZh + (meters ? '约' + meters + '米' : '') + '有' + name + '。'
   };
 }
+const staticObstacleLabels = new Set([
+  'building','wall','fence','pole','traffic_light','traffic_sign','vegetation','terrain','unknown'
+]);
 
 
 function validItemFeature(feature) {
@@ -66,15 +70,55 @@ function validItemFeature(feature) {
 }
 
 
+function validBox(box) {
+  return Array.isArray(box) && box.length === 4 &&
+    box.every(value => Number.isFinite(value) && value >= 0 && value <= 1) &&
+    box[0] < box[2] && box[1] < box[3];
+}
+
+function parsePlane(raw, paired) {
+  if (typeof raw?.validated !== 'boolean' || (raw.validated && !paired) ||
+      typeof raw.reason !== 'string' || !/^[a-z_]{1,48}$/.test(raw.reason)) return;
+  const plane = {validated:raw.validated,reason:raw.reason};
+  if (paired) {
+    const ranges = {pitch_deg:[-90,90],roll_deg:[-180,180],inlier_ratio:[0,1],holdout_p90_m:[0,Infinity]};
+    for (const [key,[min,max]] of Object.entries(ranges)) {
+      if (Number.isFinite(raw[key]) && raw[key] >= min && raw[key] <= max) plane[key] = raw[key];
+    }
+  }
+  return plane;
+}
+
+function parseProtrusions(raw) {
+  if (!Array.isArray(raw)) return;
+  return raw.slice(0,12).filter(v => validBox(v?.bbox) && Number.isFinite(v.depth_m) && v.depth_m > 0 &&
+    Number.isFinite(v.height_above_plane_m) && v.height_above_plane_m > 0)
+    .map(({bbox,depth_m,height_above_plane_m,semantic_label,semantic_confidence}) => ({
+      bbox,depth_m,height_above_plane_m,
+      ...(staticObstacleLabels.has(semantic_label) ? {semantic_label} : {}),
+      ...(staticObstacleLabels.has(semantic_label) && semantic_label !== 'unknown' &&
+          Number.isFinite(semantic_confidence) && semantic_confidence >= .5 && semantic_confidence <= 1
+        ? {semantic_confidence} : {})
+    }));
+}
+
+function validPlaneOverlay(value) {
+  if (typeof value !== 'string' || value.length > 128000 || value.length < 44 ||
+      value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
+  const header = Buffer.from(value.slice(0,44),'base64');
+  return header.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex')) &&
+    header.toString('ascii',12,16) === 'IHDR' &&
+    [header.readUInt32BE(16),header.readUInt32BE(20)].every(size => size > 0 && size <= 240) &&
+    header[24] === 8 && [4,6].includes(header[25]);
+}
+
 function parseObjects(objects) {
   if (!Array.isArray(objects) || objects.length > 40) return null;
   const results = [];
   for (const entry of objects) {
     if (!entry || typeof entry.label !== 'string' || !/^[\p{L}\p{N} _-]{1,50}$/u.test(entry.label) ||
         !positions.has(entry.position) || !Number.isFinite(entry.confidence) || entry.confidence < 0 || entry.confidence > 1 ||
-        !Array.isArray(entry.bbox) || entry.bbox.length !== 4 ||
-        !entry.bbox.every(value => Number.isFinite(value) && value >= 0 && value <= 1) ||
-        entry.bbox[0] >= entry.bbox[2] || entry.bbox[1] >= entry.bbox[3]) return null;
+        !validBox(entry.bbox)) return null;
     const label = entry.label.toLowerCase();
     const itemFeature = label !== 'person' && entry.confidence >= 0.5 && validItemFeature(entry.item_feature)
       ? {version:entry.item_feature.version,vector:entry.item_feature.vector} : null;
@@ -110,7 +154,7 @@ function createAgentRoutes(options, sessions, read, respond) {
     });
   }
 
-  function cvResponse(req,res,route,requestURL) {
+  async function cvResponse(req,res,route,requestURL) {
     if (!loopback(req.socket.remoteAddress) || req.headers.origin || req.headers['sec-fetch-site']) {
       return error(res,403,'The CV adapter is available to local processes.');
     }
@@ -135,6 +179,32 @@ function createAgentRoutes(options, sessions, read, respond) {
     const session = [...sessions.values()].find(candidate => candidate.assistant && candidate.sourceID === source);
     const slot = ['A','B'].includes(camera) && session?.slots[camera];
     if (!slot) return error(res,404,'Unknown camera or source.');
+    if (route === '/api/cv/segmentation' && req.method === 'POST' && camera === 'A') {
+      const payload = await asJSON(req, 32_000);
+      const captured = slot.cvFrames?.get(payload?.frame_id);
+      const expires = (captured?.sample?.ms ?? captured?.stamp) + SCENE_MAX_AGE;
+      if (session.slots.A !== slot || !recent(captured) || Date.now() >= expires) {
+        return error(res,409,'The segmentation frame is stale or the camera was replaced.');
+      }
+      if (slot.segmentation?.frame_id === payload.frame_id) return res.writeHead(204).end();
+      if (slot.segmentation?.timestamp_ms >= captured.stamp) return error(res,409,'A newer mask is already available.');
+      const {width, height, mask} = payload;
+      if (![width,height].every(n => Number.isSafeInteger(n) && n > 0 && n <= 16384) ||
+          typeof mask !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(mask)) {
+        return error(res,400,'Invalid segmentation dimensions or mask.');
+      }
+      const png = Buffer.from(mask,'base64');
+      // Keep this a bounded, single-channel label grid, even for HD camera inputs.
+      if (png.length < 45 || png.toString('hex',0,8) !== '89504e470d0a1a0a' ||
+          png.toString('ascii',12,16) !== 'IHDR' || png.readUInt32BE(16) !== 128 ||
+          png.readUInt32BE(20) !== 128 || png[24] !== 8 || png[25] !== 0 ||
+          png.toString('ascii',png.length-8,png.length-4) !== 'IEND') {
+        return error(res,400,'Expected a 128 × 128 grayscale label PNG.');
+      }
+      slot.segmentation = {frame_id:payload.frame_id, timestamp_ms:captured.stamp,
+        expires_ms:expires, width, height, mask};
+      return res.writeHead(204).end();
+    }
     if (route === '/api/cv/frame' && req.method === 'GET') {
       if (!slot.frame || !recent(slot)) return res.writeHead(204).end();
       if (req.headers['if-none-match'] === slot.etag) return res.writeHead(304).end();
@@ -182,6 +252,7 @@ function createAgentRoutes(options, sessions, read, respond) {
         res.setHeader('X-Depth-Spatial',Number(opt.spatial));
         res.setHeader('X-Depth-Temporal',Number(opt.temporal));
         res.setHeader('X-Depth-Meters',Number(opt.meters));
+        if (opt.planeOverlay) res.setHeader('X-Depth-Plane-Overlay','1');
         res.setHeader('X-Depth-Five-Mm',opt.fiveMm);
         res.setHeader('X-Depth-Rig',slot.streamID+'/'+right.streamID);
         res.setHeader('X-Depth-Stamp',left.stamp);
@@ -196,7 +267,7 @@ function createAgentRoutes(options, sessions, read, respond) {
     return error(res,404,'Unknown CV route.');
 
     async function publish() {
-      const payload = await asJSON(req,600_000 + 128_000);
+      const payload = await asJSON(req,600_000 + 2*128_000);
       const objects = parseObjects(payload?.objects);
       const weak = parseObjects(payload?.preview_objects ?? []);
       if (!objects || !weak || typeof payload.frame_id !== 'string') return error(res,400,'Invalid detections.');
@@ -227,13 +298,35 @@ function createAgentRoutes(options, sessions, read, respond) {
           ? payload.stereo.status : 'waiting_for_pair';
       }
       const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
+          (payload.stereo?.frame_id === undefined || payload.stereo.frame_id === payload.frame_id) &&
           (partner.depthOptions?.algorithm ?? 'sgbm') === (payload.stereo?.algorithm ?? 'sgbm') &&
           partner.stream === session.slots.B.streamID;
+      if (camera === 'A') {
+        slot.detection.plane = parsePlane(payload.stereo?.plane, paired);
+      }
       if (paired) {
+        const plane = slot.detection.plane;
+        const preview = payload.stereo.preview;
+        const hasPreview = typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview);
+        if (plane?.validated) {
+          if (hasPreview) slot.detection.unclassifiedObstacles = parseProtrusions(payload.unclassified_obstacles);
+          if (partner.depthOptions?.planeOverlay && session.depthOptions?.planeOverlay &&
+              validPlaneOverlay(payload.stereo.plane_overlay)) {
+            slot.detection.planeOverlay = payload.stereo.plane_overlay;
+          }
+        }
         for (const [i, object] of objects.entries()) {
           const z = payload.objects[i].depth_m;
           const measured = Number.isFinite(z) && z > 0;
-          if (measured && partner.depthOptions?.meters !== false) object.depth_m = z;
+          if (measured && partner.depthOptions?.meters !== false) {
+            object.depth_m = z;
+            const nearest = payload.objects[i].nearest_depth_m;
+            if (hasPreview && Number.isFinite(nearest) && nearest > 0 && nearest <= z) object.nearest_depth_m = nearest;
+          }
+          const height = payload.objects[i].height_above_plane_m;
+          if (plane?.validated && partner.depthOptions?.meters !== false && Number.isFinite(height)) {
+            object.height_above_plane_m = height;
+          }
           const prediction = payload.objects[i].intrusion;
           if (measured && object.track_id && movingLabels.has(object.label) && object.confidence >= .5 &&
               ['left','right'].includes(prediction?.from_side) && Number.isFinite(prediction.eta_s) &&
@@ -245,8 +338,7 @@ function createAgentRoutes(options, sessions, read, respond) {
             };
           }
         }
-        const preview = payload.stereo.preview;
-        if (typeof preview === 'string' && preview.length <= 128000 && /^[A-Za-z0-9+/]+={0,2}$/.test(preview)) {
+        if (hasPreview) {
           slot.detection.stereoPartner = partner;
           slot.detection.depthPreview = preview;
           const center = payload.stereo.center_m;

@@ -1,6 +1,6 @@
 # Visual Obstacle Avoidance
 
-> **Status:** This branch runs the desktop Dashboard, paired JPEG camera preview and local LLM Agent. Live YOLO results come from a separate CV process using the adapter documented below.
+> **Current CV integration:** `cv-stereo-depth-map` runs paired WebRTC cameras, Camera A YOLO, stereo depth, support-plane fitting, semantic segmentation and synchronized recording comparison on the local dashboard. See the [current handoff](cv/STEREO-HANDOFF-2026-11-19.md) for the active 8775 configuration, reproducible commands and evaluation limits.
 
 ## Overview
 
@@ -24,7 +24,7 @@ Smartphone A + Smartphone B
         +----------------------------------> STT / TTS voice feedback
 ```
 
-All components above describe the **planned architecture**, not completed functionality. Low-latency obstacle warnings should follow defined CV rules rather than waiting for an LLM response.
+The diagram records the original project plan. The current handoff documents what has been integrated and tested. Low-latency obstacle warnings follow CV rules independently of the language model.
 
 ## Teams and Branches
 

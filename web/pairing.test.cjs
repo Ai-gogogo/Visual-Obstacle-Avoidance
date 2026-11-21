@@ -245,3 +245,173 @@ test('a paused phone keeps its pairing and rejoins without a new code', async t 
   assert.equal((await cameras()).A,'offline');
   assert.equal((await call('/api/rejoin','POST',replaced.token)).status,401);
 });
+
+test('paired depth fields and plane overlays survive only on the matched frame', async t => {
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const call = (url, method='GET', token, body, extra={}) => fetch(base+url, {
+    method, body, headers:{...(token ? {Authorization:'Bearer '+token} : {}), ...extra}
+  });
+  const post = (url, token, data) => call(url,'POST',token,JSON.stringify(data),{'Content-Type':'application/json'});
+  const {token:desk} = await (await post('/api/session')).json();
+  async function pair(side) {
+    const {code} = await (await post('/api/pair/'+side,desk)).json();
+    return (await (await post('/api/join',undefined,{code})).json()).token;
+  }
+  const a = await pair('A'), b = await pair('B');
+  assert.equal((await call('/api/agent/alerts','GET',desk)).status,200);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN5sAAAAASUVORK5CYII=';
+  const plane = {validated:true,reason:'ok',pitch_deg:12.3456,roll_deg:-.04,inlier_ratio:.85,holdout_p90_m:.012};
+  const box = {bbox:[.4,.4,.6,.7],depth_m:1.2,height_above_plane_m:.14};
+  const object = {...box,label:'cup',position:'center',confidence:.9,nearest_depth_m:.9};
+  const objects = [{...object,mask:[[1]],semantic_map:[[5]]},
+    {...object,nearest_depth_m:1.3}, {...object,nearest_depth_m:[.7]}];
+  const pole = {...box,semantic_label:'pole',semantic_confidence:.83};
+  const unknown = {...box,semantic_label:'unknown'};
+  const road = {level:'visual',point:[.5,.6],curb_drop_m:.12,curb_confidence:'supported'};
+  const preview = (opts, etag) => call('/api/preview/A','GET',desk,undefined,{
+    'X-Depth-Options':JSON.stringify(opts), ...(etag ? {'If-None-Match':etag} : {})
+  });
+  async function publish(opts, stereoExtras, edge=road) {
+    t.mock.timers.tick(100);
+    for (const phone of [b,a]) {
+      const result = await call('/api/frame','PUT',phone,Buffer.from([255,216,11,255,217]), {
+        'Content-Type':'image/jpeg','X-Sample-Ms':String(Date.now()),'X-Clock-Error-Ms':'2'
+      });
+      assert.equal(result.status,204);
+    }
+    await preview(opts);
+    const {sources} = await (await call('/api/cv/sources')).json();
+    const query = '?camera_id=A&source_id='+sources.find(s => s.camera_id === 'A').source_id;
+    const frame = await call('/api/cv/frame'+query);
+    const frame_id = frame.headers.get('etag').slice(1,-1);
+    const partner = await call('/api/cv/stereo-partner'+query+'&frame_id='+frame_id+'&max_skew_ms=65');
+    assert.equal(partner.status,200);
+    assert.equal(partner.headers.get('x-depth-plane-overlay'),opts.planeOverlay ? '1' : null);
+    const stereo = {status:'ready',partner_id:partner.headers.get('x-partner-id'),preview:png,...stereoExtras};
+    const accepted = await post('/api/cv/detections'+query,undefined,{
+      frame_id,objects,stereo:{...stereo,semantic_map:[[5]]},
+      unclassified_obstacles:[{...pole,mask:[[1]],semantic_map:[[5]]},
+        {...unknown,semantic_confidence:.99}, {...box,semantic_label:'unlisted',semantic_confidence:.8},
+        {...box,semantic_label:'wall',semantic_confidence:2}, {...box,depth_m:-1}],
+      semantic_map:[[5]],road_edge:edge
+    });
+    assert.equal(accepted.status,204);
+    return preview(opts);
+  }
+
+  const off = {meters:true};
+  const on = {...off,planeOverlay:true};
+  function noPairedMetrics(result) {
+    assert.equal(Object.hasOwn(result,'unclassified_obstacles'),false);
+    assert.ok((result.objects ?? []).every(obj => !Object.hasOwn(obj,'nearest_depth_m')));
+  }
+  const matched = await publish(off,{plane,plane_overlay:png});
+  let result = await matched.json();
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.deepEqual(result.plane,plane);
+  assert.equal(result.objects[0].height_above_plane_m,.14);
+  assert.equal(result.objects[0].nearest_depth_m,.9);
+  assert.ok(result.objects.slice(1).every(obj => !Object.hasOwn(obj,'nearest_depth_m')));
+  assert.deepEqual(result.unclassified_obstacles,[pole,unknown,box,{...box,semantic_label:'wall'}]);
+  assert.doesNotMatch(JSON.stringify(result), /"(?:mask|semantic_map)":/);
+  assert.deepEqual(result.road_edge,road);
+
+  const hiddenMeters = await preview({meters:false},matched.headers.get('etag'));
+  assert.equal(hiddenMeters.status,200);
+  assert.ok((await hiddenMeters.json()).objects.every(obj => !Object.hasOwn(obj,'nearest_depth_m')));
+
+  let response = await publish(on,{plane,plane_overlay:png});
+  const withOverlay = response.headers.get('etag');
+  result = await response.json();
+  assert.equal(result.plane_overlay,png);
+  assert.equal(result.depth_frame_id,result.frame_id);
+  response = await preview(off,withOverlay);
+  assert.equal(response.status,200);
+  assert.equal(Object.hasOwn(await response.json(),'plane_overlay'),false);
+
+  result = await (await publish({meters:false,planeOverlay:true},{plane,plane_overlay:'not-a-png'})).json();
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'nearest_depth_m'),false);
+
+  result = await (await publish(on,{plane:{validated:false,reason:'low_inlier_ratio',inlier_ratio:7},plane_overlay:png})).json();
+  assert.deepEqual(result.plane,{validated:false,reason:'low_inlier_ratio'});
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.equal(Object.hasOwn(result,'unclassified_obstacles'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+  assert.equal(result.objects[0].nearest_depth_m,.9);
+
+  noPairedMetrics(await (await publish(on,{plane,partner_id:'other-b-frame'})).json());
+  noPairedMetrics(await (await publish(on,{plane,frame_id:'other-a-frame'})).json());
+  noPairedMetrics(await (await publish(on,{plane,preview:'invalid depth preview'})).json());
+
+  const raft = {...on,algorithm:'raft'};
+  result = await (await publish(raft,{plane,algorithm:'raft'})).json();
+  assert.equal(result.objects[0].nearest_depth_m,.9);
+  t.mock.timers.tick(800);
+  result = await (await preview(on)).json();
+  assert.ok(result.depth_frame_id);
+  noPairedMetrics(result);
+  t.mock.timers.tick(2800);
+  result = await (await preview(raft)).json();
+  assert.equal(Object.hasOwn(result,'depth_frame_id'),false);
+  noPairedMetrics(result);
+
+  await publish(on,{plane,plane_overlay:png});
+  assert.equal((await call('/api/frame','DELETE',b)).status,204);
+  result = await (await preview(on)).json();
+  assert.equal(Object.hasOwn(result,'plane'),false);
+  assert.equal(Object.hasOwn(result,'plane_overlay'),false);
+  assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
+  noPairedMetrics(result);
+  assert.deepEqual(result.road_edge,{level:'visual',point:[.5,.6]});
+});
+
+
+test('Camera A scene masks are private, tied to sampled frames and expire', async t => {
+  t.mock.timers.enable({apis:['Date'], now:Date.now()});
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:'+server.address().port;
+  const call = (route, method='GET', token, body, extra={}) => fetch(base+route,{
+    method,body,headers:{...(token ? {Authorization:'Bearer '+token} : {}),...extra}
+  });
+  const read = async (response, status) => {
+    assert.equal(response.status,status);
+    return response.json();
+  };
+  const {token:desk} = await read(await call('/api/session','POST'),201);
+  const {code} = await read(await call('/api/pair/A','POST',desk),201);
+  const {token:a,sourceID} = await read(await call('/api/join','POST',undefined,
+    JSON.stringify({code}),{'Content-Type':'application/json'}),200);
+  assert.equal((await call('/api/agent/alerts','GET',desk)).status,200);
+  assert.equal((await call('/api/frame','PUT',a,Buffer.from([255,216,11,255,217]),
+    {'Content-Type':'image/jpeg'})).status,204);
+  const query = '?camera_id=A&source_id='+sourceID;
+  const captured = await call('/api/cv/frame'+query);
+  assert.equal(captured.status,200);
+  const frameId = captured.headers.get('etag').slice(1,-1);
+  const mask = 'iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAAAAADmVT4XAAAAW0lEQVR42u3OMQEAAAgDoKn9OxtjDyRgLl0bAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQGBsgdD7AED8nNciQAAAABJRU5ErkJggg==';
+  const postScene = png => call('/api/cv/segmentation'+query,'POST',undefined,
+    JSON.stringify({frame_id:frameId,width:480,height:640,mask:png}),{'Content-Type':'application/json'});
+  assert.equal((await postScene('AA==')).status,400);
+  assert.equal((await postScene(mask)).status,204);
+  assert.equal((await call('/api/segmentation/A','GET',a)).status,401);
+  const scene = await read(await call('/api/segmentation/A','GET',desk),200);
+  assert.equal(scene.frame_id,frameId);
+  assert.equal(scene.mask,mask);
+  const previewTag = (await call('/api/preview/A','GET',desk)).headers.get('etag');
+  const unchanged = await call('/api/preview/A','GET',desk,undefined,{'If-None-Match':previewTag});
+  assert.equal(unchanged.status,304);
+  assert.equal(unchanged.headers.get('X-Segmentation-Frame'),frameId);
+  t.mock.timers.tick(751);
+  assert.equal((await call('/api/segmentation/A','GET',desk)).status,204);
+  assert.equal((await postScene(mask)).status,409);
+});

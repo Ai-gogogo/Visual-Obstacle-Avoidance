@@ -32,12 +32,13 @@ export function createPerceptionView($, signal) {
       spatial: $('#depth-spatial').checked,
       temporal: $('#depth-temporal').checked,
       meters: $('#depth-meters').checked,
+      ...($('#depth-plane-overlay').checked ? {planeOverlay:true} : {}),
       fiveMm: 73.025 // Measured span of five printed squares (2⅞ inches), in mm.
     };
   }
 
   function repaintDepth() {
-    if (lastDepthFrame && $('#depth-hold-status').hidden) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false);
+    if (lastDepthFrame && $('#depth-hold-status').hidden) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false, lastDepthFrame.overlay);
   }
 
   function makeAnnotations(feeds) {
@@ -83,14 +84,32 @@ export function createPerceptionView($, signal) {
     $('#detection-measure').textContent = sampleMode ? 'Distance' : 'Confidence';
     $('#detection-count').textContent = waiting ? 'Waiting' :
       list.length + (list.length === 1 ? ' object' : ' objects');
-    $('.table-wrap').hidden = !list.length;
     $('#empty-detections').hidden = Boolean(list.length);
     $('#empty-detections').textContent = waiting ? 'Waiting for camera detections.' :
       'No objects detected in the processed views.';
   }
 
-  function showDepth(snapshot, preview, sampleMode) {
+  function showDepth(snapshot, preview, sampleMode, overlay=null) {
     clearTimeout(holdTimer);
+    const plane = sampleMode ? null : snapshot?.plane;
+    const opt = depthOptions();
+    const protrusions = preview && plane?.validated && opt.planeOverlay &&
+      snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id
+      ? (snapshot.unclassified_obstacles ?? [])
+        .filter(item => item.semantic_label && item.semantic_label !== 'unknown' && Number.isFinite(item.depth_m))
+        .sort((a,b) => a.depth_m-b.depth_m)
+        .slice(0,3)
+        .map(item => item.semantic_label.replaceAll('_',' ') + ' ' + item.depth_m.toFixed(1) + 'm')
+      : [];
+    const protrusionStatus = $('#protrusion-status');
+    protrusionStatus.textContent = protrusions.join(' · ');
+    protrusionStatus.hidden = !protrusions.length;
+    const planeStatus = $('#plane-status');
+    planeStatus.hidden = !plane;
+    planeStatus.textContent = plane ? [plane.validated ? 'Plane OK' : 'Plane Rejected',
+      Number.isFinite(plane.pitch_deg) ? 'Pitch '+plane.pitch_deg.toFixed(1)+'°' : null,
+      Number.isFinite(plane.holdout_p90_m) ? 'P90 '+(1000*plane.holdout_p90_m).toFixed(1)+' mm' : null
+    ].filter(Boolean).join(' · ') : '';
     const notice = $('#depth-hold-status');
     notice.hidden = true;
     const age = lastDepthFrame ? Date.now() - (lastDepthFrame.snapshot.depth_timestamp_ms ?? lastDepthFrame.snapshot.timestamp_ms) : Infinity;
@@ -107,7 +126,7 @@ export function createPerceptionView($, signal) {
       holdTimer = setTimeout(() => showDepth(snapshot,null,false),Math.min(500,3500-age));
       return;
     }
-    lastDepthFrame = preview ? {snapshot, preview} : null;
+    lastDepthFrame = preview ? {snapshot, preview, overlay} : null;
     const status = snapshot?.stereo_status ?? (snapshot?.objects ? 'uncalibrated' : 'waiting_for_a');
     const messages = {
       waiting_for_a:'Waiting for a processed Camera A frame.',
@@ -138,7 +157,6 @@ export function createPerceptionView($, signal) {
     const [near, far] = snapshot?.depth_range_m ?? [];
     const palette = $('#depth-palette').value;
     const [nearColor,farColor] = {gray:['bright','dark'],turbo:['red','purple'],viridis:['yellow','purple']}[palette];
-    const opt = depthOptions();
     $('#depth-reading').textContent = !opt.meters ? '' : near
       ? (Number.isFinite(snapshot.center_m) ? 'Center: '+snapshot.center_m.toFixed(2)+' m' : 'Center: no reliable depth')
       : 'Waiting for measured depth…';
@@ -163,6 +181,7 @@ export function createPerceptionView($, signal) {
         }
         ctx.putImageData(frame,0,0);
       }
+      if (overlay && opt.planeOverlay) ctx.drawImage(overlay,0,0,canvas.width,canvas.height);
       canvas.dataset.frameId = snapshot.depth_frame_id ?? snapshot.frame_id;
       if (snapshot.depth_expires_ms) {
         const lag = Math.max(0, Date.now()-snapshot.depth_timestamp_ms);
@@ -191,8 +210,18 @@ export function createPerceptionView($, signal) {
       ctx.setLineDash(object.weak ? [5,3] : []);
       ctx.strokeRect(x, y, (x2-x1)*width, (y2-y1)*height);
       ctx.setLineDash([]);
-      let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position +
-        ($('#depth-meters').checked && Number.isFinite(object.depth_m) ? ' · ' + object.depth_m.toFixed(2) + ' m' : '');
+      let caption = trackedLabel(object) + ' · ' + Math.round(confidence*100) + '% · ' + position;
+      if ($('#depth-meters').checked) {
+        if (Number.isFinite(object.depth_m)) caption += ' · '+object.depth_m.toFixed(2)+' m';
+        if (Number.isFinite(object.height_above_plane_m)) caption += ' · H '+object.height_above_plane_m.toFixed(2)+' m';
+        const nearest = object.nearest_depth_m;
+        if (snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id &&
+            Number.isFinite(object.depth_m) && Number.isFinite(nearest) &&
+            nearest > 0 && nearest <= .85*object.depth_m &&
+            object.depth_m-nearest >= .20) {
+          caption += ' · min '+nearest.toFixed(2)+'m';
+        }
+      }
       if (object.intrusion && object.intrusion.expires > Date.now()) {
         caption += ' · may cross from '+object.intrusion.from_side+' (~'+object.intrusion.eta_s.toFixed(1)+' s)';
       }

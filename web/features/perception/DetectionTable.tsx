@@ -37,10 +37,10 @@ export function DetectionTable() {
           </thead>
           <tbody id="detection-rows"></tbody>
         </table>
+        <p className="empty" id="empty-detections" hidden>
+          Waiting for camera detections.
+        </p>
       </div>
-      <p className="empty" id="empty-detections" hidden>
-        Waiting for camera detections.
-      </p>
     </section>
   );
 }

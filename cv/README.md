@@ -18,6 +18,18 @@ The official YOLO11n detection checkpoint used here has SHA-256 `0ebbc80d4a7680d
 
 ## Run on one image
 
+The single-image and live commands also accept `--weights cv/models/yolo11n-seg.pt`.
+Download the optional checkpoint for instance masks and the real-model segmentation test:
+
+```sh
+curl -fL https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt -o cv/models/yolo11n-seg.pt
+```
+
+Its SHA-256 is `55ed65c56c91713d23e8402371c6c49a6fd84f257f7dce452e8d70e41dcbe152`.
+In Python, `detect(model, image, return_masks=True)` returns `(objects, masks)`.
+Each boolean mask follows the corresponding object's index and the input image's height and width.
+Detection-only weights and empty predictions return `None` for masks. JSON output contains only the object metadata.
+
 ```sh
 python cv/detect_image.py path/to/photo.jpg --output cv/results/my-photo
 ```
@@ -325,6 +337,27 @@ road, sidewalk = estimator.segment(image.convert("RGB"), estimator.confidence)
 Chrome 实时深度图提供三个独立开关，初始均关闭。Edge-aware filter 在逆深度图上以左图灰度引导加权最小二乘平滑，仅插补至少有三个相容邻点的小孔。Temporal median 使用同一对摄像头近期的三帧，在局部亮度和深度均稳定时取中值。滤波影响预览；距离只取原始有效双目观测。黑色表示当前仍未知。
 
 Show meters 显示相对于 Camera A 光轴的前向距离。若标定 JSON 带有 `"units":"checker_squares_only"`，在页面输入同一张棋盘连续五格的**实测总毫米数**，转换系数为该数除以 5000。未量格长时保持空白。公制标定直接使用米。对准中心圆圈可读该点的距离；目标框内的距离沿用项目的可靠深度聚合。没有足够观测时显示未知。输入的尺度适用于当前页面会话；更换镜头、机位或标定后请重新核对。
+
+## 实时支撑平面与调试叠层
+
+用 `--plane-ransac`（或在 [road_config.json](road_config.json) 设置 `plane.enabled`）启用支撑平面拟合。拟合与 3D 几何使用原始公制深度，WLS 和时间中值用于显示。独立中央留区门控通过时，控制台显示 **Plane OK**、估计俯仰角和留区 P90。开启 **Show meters** 后，适用的框标签同时显示前向距离和离面高度。
+
+**Show plane overlay** 默认关闭。开启时，训练内点和通过误差门槛的中央留区点标绿，超过误差带的有效凸起标橙。橙色默认从至少 0.05 m 起，到 2.0 m 为止。它展示逐帧几何，告警由 3D 走廊和风险规则单独判断。失去有效平面或深度时走 2D 降级。路沿和横穿的动态姿态可在有效 PnP 的支持下短暂沿用，默认最多 500 ms。
+
+## Camera A 室内外语义分割
+
+在仓库根目录下载固定版本的 ADE20K SegFormer-B0 权重，然后启动已有的 CV 进程。已有的双目标定和服务器参数可加在同一个命令上。
+
+```sh
+mkdir -p cv/models
+curl -fL https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/resolve/1e78fb9c976ebbac92d859ef6d7aae4253da869e/onnx/model.onnx -o cv/models/scene-segformer-b0.onnx
+echo '3e5c18a4be395f16646438d54c42377ddc202edfa33d5eced0c9506de75c44c2  cv/models/scene-segformer-b0.onnx' | shasum -a 256 -c -
+cv/.venv/bin/python cv/live_camera.py --scene-segmentation
+```
+
+配对 Camera A 后，实时仪表盘的 **Camera A segmentation** 显示最近一次分割和面积最大的八类。短暂缺结果时保留上一张图，标记 **Last result · waiting for update**。模型识别 150 类，包括地板、桌子、车行道和人行道。后台线程默认最多每秒开始三次推理，每个来源仅保留一张待处理的新帧。用 `--scene-fps 2` 可降低更新率。`--road-alerts` 使用现有 Cityscapes 专用模型，两项同时启用时各自执行推理。
+
+使用桌面会话的 Bearer token 读取 `GET /api/segmentation/A`。响应中的 `mask` 是 Base64 编码的 128 × 128 单通道 PNG，像素值 0–149 对应[类别表](../web/public/ade20k-labels.json)，255 表示最高类别概率低于 0.55。用最近邻插值缩放到响应中的原图 `width`、`height`，即可与相同 `frame_id` 的 Camera A 深度对齐。分割结果过期后接口返回 204。
 
 ## 前方车行道边缘预警
 
