@@ -16,8 +16,8 @@ test('reconstructs a continuous tilted surface and preserves original depths', (
   assert.equal(gray[50],0);
 });
 
-test('clamps plane predictions and falls back to the measured median for singular or noisy fits', () => {
-  const scene = {labels:Uint8Array.of(3), width:1, height:1};
+test('keeps the measured range and median fallback for nonplanar classes', () => {
+  const scene = {labels:Uint8Array.of(19), width:1, height:1};
   const slope = Uint8Array.from({length:64}, (_,i) => i < 24 ? 80 + 2*Math.floor(i / 8) : 0);
   assert.equal(fuseDepth(slope,8,8,scene).depth[63],84);
   const line = Uint8Array.from({length:64}, (_,i) => i < 16 ? 80 + i : 0);
@@ -134,16 +134,16 @@ test('uses the buffered closest mask while the segmentation stream is fresh', ()
 test('propagates labels into a depth-continuous patch and fills an enclosed one-pixel hole', () => {
   const width = 9;
   const gray = new Uint8Array(width * width).fill(90);
-  const labels = new Uint8Array(gray.length).fill(3);
+  const labels = new Uint8Array(gray.length).fill(19);
   for (let y = 2; y <= 6; y++) labels.fill(255,y*width+2,y*width+7);
   const middle = 4*width+4;
   const scene = {labels, width, height:width};
   const restored = fuseDepth(gray,width,width,scene);
-  assert.equal(restored.labels[middle],3);
+  assert.equal(restored.labels[middle],19);
   assert.equal(restored.labelFillCount,25);
   gray[middle] = 0;
   const withHole = fuseDepth(gray,width,width,scene);
-  assert.equal(withHole.labels[middle],3);
+  assert.equal(withHole.labels[middle],19);
   assert.equal(withHole.depth[middle],90);
   assert.equal(gray[middle],0);
 });
@@ -155,4 +155,113 @@ test('draws a subtle one-pixel edge only at class changes with a depth jump', ()
   const rgba = new Uint8ClampedArray(12);
   paintFusedDepth(result,rgba);
   assert.deepEqual([rgba[0],rgba[4],rgba[8]],[100,105,135]);
+});
+
+test('extends a qualifying tilted door through the upper-left blind area, with bounded extrapolation', () => {
+  const width = 30, height = 20;
+  const gray = Uint8Array.from({length:width*height}, (_, i) => {
+    const x = i % width, y = Math.floor(i / width);
+    return x < 8 || y < 4 ? 0 : 58 + 3*x + 2*y;
+  });
+  const scene = {labels:Uint8Array.of(14), width:1, height:1};
+  const result = fuseDepth(gray,width,height,scene);
+  assert.equal(result.filledCount,gray.filter(value => value === 0).length);
+  assert.equal(result.depth[0],58);
+  assert.equal(result.depth[1],61);
+  assert.equal(result.depth[width],60);
+  assert.equal(result.depth[4*width+8],gray[4*width+8]);
+  const nonplanar = fuseDepth(gray,width,height,{...scene,labels:Uint8Array.of(19)});
+  assert.equal(nonplanar.depth[0],0);
+  const steeper = Uint8Array.from({length:width*height}, (_,i) =>
+    i%width < 11 ? 0 : 10 + 6*(i%width));
+  assert.equal(fuseDepth(steeper,width,height,scene).depth[0],44);
+});
+
+test('rejects a mixed-depth stair and a second plane that only passes the RMSE gate', () => {
+  const width = 20, height = 20;
+  const scene = {labels:Uint8Array.of(14), width:1, height:1};
+  const steps = Uint8Array.from({length:width*height}, (_,i) =>
+    i < 16*width ? i%width < 10 ? 80 : 160 : 0);
+  assert.equal(fuseDepth(steps,width,height,scene).filledCount,0);
+
+  // Balanced ±6 residuals have RMSE 6 and IQR 12, independent of x and y.
+  const nearSteps = Uint8Array.from({length:width*height}, (_,i) =>
+    i < 16*width ? (i % width + Math.floor(i/width)) % 2 ? 92 : 80 : 0);
+  assert.equal(fuseDepth(nearSteps,width,height,scene).filledCount,0);
+});
+
+test('fills only the bounded Uncertain groups enclosed by one accepted door', () => {
+  const width = 24, height = 20;
+  const labels = new Uint8Array(width*height).fill(14);
+  const gray = new Uint8Array(labels.length).fill(100);
+  const unseen = (x,y) => {
+    const index = y*width+x;
+    labels[index] = 255;
+    gray[index] = 0;
+    return index;
+  };
+  const inside = [unseen(4,5),unseen(5,5),unseen(4,6),unseen(5,6)];
+  const frameEdge = [unseen(9,0),unseen(9,1),unseen(9,2)];
+  const otherClass = [unseen(7,12),unseen(8,12)];
+  labels[12*width+9] = 0;
+  const large = [];
+  for (let y = 6; y <= 16; y++) {
+    for (let x = 13; x <= 21; x++) large.push(unseen(x,y));
+  }
+  const result = fuseDepth(gray,width,height,{labels,width,height});
+  assert.deepEqual(inside.map(i=>result.depth[i]),[100,100,100,100]);
+  assert.ok([...frameEdge,...otherClass,...large].every(i => result.depth[i] === 0 && result.labels[i] === 255));
+  assert.equal(result.filledCount,4);
+});
+
+test('measured label propagation cannot seal an Uncertain path to the canvas edge', () => {
+  const width = 12, height = 12;
+  const labels = new Uint8Array(width*height).fill(14);
+  const gray = new Uint8Array(labels.length).fill(96);
+  const opening = [6,18,30,42,54,55];
+  for (const index of opening) labels[index] = 255;
+  gray[54] = gray[55] = 0;
+  const result = fuseDepth(gray,width,height,{labels,width,height});
+  assert.equal(result.labels[6],14);
+  assert.equal(result.depth[6],96);
+  assert.equal(result.depth[54],0);
+  assert.equal(result.depth[55],0);
+});
+
+test('an Uncertain ring bordering two separate regions of the same planar class stays open', () => {
+  const width = 20, height = 20;
+  const labels = new Uint8Array(width*height).fill(14);
+  const gray = new Uint8Array(labels.length).fill(100);
+  for (let y = 7; y <= 12; y++) {
+    for (let x = 7; x <= 12; x++) {
+      if (x === 7 || x === 12 || y === 7 || y === 12) labels[y*width+x] = 255;
+    }
+  }
+  const hole = 7*width+9;
+  gray[hole] = 0;
+  const result = fuseDepth(gray,width,height,{labels,width,height});
+  assert.equal(result.depth[hole],0);
+  assert.equal(result.labels[hole],255);
+});
+
+test('accepts a plane exactly at the RMSE limit', () => {
+  const width = 32, height = 5;
+  const gray = new Uint8Array(width*height);
+  const noise = [12,-12,-12,12];
+  for (let y = 0; y < 3; y++) {
+    for (let x = y === 0 ? 16 : 0; x < (y === 0 ? 32 : 16); x++) {
+      gray[y*width+x] = 60 + x + y + (noise[x%16] ?? 0);
+    }
+  }
+  const result = fuseDepth(gray,width,height,{labels:Uint8Array.of(14),width:1,height:1});
+  assert.equal(result.filledCount,112);
+  assert.equal(result.depth[0],60);
+});
+
+test('offline Buffer inputs produce the browser result without changing measured input bytes', () => {
+  const scene = {labels:Uint8Array.of(14),width:1,height:1};
+  const gray = Buffer.alloc(64).fill(96,0,24);
+  const browserInput = new Uint8Array(gray);
+  assert.deepEqual(fuseDepth(gray,8,8,scene),fuseDepth(browserInput,8,8,scene));
+  assert.deepEqual(new Uint8Array(gray),browserInput);
 });

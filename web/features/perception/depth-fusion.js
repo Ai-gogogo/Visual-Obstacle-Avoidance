@@ -4,6 +4,11 @@ const maxSceneAgeMs = 1500;
 const maxFrameSkewMs = 350;
 const labelPropagationRounds = 5;
 const maxPlaneRmse = 6;
+const maxPlaneResidualIqr = 10;
+const residualRoundoff = 1e-9;
+const planeExtrapolation = 32;
+// ADE20K wall, floor, ceiling, windowpane, door.
+const planarLabels = new Set([0, 3, 5, 8, 14]);
 const maxLabelDepthDifference = 12;
 
 function sceneDeadline(scene) {
@@ -61,6 +66,34 @@ function quantile(histogram, count, fraction) {
   }
 }
 
+function selectRank(values, count, rank) {
+  let lo = 0, hi = count - 1;
+  while (lo < hi) {
+    const pivot = values[(lo + hi) >>> 1];
+    let left = lo, right = hi;
+    while (left <= right) {
+      while (values[left] < pivot) left++;
+      while (values[right] > pivot) right--;
+      if (left > right) break;
+      const value = values[left];
+      values[left++] = values[right];
+      values[right--] = value;
+    }
+    if (rank <= right) hi = right;
+    else if (rank >= left) lo = left;
+    else break;
+  }
+  return values[rank];
+}
+
+function residualQuantile(values, count, fraction) {
+  const rank = (count - 1) * fraction;
+  const lower = Math.floor(rank);
+  const low = selectRank(values, count, lower);
+  if (rank === lower) return low;
+  return low + (selectRank(values, count, lower + 1) - low) * (rank - lower);
+}
+
 function visitNeighbors(index, width, length, visit) {
   const x = index % width;
   if (x > 0) visit(index - 1);
@@ -104,7 +137,7 @@ function restoreLabels(labels, gray, width) {
   for (let i = width; i < labels.length - width; i++) {
     if (current[i] !== 255 || gray[i] !== 0 || i % width === 0 || i % width === width - 1) continue;
     const label = current[i - 1];
-    if (label >= 150 || current[i + 1] !== label || current[i - width] !== label || current[i + width] !== label) continue;
+    if (label >= 150 || planarLabels.has(label) || current[i + 1] !== label || current[i - width] !== label || current[i + width] !== label) continue;
     const left = gray[i - 1], right = gray[i + 1], above = gray[i - width], below = gray[i + width];
     const min = Math.min(left, right, above, below);
     const max = Math.max(left, right, above, below);
@@ -115,20 +148,56 @@ function restoreLabels(labels, gray, width) {
   return {labels:next, labelFillCount};
 }
 
+function fillEnclosedUncertain(originalLabels, owners, planes, width, visited, region, fill) {
+  // Follow original Uncertain connectivity; measured label propagation cannot close an open gap.
+  let regionSize, owner;
+  function visit(index) {
+    if (originalLabels[index] === 255) {
+      if (visited[index]) return;
+      visited[index] = 1;
+      region[regionSize++] = index;
+    } else if (owner === undefined) {
+      owner = owners[index];
+    } else if (owners[index] !== owner) {
+      owner = 0;
+    }
+  }
+
+  for (let i = 0; i < originalLabels.length; i++) {
+    if (originalLabels[i] !== 255 || visited[i]) continue;
+    regionSize = 0;
+    owner = undefined;
+    visit(i);
+    for (let head = 0; head < regionSize; head++) {
+      const index = region[head];
+      const x = index % width;
+      if (x === 0 || x === width - 1 || index < width || index >= originalLabels.length - width) owner = 0;
+      visitNeighbors(index, width, originalLabels.length, visit);
+    }
+    const plane = planes[owner];
+    if (!plane || regionSize * 100 > plane.size * 15) continue;
+    for (let pixel = 0; pixel < regionSize; pixel++) fill(region[pixel], plane);
+  }
+}
+
 export function fuseDepth(gray, width, height, scene) {
   if (!scene) return {depth:gray, filled:null, boundary:null, filledCount:0, labelFillCount:0};
 
-  const depth = gray.slice();
+  const depth = new Uint8Array(gray);
   const filled = new Uint8Array(gray.length);
   const boundary = new Uint8Array(gray.length);
-  const {labels, labelFillCount} = restoreLabels(alignLabels(scene, width, height), gray, width);
+  const originalLabels = alignLabels(scene, width, height);
+  let {labels, labelFillCount} = restoreLabels(originalLabels, gray, width);
+  const owners = originalLabels.includes(255) ? new Int32Array(gray.length) : null;
+  const planes = [null];
   const visited = new Uint8Array(gray.length);
   const region = new Int32Array(gray.length);
   const histogram = new Uint32Array(256);
   let filledCount = 0;
-  let label, regionSize;
+  let residuals;
+  let label, planar, regionSize;
   function enqueue(index) {
-    if (labels[index] !== label || visited[index]) return;
+    if (labels[index] !== label || visited[index] || (planar && originalLabels[index] !== label)) return;
     visited[index] = 1;
     region[regionSize++] = index;
   }
@@ -136,7 +205,10 @@ export function fuseDepth(gray, width, height, scene) {
   for (let i = 0; i < labels.length; i++) {
     label = labels[i];
     if (label >= 150 || visited[i]) continue;
-    histogram.fill(0);
+    planar = planarLabels.has(label);
+    // A depth-propagated label cannot bridge two independently fitted planar regions.
+    if (planar && originalLabels[i] !== label) continue;
+    if (!planar) histogram.fill(0);
     let holes = 0, count = 0, min = 255, max = 0;
     let sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, szz = 0;
     regionSize = 0;
@@ -145,7 +217,7 @@ export function fuseDepth(gray, width, height, scene) {
       const index = region[head];
       const z = gray[index];
       if (z >= minMeasuredGray) {
-        histogram[z]++;
+        if (!planar) histogram[z]++;
         count++;
         min = Math.min(min, z);
         max = Math.max(max, z);
@@ -158,8 +230,8 @@ export function fuseDepth(gray, width, height, scene) {
       }
       visitNeighbors(index, width, gray.length, enqueue);
     }
-    if (!holes || count < 16 || count * 100 < regionSize * 15) continue;
-    if (quantile(histogram, count, 0.75) - quantile(histogram, count, 0.25) > maxInterquartileRange) continue;
+    if ((!holes && !(planar && owners)) || count < 16 || count * 100 < regionSize * 15) continue;
+    if (!planar && quantile(histogram, count, 0.75) - quantile(histogram, count, 0.25) > maxInterquartileRange) continue;
 
     // Centering eliminates the intercept from the 3×3 normal equations.
     const meanX = sx / count, meanY = sy / count, meanZ = sz / count;
@@ -172,7 +244,31 @@ export function fuseDepth(gray, width, height, scene) {
       b = (yz * xx - xz * xy) / determinant;
       c = meanZ - a * meanX - b * meanY;
     }
-    if (determinant <= 1e-6 || (zz - a * xz - b * yz) / count > maxPlaneRmse ** 2) {
+    if (planar) {
+      if (determinant <= 1e-6) continue;
+      residuals ??= new Float64Array(gray.length);
+      let offset = 0, squaredError = 0, smallest = Infinity, largest = -Infinity;
+      for (let pixel = 0; pixel < regionSize; pixel++) {
+        const index = region[pixel];
+        if (gray[index] < minMeasuredGray) continue;
+        const residual = gray[index] - (a * (index % width) + b * Math.floor(index / width) + c);
+        residuals[offset++] = residual;
+        squaredError += residual * residual;
+        smallest = Math.min(smallest, residual);
+        largest = Math.max(largest, residual);
+      }
+      if (squaredError / count > maxPlaneRmse ** 2 + residualRoundoff) continue;
+      const iqrLimit = maxPlaneResidualIqr + residualRoundoff;
+      if (largest - smallest > iqrLimit &&
+          residualQuantile(residuals, count, 0.75) - residualQuantile(residuals, count, 0.25) > iqrLimit) continue;
+      min = Math.max(minMeasuredGray, min - planeExtrapolation);
+      max = Math.min(255, max + planeExtrapolation);
+      if (owners) {
+        const owner = planes.length;
+        planes.push({a, b, c, min, max, label, size:regionSize});
+        for (let pixel = 0; pixel < regionSize; pixel++) owners[region[pixel]] = owner;
+      }
+    } else if (determinant <= 1e-6 || (zz - a * xz - b * yz) / count > maxPlaneRmse ** 2) {
       a = b = 0;
       c = quantile(histogram, count, 0.5);
     }
@@ -184,6 +280,19 @@ export function fuseDepth(gray, width, height, scene) {
       filled[index] = 1;
     }
     filledCount += holes;
+  }
+
+  if (planes.length > 1) {
+    visited.fill(0);
+    fillEnclosedUncertain(originalLabels, owners, planes, width, visited, region, (index, plane) => {
+      if (gray[index] !== 0 || filled[index]) return;
+      const value = plane.a * (index % width) + plane.b * Math.floor(index / width) + plane.c;
+      depth[index] = Math.round(Math.min(plane.max, Math.max(plane.min, value)));
+      filled[index] = 1;
+      labels[index] = plane.label;
+      filledCount++;
+      labelFillCount++;
+    });
   }
 
   function hasEdge(index, neighbor) {
