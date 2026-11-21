@@ -5,6 +5,7 @@ const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 const DETECTION_SCHEMA_VERSION = 1;
+const SCENE_MAX_AGE = 750;
 const movingLabels = new Map(Object.entries({
   person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
 }));
@@ -127,7 +128,7 @@ function createAgentRoutes(options, sessions, read, respond) {
     });
   }
 
-  function cvResponse(req,res,route,requestURL) {
+  async function cvResponse(req,res,route,requestURL) {
     if (!loopback(req.socket.remoteAddress) || req.headers.origin || req.headers['sec-fetch-site']) {
       return error(res,403,'The CV adapter is available to local processes.');
     }
@@ -152,6 +153,32 @@ function createAgentRoutes(options, sessions, read, respond) {
     const session = [...sessions.values()].find(candidate => candidate.assistant && candidate.sourceID === source);
     const slot = ['A','B'].includes(camera) && session?.slots[camera];
     if (!slot) return error(res,404,'Unknown camera or source.');
+    if (route === '/api/cv/segmentation' && req.method === 'POST' && camera === 'A') {
+      const payload = await asJSON(req, 32_000);
+      const captured = slot.cvFrames?.get(payload?.frame_id);
+      const expires = (captured?.sample?.ms ?? captured?.stamp) + SCENE_MAX_AGE;
+      if (session.slots.A !== slot || !recent(captured) || Date.now() >= expires) {
+        return error(res,409,'The segmentation frame is stale or the camera was replaced.');
+      }
+      if (slot.segmentation?.frame_id === payload.frame_id) return res.writeHead(204).end();
+      if (slot.segmentation?.timestamp_ms >= captured.stamp) return error(res,409,'A newer mask is already available.');
+      const {width, height, mask} = payload;
+      if (![width,height].every(n => Number.isSafeInteger(n) && n > 0 && n <= 16384) ||
+          typeof mask !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(mask)) {
+        return error(res,400,'Invalid segmentation dimensions or mask.');
+      }
+      const png = Buffer.from(mask,'base64');
+      // Keep this a bounded, single-channel label grid, even for HD camera inputs.
+      if (png.length < 45 || png.toString('hex',0,8) !== '89504e470d0a1a0a' ||
+          png.toString('ascii',12,16) !== 'IHDR' || png.readUInt32BE(16) !== 128 ||
+          png.readUInt32BE(20) !== 128 || png[24] !== 8 || png[25] !== 0 ||
+          png.toString('ascii',png.length-8,png.length-4) !== 'IEND') {
+        return error(res,400,'Expected a 128 × 128 grayscale label PNG.');
+      }
+      slot.segmentation = {frame_id:payload.frame_id, timestamp_ms:captured.stamp,
+        expires_ms:expires, width, height, mask};
+      return res.writeHead(204).end();
+    }
     if (route === '/api/cv/frame' && req.method === 'GET') {
       if (!slot.frame || !recent(slot)) return res.writeHead(204).end();
       if (req.headers['if-none-match'] === slot.etag) return res.writeHead(304).end();

@@ -29,6 +29,7 @@ from path_intrusion import Corridor, Frame, IntrusionPredictor, background_mask,
 from plane_ransac import PlaneEstimate, fit_support_plane, height_above_plane, object_height_m, predict_plane
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
+from scene_segmentation import DEFAULT_SCENE_MODEL, SceneSampler, SceneSegmenter
 from tracking import FrameTracker
 from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
 
@@ -46,7 +47,7 @@ class CameraWorker:
         self, server, model, session, side="A",
         record=None, stereo=None, *, infer=None,
         item_encoder=None, road=None, corridor=None, allow_webrtc_stereo=False,
-        inference_device=None, half=False, plane=None
+        inference_device=None, half=False, plane=None, scene_sampler=None
     ):
         self.side = side
         self.stereo = stereo
@@ -58,6 +59,7 @@ class CameraWorker:
         self.rtc_reference = None
         self.verified_rtc_pair = None
         self.road = road
+        self.scene_sampler = scene_sampler if side == "A" else None
         self.plane = plane if side == "A" else None
         self.corridor = corridor
         self.intrusions = {}
@@ -146,6 +148,8 @@ class CameraWorker:
                 )
                 return
 
+            if self.scene_sampler is not None:
+                self.scene_sampler.offer(source, etag.strip('"'), image)
             candidates = (
                 self.infer(image)
                 if self.infer else detect(self.model, image, confidence=.25)
@@ -584,6 +588,10 @@ def main():
     parser.add_argument("--road-alerts", action="store_true", help="Enable sidewalk-to-road warnings on Camera A")
     parser.add_argument("--plane-ransac", action="store_true", help="Enable metric support plane on Camera A")
     parser.add_argument("--road-config", type=Path, default=DEFAULT_ROAD_CONFIG)
+    parser.add_argument("--scene-segmentation", action="store_true",
+                        help="Show indoor/outdoor ADE20K masks for Camera A")
+    parser.add_argument("--scene-fps", type=float, default=3,
+                        help="Maximum background segmentation rate (default: 3 frames/s)")
     inference_options(parser, default_cpu_threads=None)
     args = parser.parse_args()
     if args.cpu_threads is None:
@@ -628,6 +636,9 @@ def main():
             "and positive thread/poll values."
         )
 
+    if not np.isfinite(args.scene_fps) or args.scene_fps <= 0:
+        parser.error("--scene-fps must be positive and finite")
+
     try:
         device = resolve_device(args.device)
     except ValueError as error:
@@ -671,6 +682,15 @@ def main():
     stop = Event()
     with ExitStack() as stack:
         record = None
+        scene_sampler = None
+        if args.scene_segmentation:
+            try:
+                scene_model = SceneSegmenter(DEFAULT_SCENE_MODEL)
+            except (ImportError, OSError, ValueError, RuntimeError) as error:
+                parser.error(str(error))
+            scene_sampler = SceneSampler(scene_model, args.server.rstrip("/") + "/api/cv", args.scene_fps)
+            scene_sampler.thread.start()
+            stack.callback(scene_sampler.close)
 
         if args.metrics:
             output = stack.enter_context(
@@ -706,7 +726,8 @@ def main():
                 allow_webrtc_stereo=args.allow_webrtc_stereo,
                 inference_device=device,
                 half=args.half,
-                plane=plane
+                plane=plane,
+                scene_sampler=scene_sampler
             )
             for side, infer in zip(sides, predictors)
         ]

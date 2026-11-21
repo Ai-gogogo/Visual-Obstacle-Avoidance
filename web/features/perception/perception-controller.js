@@ -1,9 +1,11 @@
 import { createPerceptionView } from "./perception-view";
 import { createRtcPreview } from "./rtc-preview";
+import { createScenePreview } from "./scene-preview";
 
 export function createPerceptionController({$, scope, root, session, isMonitor, onModeChange}) {
   const {listen} = scope;
   const VisionPerceptionView = createPerceptionView($, scope.signal);
+  const scene = createScenePreview($, () => session.token, scope.signal);
   const feeds = [...root.querySelectorAll('[data-camera]')].map(node => ({
     node,side:node.dataset.camera,rtc:createRtcPreview(node,node.dataset.camera,scope,session)
   }));
@@ -28,6 +30,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     if (!connected) {
       if (sampleMode) frame.style.removeProperty('--camera-aspect');
       if (feed.side === 'A') {
+        scene.clear();
         if (sampleMode) $('#stereo-map').parentElement.style.removeProperty('--camera-aspect');
         VisionPerceptionView.showDepth(null, null, sampleMode);
       }
@@ -63,7 +66,11 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       if (feed.etag) headers['If-None-Match'] = feed.etag;
       const path = '/api/preview/' + feed.side;
       const response = await fetch(path, {headers, signal:AbortSignal.any([scope.signal, AbortSignal.timeout(3000)])});
-      if (version !== pollVersion || response.status === 304) return;
+      if (version !== pollVersion) return;
+      if (feed.side === 'A' && (response.status === 200 || response.status === 304)) {
+        scene.update(response.headers.get('X-Segmentation-Frame'));
+      }
+      if (response.status === 304) return;
       if (response.status !== 200) {
         if (response.status === 401) session.invalidate(requestToken);
         setFeed(feed,false,response.status === 401 ? 'Session expired. Pair the phone again.' : undefined);
@@ -226,6 +233,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   VisionPerceptionView.renderDetections(sampleMode, feeds);
   return {refreshPolling, stopPolling() {
     ++pollVersion;
+    scene.clear();
     feeds.forEach(feed => feed.rtc.update(false));
   }, paired() { if (sampleMode) renderMode(false); else refreshPolling(); }};
 }

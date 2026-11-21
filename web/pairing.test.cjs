@@ -270,3 +270,47 @@ test('plane diagnostics stay on the paired frame and overlay bytes are opt-in', 
   assert.equal(Object.hasOwn(result.objects[0],'height_above_plane_m'),false);
   assert.deepEqual(result.road_edge,{level:'visual',point:[.5,.6]});
 });
+
+
+test('Camera A scene masks are private, tied to sampled frames and expire', async t => {
+  t.mock.timers.enable({apis:['Date'], now:Date.now()});
+  const server = createServer({agent:{filename:':memory:'}});
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = 'http://127.0.0.1:'+server.address().port;
+  const call = (route, method='GET', token, body, extra={}) => fetch(base+route,{
+    method,body,headers:{...(token ? {Authorization:'Bearer '+token} : {}),...extra}
+  });
+  const read = async (response, status) => {
+    assert.equal(response.status,status);
+    return response.json();
+  };
+  const {token:desk} = await read(await call('/api/session','POST'),201);
+  const {code} = await read(await call('/api/pair/A','POST',desk),201);
+  const {token:a,sourceID} = await read(await call('/api/join','POST',undefined,
+    JSON.stringify({code}),{'Content-Type':'application/json'}),200);
+  assert.equal((await call('/api/agent/alerts','GET',desk)).status,200);
+  assert.equal((await call('/api/frame','PUT',a,Buffer.from([255,216,11,255,217]),
+    {'Content-Type':'image/jpeg'})).status,204);
+  const query = '?camera_id=A&source_id='+sourceID;
+  const captured = await call('/api/cv/frame'+query);
+  assert.equal(captured.status,200);
+  const frameId = captured.headers.get('etag').slice(1,-1);
+  const mask = 'iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAAAAADmVT4XAAAAW0lEQVR42u3OMQEAAAgDoKn9OxtjDyRgLl0bAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQGBsgdD7AED8nNciQAAAABJRU5ErkJggg==';
+  const postScene = png => call('/api/cv/segmentation'+query,'POST',undefined,
+    JSON.stringify({frame_id:frameId,width:480,height:640,mask:png}),{'Content-Type':'application/json'});
+  assert.equal((await postScene('AA==')).status,400);
+  assert.equal((await postScene(mask)).status,204);
+  assert.equal((await call('/api/segmentation/A','GET',a)).status,401);
+  const scene = await read(await call('/api/segmentation/A','GET',desk),200);
+  assert.equal(scene.frame_id,frameId);
+  assert.equal(scene.mask,mask);
+  const previewTag = (await call('/api/preview/A','GET',desk)).headers.get('etag');
+  const unchanged = await call('/api/preview/A','GET',desk,undefined,{'If-None-Match':previewTag});
+  assert.equal(unchanged.status,304);
+  assert.equal(unchanged.headers.get('X-Segmentation-Frame'),frameId);
+  t.mock.timers.tick(751);
+  assert.equal((await call('/api/segmentation/A','GET',desk)).status,204);
+  assert.equal((await postScene(mask)).status,409);
+});

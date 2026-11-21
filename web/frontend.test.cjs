@@ -42,6 +42,10 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Depth algorithm/);
   const planeToggle = html.match(/<input[^>]*id="depth-plane-overlay"[^>]*>/)?.[0];
   assert.ok(planeToggle);
+  assert.match(html,/<article[^>]*id="scene-view"[^>]*hidden/);
+  const labels = await call('/ade20k-labels.json');
+  assert.equal(labels.status,200);
+  assert.equal((await labels.json()).length,150);
   assert.doesNotMatch(planeToggle,/checked/);
   assert.match(html,/id="plane-status"[^>]*hidden/);
   assert.match(html,/RAFT-Stereo/);

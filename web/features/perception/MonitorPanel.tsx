@@ -46,6 +46,12 @@ export function MonitorPanel() {
       </div>
       <StereoRecordings />
       <CameraFeeds />
+      <article className="feed" id="scene-view" hidden>
+        <header><h2>Camera A segmentation</h2></header>
+        <canvas id="scene-mask" width={128} height={128} role="img"
+                aria-label="Semantic classes in the sampled Camera A frame" />
+        <ul id="scene-legend" aria-label="Most visible classes"></ul>
+      </article>
       <DetectionTable />
     </section>
   );
