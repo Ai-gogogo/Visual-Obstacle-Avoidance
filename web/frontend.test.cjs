@@ -6,6 +6,24 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const test = require('node:test');
 
+test('assistant controls accept spoken confirmation and direct page actions', async () => {
+  const {matchVoiceCommand} = await import('./features/assistant/commands.js');
+  const valid = [
+    ['确认',{kind:'confirm',value:true}],
+    ['取消登记',{kind:'confirm',value:false}],
+    ['发送转写',{kind:'sendReview'}],
+    ['再读一遍',{kind:'replay'}],
+    ['生成相机 A 的配对码',{kind:'pair',value:'A'}],
+    ['生成右边相机的配对码',{kind:'pair',value:'B'}],
+    ['提醒间隔设为十五分钟',{kind:'preference',field:'interval_minutes',value:15}],
+    ['回答简短点',{kind:'preference',field:'concise',value:true}],
+    ['把 USB 相机 A 选第一个',{kind:'usbSlot',side:'A',value:1}],
+    ['切到左边',{kind:'camera',value:'A'}]
+  ];
+  for (const [phrase,command] of valid) assert.deepEqual(matchVoiceCommand(phrase),command,phrase);
+  for (const phrase of ['确认一下这是哪种杯子','不要确认保存','确认可以吗']) assert.equal(matchVoiceCommand(phrase),null);
+});
+
 test('the production frontend and device API share one origin', {timeout:25_000}, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'visionassist-next-'));
   const child = spawn(process.execPath, ['server.cjs'], {
@@ -37,6 +55,10 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   const html = await monitor.text();
   assert.match(html,/Live perception/);
   assert.match(html,/Voice assistant/);
+  assert.match(html,/Test warning audio/);
+  assert.match(html,/Enable warning audio/);
+  assert.match(html,/Compare cameras/);
+  assert.match(html,/Help me identify the text/);
   assert.match(html,/Reduce motion/);
   assert.match(html,/Stereo calibration/);
   assert.match(html,/Depth algorithm/);

@@ -1,4 +1,4 @@
-export function connectAlerts({$, scope, agentRequest, isAssist, isConversationBusy, transcriptionLanguage, speakWarning, speakReminder}) {
+export function connectAlerts({$, scope, agentRequest, isAssist, isConversationBusy, transcriptionLanguage, speakWarning}) {
   let alertSequence = 0;
   let warningUntil = 0;
   let pendingReminder;
@@ -64,7 +64,6 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
         const message = prefix + pendingReminder.text;
         pendingReminder = undefined;
         $('#voice-message').textContent = message;
-        speakReminder(message);
       }
     } catch (error) {
       if (scope.signal.aborted) return;

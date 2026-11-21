@@ -51,7 +51,7 @@ test('spoken variations and the Quick Actions mode route directly to OCR', async
   try {
     const phrases = ['帮我读一下文字', '嗯，帮我读一下文字好吗？', '能不能帮我看看上面写了什么？',
       '请念一下画面里的字。', 'Can you tell me what is written on this sign?', '那么我识别一下文字',
-      '那么，我想识别一下画面里的文字。'];
+      '那么，我想识别一下画面里的文字。', 'Read the label.', '这上面写的什么字？'];
     for (const text of phrases) {
       assert.equal((await agent.chat(session,{text})).reply_text,'Library',text);
     }
@@ -497,10 +497,10 @@ test('label reading uses the current image and asks for original text', async ()
   const session = {slots:{A:{frame,stamp:Date.now()},B:{}}};
   try {
     for (const text of ['这上面写的什么字','这个画面当中的这个称职 这个杯子上写的什么字','What does the label say?']) {
-      assert.equal((await agent.chat(session,{text})).reply_text,'TANGERINE JUICE');
+      assert.equal((await agent.chat(session,{text,mode:'image'})).reply_text,'TANGERINE JUICE');
     }
     session.slots.A.stamp = Date.now()-10_000;
-    assert.equal((await agent.chat(session,{text:'这上面写的什么字'})).source,'unavailable');
+    assert.equal((await agent.chat(session,{text:'这上面写的什么字',mode:'image'})).source,'unavailable');
   } finally { agent.close(); }
 });
 

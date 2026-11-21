@@ -117,7 +117,7 @@ class LiveCameraTests(unittest.TestCase):
             self.worker.poll()
             empty = self.scene()
             self.assertEqual(empty["source"], "yolo")
-            self.assertIn("No confident objects", empty["reply_text"])
+            self.assertIn("no confident detections", empty["reply_text"])
             self.worker.poll()  # Discovery still reports the same frame.
             self.assertEqual(predict.call_count, 1)
 
@@ -148,7 +148,7 @@ class LiveCameraTests(unittest.TestCase):
         self.assertIn("person (left)", ask("A"))
         self.assertNotIn("person (right)", ask("A"))
         self.assertIn("person (right)", ask("B"))
-        self.assertIn("person（右侧）", ask("A", "哪个物体更远？"))
+        self.assertIn("人在画面右侧", ask("A", "哪个物体更远？"))
         self.assertEqual(replay("A", self.worker, [(40, 2)]), {"left":"unknown"})
         self.assertIn("cannot tell", ask("A"))
 
@@ -198,7 +198,7 @@ class LiveCameraTests(unittest.TestCase):
         self.assertNotEqual(empty["frame_id"], scene["frame_id"])
         self.assertEqual(base64.b64decode(empty["jpeg"]), self.blank)
         self.assertEqual(empty["objects"], [])
-        self.assertIn("No confident objects", self.scene()["reply_text"])
+        self.assertIn("no confident detections", self.scene()["reply_text"])
         other = self.request("POST", "/api/session").json()["token"]
         self.assertEqual(self.request("GET", path, other).status_code, 204)
         self.assertEqual(self.http.get(self.base + path, headers={
@@ -261,13 +261,13 @@ class LiveCameraTests(unittest.TestCase):
         self.assertTrue(any(o["label"] == "bus" for o in both["A"]["objects"]))
         self.assertEqual(both["B"]["objects"], [])
         self.assertIn("bus (center)", self.scene("A")["reply_text"])
-        self.assertIn("No confident objects", self.scene("B")["reply_text"])
+        self.assertIn("no confident detections", self.scene("B")["reply_text"])
         self.request("DELETE", "/api/frame", phones["B"])
         images = {"A": self.blank}
         after = wait_for_results()
         self.assertNotEqual(after["A"]["frame_id"], both["A"]["frame_id"])
         self.assertEqual(after["A"]["objects"], [])
-        self.assertIn("No confident objects", self.scene("A")["reply_text"])
+        self.assertIn("no confident detections", self.scene("A")["reply_text"])
         self.assertEqual(self.scene("B")["source"], "unavailable")
         self.assertEqual(self.request("GET", "/api/preview/B", self.desk).status_code, 204)
 
@@ -374,7 +374,7 @@ class LiveCameraTests(unittest.TestCase):
         self.addCleanup(process.terminate)
         self.upload(self.pair("B"), self.bus)
         phone = self.pair("A")
-        for image, expected in [(self.bus, "bus (center)"), (self.blank, "No confident objects")]:
+        for image, expected in [(self.bus, "bus (center)"), (self.blank, "no confident detections")]:
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 self.assertIsNone(process.poll(), "Live worker exited during the stream")

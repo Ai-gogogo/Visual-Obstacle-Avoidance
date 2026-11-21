@@ -9,10 +9,14 @@ export function MonitorPanel() {
         <div>
           <h1 tabIndex={-1}>Live perception</h1>
           <p>Compare both camera feeds and depth aligned to Camera A.</p>
+          <p id="warning-mode">Desk mode · Visual alerts only</p>
         </div>
         <div className="toolbar">
-          <button className="quiet" id="warning-audio" type="button" aria-describedby="warning-audio-status">
+          <button className="quiet" id="warning-audio" type="button" aria-pressed="false" aria-describedby="warning-audio-status">
             Enable warning audio
+          </button>
+          <button className="quiet" id="warning-audio-test" type="button" aria-describedby="warning-audio-status">
+            Test warning audio
           </button>
           <button
             className="quiet"

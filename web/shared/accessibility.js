@@ -20,11 +20,12 @@ export function createAccessibility(element, scope) {
     toggle?.setAttribute('aria-pressed', String(reduced));
   }
   scope.listen(preference, 'change', applyMotionPreference);
-  if (toggle) scope.listen(toggle, 'click', () => {
-    reduced = !reduced;
+  function setReducedMotion(enabled) {
+    reduced = enabled;
     try { localStorage.setItem(storageKey, String(reduced)); } catch {}
     applyMotionPreference();
-  });
+  }
+  if (toggle) scope.listen(toggle, 'click', () => setReducedMotion(!reduced));
   for (const summary of element.querySelectorAll('summary')) {
     scope.listen(summary, 'click', event => {
       summary.parentElement.toggleAttribute('data-animate', Boolean(event.detail));
@@ -46,5 +47,5 @@ export function createAccessibility(element, scope) {
     node.textContent = message;
     if (message) toastFrame = requestAnimationFrame(() => node.classList.add('toast-visible'));
   }
-  return {openDialog, toast, requestError, reducedMotion};
+  return {openDialog, toast, requestError, reducedMotion, setReducedMotion};
 }

@@ -51,7 +51,10 @@ function wantsReadText(text) {
     .replace(/^(?:你好|您好|嗯+|呃+|那么|那麼|那个|那個)+/u, '')
     .replace(/(?:好吗|好嗎|可以吗|可以嗎|行吗|行嗎|吧|谢谢|謝謝)+$/u, '');
   const spokenChinese = /^(?:(?:请|請|能不能|可以|能帮|能幫)?(?:帮我|幫我|我想|我)?(?:看|看看|读|讀|读读|讀讀|念|念念|认|認|识别|識別)(?:一下)?(?:这上面|這上面|上面|这里|這裡|画面里|畫面裡|牌子上|门牌上|門牌上|相机里|相機裡)?(?:的?(?:文字|这些字|這些字|这几个字|這幾個字|上面的字|字|牌子)(?:读出来|讀出來|念出来|念出來)?|(?:写|寫)了?(?:什么|什麼)(?:字)?))$/u;
-  return english.test(command) || spokenEnglish.test(command) || chinese.test(compact) || spokenChinese.test(compact);
+  const englishLabel = /^(?:please )?(?:read (?:the|this|that) label|what does (?:the|this|that) label say)$/iu;
+  const chineseLabel = /^(?:这|那)?(?:上面|瓶身|杯子上|标签上)(?:写)[的了着]?(?:是)?(?:什么|什麼)(?:字)?$/u;
+  return english.test(command) || spokenEnglish.test(command) || englishLabel.test(command) ||
+    chinese.test(compact) || spokenChinese.test(compact) || chineseLabel.test(compact);
 }
 
 function localPython() {

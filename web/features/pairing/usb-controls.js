@@ -1,6 +1,7 @@
 export function connectUsbControls({$,scope,session,dialog,onPaired}) {
   const local = ['localhost','127.0.0.1','[::1]'].includes(location.hostname);
-  $('#usb-controls').hidden = !local;
+  const controls = $('#usb-controls');
+  controls.hidden = !local;
   $('#wifi-pairing').open = true;
   if (!local) return () => {};
   const sides = ['A','B'];
@@ -25,6 +26,10 @@ export function connectUsbControls({$,scope,session,dialog,onPaired}) {
         'X-VisionAssist-USB':'desktop','Content-Type':'application/json'},body:body && JSON.stringify(body),
         signal:AbortSignal.any([scope.signal,AbortSignal.timeout(8000)])});
       if (response.status === 401 && !attempt) { session.invalidate(token); continue; }
+      if (response.status === 404) {
+        controls.hidden = true;
+        throw new Error('USB camera control is unavailable on this server.');
+      }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'USB connection failed.');
       return data;
@@ -70,5 +75,6 @@ export function connectUsbControls({$,scope,session,dialog,onPaired}) {
   scope.listen(refresh,'click',()=>update());
   scope.listen(dialog,'close',()=>{clearTimeout(timer); version++; busy=false;});
   scope.signal.addEventListener('abort',()=>clearTimeout(timer),{once:true});
-  return () => {status.textContent='Finding USB cameras…'; void update();};
+  const refreshDevices = () => {status.textContent='Finding USB cameras…'; void update();};
+  return Object.assign(refreshDevices,{update});
 }

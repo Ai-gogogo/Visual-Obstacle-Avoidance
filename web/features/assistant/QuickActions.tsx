@@ -20,6 +20,9 @@ export function QuickActions() {
         <button type="button" className="quiet" id="read-camera-text">
           Help me identify the text.
         </button>
+        <button type="button" className="quiet" id="compare-cameras">
+          Compare cameras
+        </button>
         <button type="button" className="quiet" data-question="find">
           Find my item
         </button>
