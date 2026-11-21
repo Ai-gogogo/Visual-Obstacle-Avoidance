@@ -41,7 +41,7 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   assert.equal(played.length,0);
   select('stationary');
   await event(crossing());
-  await event({kind:'road_edge',metric:true});
+  await event({kind:'road_edge',metric:true,risk:'caution'});
   assert.equal(played.length,0);
   await event({...crossing(),stationary_zone:true});
   assert.match(played[0].text,/正在靠近/);
@@ -53,13 +53,14 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   assert.equal(played[0].canPlay(),false);
   assert.ok(cancelled > beforeLoss);
   select('walking');
-  await event({kind:'road_edge',metric:true,stamp:Date.now()-1600});
+  await event({kind:'road_edge',metric:true,risk:'caution',stamp:Date.now()-1600});
   await event({...crossing(),expires:Date.now()-1});
   assert.equal(played.length,1);
   await event(crossing());
-  await event({kind:'road_edge',metric:true});
+  await event({kind:'road_edge',metric:true,risk:'caution',text_zh:'小心，前方约3.5米是车行道边缘。'});
   assert.match(played[1].text,/横穿/);
-  assert.match(played[2].text,/车行道/);
+  assert.equal(played[2].text,'小心，前方约3.5米是车行道边缘。');
+  assert.equal(played[2].urgent,false);
   const obstacle = fields => ({kind:'obstacle',track_id:'A-7',label:'chair',risk:'caution',
     text:'Caution. chair straight ahead.',text_zh:'小心，正前方约2米有椅子。',...fields});
   await event(obstacle());
@@ -77,15 +78,15 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   assert.equal(played[5].text,'小心，正前方约2米有椅子。');
   assert.match($('#spoken-alert-status').textContent,/only obstacles/);
   await event(crossing(),aOnly);
-  await event({kind:'road_edge',metric:true},aOnly);
+  await event({kind:'road_edge',metric:true,risk:'caution'},aOnly);
   assert.equal(played.length,6);
-  await event({kind:'road_edge',metric:false,text_zh:'请小心，前方可能是车行道。'},aOnly);
+  await event({kind:'road_edge',metric:false,risk:'caution',text_zh:'请小心，前方可能是车行道。'},aOnly);
   assert.equal(played[6].text,'请小心，前方可能是车行道。');
   await event(obstacle({track_id:'A-10'}),{A:'live',B:'offline'});
   assert.equal(played.length,7);
   select('stationary');
   await event(obstacle({track_id:'A-8'}));
-  await event({kind:'road_edge',metric:false});
+  await event({kind:'road_edge',metric:false,risk:'caution'});
   const door = (metric, text_zh) => ({kind:'door',metric,text_zh,risk:'caution'});
   await event(door(true,'小心，前方约1.0米有门。'));
   assert.equal(played.length,7);

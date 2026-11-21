@@ -2,8 +2,7 @@
   "model": "models/road-segformer-b0.onnx",
   "pitch_down_deg": 0,
   "corridor_width_m": 0.9,
-  "caution_m": 5.0,
-  "urgent_m": 3.0,
+  "caution_m": 3.5,
   "rearm_margin_m": 0.6,
   "min_confidence": 0.55,
   "intrusion": {

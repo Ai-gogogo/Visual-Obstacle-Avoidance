@@ -65,7 +65,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
       newObstacleLevel(alert)).sort((a,b) => Number(b.risk === 'urgent')-Number(a.risk === 'urgent'))[0];
     const door = mode === 'walking' && alerts.findLast(alert => alert.kind === 'door' && canSpeak(alert));
     const wall = mode === 'walking' && alerts.findLast(alert => alert.kind === 'wall' && alert.metric && canSpeak(alert));
-    const alert = road?.risk === 'urgent' ? road : obstacle?.risk === 'urgent' ? obstacle : crossing || road || obstacle || door || wall;
+    const alert = obstacle?.risk === 'urgent' ? obstacle : crossing || road || obstacle || door || wall;
     if (!alert) return;
     const urgent = alert.risk === 'urgent' || (crossing === alert && alert.expires-Date.now() <= 1200);
     if (!urgent && isConversationBusy('chunks')) return;
@@ -125,8 +125,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
       const intrusion = alerts.filter(alert => alert.kind === 'path_intrusion' && alert.expires > Date.now())
         .sort((a,b) => a.expires-b.expires)[0];
       const others = alerts.filter(alert => !['road_edge','path_intrusion','door','wall'].includes(alert.kind));
-      const warning = pendingRoadAlert?.risk === 'urgent' ? pendingRoadAlert :
-        others.findLast(alert => alert.risk === 'urgent') || intrusion || pendingRoadAlert || others.at(-1) ||
+      const warning = others.findLast(alert => alert.risk === 'urgent') || intrusion || pendingRoadAlert || others.at(-1) ||
         alerts.findLast(alert => alert.kind === 'door') || alerts.findLast(alert => alert.kind === 'wall');
       if (warning && (Date.now() >= warningUntil ||
           ((warning.risk === 'urgent' || warning.kind === 'path_intrusion') && activeWarningRisk !== 'urgent'))) {

@@ -336,10 +336,10 @@ cv/.venv/bin/python cv/live_camera.py --road-alerts --server https://localhost:8
 
 Camera A 用 Cityscapes SegFormer-B0 分割车行道和人行道，寻找从脚下方向的人行道走向前方车行道的交界。程序在交界附近取多个地面像素的双目深度，使用 A 的标定射线计算横向位置和水平前向距离，选择行走通道内最近且有一段连续像素支持的交界。Dashboard 在对应的 A 帧上用黄色圆圈标出取值位置，图下显示距离。B 为 A 提供双目匹配；运行 worker 时加上 `--dual-yolo` 也可独立检测 B。
 
-- 默认在 **5 米**内提醒，进入 **3 米**再升级，每档需要连续两张已接受的不同帧确认，间隔不超过 1.2 秒。退到 5.6 米外或持续看不到交界至少一秒后可重新提示。按 Dashboard 的语音语言设置通过现有 Piper 播报。[语音模型和浏览器播放设置](../llm/README.md)
+- 默认在 **3.5 米内**播报一次普通提示，需要连续两张已接受的不同帧确认，间隔不超过 1.2 秒。退到 4.1 米外或持续看不到交界至少一秒后可重新提示。按 Dashboard 的语音语言设置通过现有 Piper 播报。[语音模型和浏览器播放设置](../llm/README.md)
 - 未标定、缺少同步帧或交界纹理不足时，连续看到前方交界可播报「前方可能是车行道」，并显示距离不可用。道路延伸到侧面时，程序以朝前通道筛选交界。当前假设手机朝向与行走方向一致，地面近似水平。
-- [road_config.json](road_config.json) 中的 `pitch_down_deg` 默认 0，镜头从水平向下倾斜 10° 时填 10。`corridor_width_m` 是通道总宽，默认 0.9 米。`caution_m`、`urgent_m` 和 `rearm_margin_m` 分别控制两级提示和重新触发的距离余量。改完重启 worker。匹配范围还取决于 [stereo_config.json](stereo_config.json) 中的有效深度范围和标定参数。
-- 首次实机验证可用卷尺在封闭路段标出 5 米和 3 米，分别从正面、斜向接近并沿路沿平行行走。没有可见人行道、已走上车道、路口被车辆遮挡或在坡道上时，可能漏报或误报。
+- [road_config.json](road_config.json) 中的 `pitch_down_deg` 默认 0，镜头从水平向下倾斜 10° 时填 10。`corridor_width_m` 是通道总宽，默认 0.9 米。`caution_m` 控制提示距离，`rearm_margin_m` 控制再次触发的距离余量。改完重启 worker。匹配范围还取决于 [stereo_config.json](stereo_config.json) 中的有效深度范围和标定参数。
+- 首次实机验证可用卷尺在封闭路段标出 3.5 米，分别从正面、斜向接近并沿路沿平行行走。没有可见人行道、已走上车道、路口被车辆遮挡或在坡道上时，可能漏报或误报。
 
 ## 前方门提示
 

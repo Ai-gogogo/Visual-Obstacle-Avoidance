@@ -395,27 +395,27 @@ function createAgentRoutes(options, sessions, read, respond) {
       }
       const remindersEnabled = requestURL.searchParams.get('reminders') === '1';
       const reminder = remindersEnabled ? agent.cameraReminder(session) : null;
+      const scene = currentDetection(session.slots.A);
       const active = session.alerts.filter(alert => {
         if (alert.id <= after || !recent(alert) || session.slots[alert.camera_id].streamID !== alert.streamID ||
             (alert.partnerStream && session.slots.B.streamID !== alert.partnerStream)) return false;
         if (SCENE_ALERT_KINDS.includes(alert.kind)) return alert.expires > Date.now() &&
           session.slots.A.sceneAlertStates?.[alert.kind]?.alertId === alert.id && (!alert.metric || recent(session.slots.B));
+        if (alert.kind === 'road_edge' && alert.metric) {
+          return scene?.road_edge?.level === 'caution' && scene.partnerStream === session.slots.B.streamID &&
+            recent(session.slots.B);
+        }
         if (alert.kind !== 'path_intrusion') return true;
-        const scene = session.slots.A.detection;
-        return alert.expires > Date.now() && scene?.partnerStream === session.slots.B.streamID &&
-          scene?.objects.some(obj => obj.track_id === alert.track_id && obj.intrusion?.from_side === alert.from_side);
+        const detection = session.slots.A.detection;
+        return alert.expires > Date.now() && detection?.partnerStream === session.slots.B.streamID &&
+          detection?.objects.some(obj => obj.track_id === alert.track_id && obj.intrusion?.from_side === alert.from_side);
       });
       const cameras = Object.fromEntries(Object.entries(session.slots).map(([side,slot]) => [
         side, !slot.phone ? 'offline' : !recent(slot) ? 'waiting' :
           currentDetection(slot) ? 'detecting' : 'live'
       ]));
-      const scene = currentDetection(session.slots.A);
       const visibleAlerts = active.map(({streamID, partnerStream, ...alert}) => {
-        if (alert.kind === 'road_edge' && alert.metric) {
-          alert.metric = ['caution','urgent'].includes(scene?.road_edge?.level) &&
-            (alert.risk !== 'urgent' || scene.road_edge.level === 'urgent') &&
-            scene.partnerStream === session.slots.B.streamID;
-        } else if (alert.kind === 'path_intrusion' && alert.stationary_zone) {
+        if (alert.kind === 'path_intrusion' && alert.stationary_zone) {
           alert.stationary_zone = Boolean(scene?.objects.some(obj => obj.track_id === alert.track_id &&
             obj.intrusion?.from_side === alert.from_side && obj.intrusion.stationary_zone));
         }

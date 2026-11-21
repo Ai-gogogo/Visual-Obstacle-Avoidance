@@ -152,7 +152,7 @@ class LiveStereoTests(unittest.TestCase):
         self.assertAlmostEqual(measured["objects"][0]["depth_m"], 2, delta=.05)
         png = np.frombuffer(base64.b64decode(measured["depth_preview"]), np.uint8)
         self.assertGreater(cv2.imdecode(png, cv2.IMREAD_GRAYSCALE).max(), 0)
-        self.assertEqual(measured["road_edge"]["level"], "urgent")
+        self.assertEqual(measured["road_edge"]["level"], "caution")
         self.assertAlmostEqual(measured["road_edge"]["distance_m"], 2, delta=.05)
         time.sleep(.01)
         upload(a, left, now+8)
@@ -161,9 +161,11 @@ class LiveStereoTests(unittest.TestCase):
         alerts = request("GET", "/api/agent/alerts", desk).json()["alerts"]
         road_alerts = [alert for alert in alerts if alert.get("kind") == "road_edge"]
         self.assertEqual(len(road_alerts), 1)
-        self.assertEqual(road_alerts[0]["risk"], "urgent")
+        self.assertEqual(road_alerts[0]["risk"], "caution")
         ready_preview = request("GET", "/api/preview/A", desk)
         request("DELETE", "/api/frame", b)
+        recent_alerts = request("GET", "/api/agent/alerts", desk).json()["alerts"]
+        self.assertFalse(any(alert["kind"] == "road_edge" for alert in recent_alerts))
         cleared = request("GET", "/api/preview/A", desk, headers={"If-None-Match": ready_preview.headers["ETag"]})
         self.assertEqual(cleared.status_code, 200)
         self.assertEqual(cleared.json()["frame_id"], ready_preview.json()["frame_id"])
