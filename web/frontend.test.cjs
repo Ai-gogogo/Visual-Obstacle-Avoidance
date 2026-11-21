@@ -61,6 +61,21 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   await event({kind:'road_edge',metric:true});
   assert.match(played[1].text,/横穿/);
   assert.match(played[2].text,/车行道/);
+  const obstacle = fields => ({kind:'obstacle',track_id:'A-7',label:'chair',risk:'caution',
+    text:'Caution. chair straight ahead.',text_zh:'小心，正前方约2米有椅子。',...fields});
+  await event(obstacle());
+  assert.equal(played[3].text,'小心，正前方约2米有椅子。');
+  assert.equal(played[3].urgent,false);
+  await event(obstacle());
+  assert.equal(played.length,4);
+  await event(obstacle({risk:'urgent',text_zh:'注意，正前方约1米有椅子。'}));
+  assert.equal(played[4].text,'注意，正前方约1米有椅子。');
+  assert.equal(played[4].urgent,true);
+  await event(obstacle({risk:'urgent'}));
+  assert.equal(played.length,5);
+  select('stationary');
+  await event(obstacle({track_id:'A-8'}));
+  assert.equal(played.length,5);
   select('desk');
   assert.equal(played[2].canPlay(),false);
   controller.abort();

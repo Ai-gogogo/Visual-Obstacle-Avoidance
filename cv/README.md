@@ -147,6 +147,9 @@ its bottom at or below 80% of image height for relative depth `near`, or 90% for
 A relatively `far` candidate can still reach `caution`. The live worker tracks evidence separately
 for each paired camera stream and reuses the result when retrying the same frame.
 
+When stereo gives the object a measured `depth_m`, distance replaces the box-size rule: both
+frames at 1.2 m or closer reach `urgent`, and candidates farther than 3 m stay `normal`.
+
 These image-space thresholds are intended for controlled demos with a forward-facing camera.
 Relative depth represents ordering within one image. A `normal` result means this rule did
 not confirm a hazard.

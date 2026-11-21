@@ -25,7 +25,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
     const text = mode === 'desk' ? 'Automatic alert speech is off.' :
       !stereoFeedsOnline ? 'Spoken alerts paused. Waiting for both camera feeds and analysis on Camera A.' :
         mode === 'stationary' ? 'Stationary monitoring selected. Only verified nearby movement can trigger speech.' :
-          'Walking alerts selected. Only timely stereo crossing and measured road-edge events can trigger speech.';
+          'Walking alerts selected. Obstacles in the walking path, timely stereo crossings and measured road edges can trigger speech.';
     if (audioStatus.textContent !== text) audioStatus.textContent = text;
   }
 
@@ -52,12 +52,24 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
       .sort((a,b) => a.expires-b.expires)[0];
     const road = mode === 'walking' && alerts.findLast(alert => alert.kind === 'road_edge' &&
       alert.metric === true && canSpeak(alert));
-    const alert = road?.risk === 'urgent' ? road : crossing || road;
+    // Static obstacles in the walking corridor speak in walking mode, once per track and risk level.
+    const obstacle = mode === 'walking' && alerts.filter(alert => alert.kind === 'obstacle' && canSpeak(alert) &&
+      newObstacleLevel(alert)).sort((a,b) => Number(b.risk === 'urgent')-Number(a.risk === 'urgent'))[0];
+    const alert = road?.risk === 'urgent' ? road : obstacle?.risk === 'urgent' ? obstacle : crossing || road || obstacle;
     if (!alert) return;
     const urgent = alert.risk === 'urgent' || (crossing === alert && alert.expires-Date.now() <= 1200);
     if (!urgent && isConversationBusy('chunks')) return;
-    const messages = spokenMessages[alert.kind === 'road_edge' ? 'road' : mode];
-    playSpokenAlert(messages[transcriptionLanguage() === 'zh' ? 1 : 0],urgent,() => canSpeak(alert));
+    if (alert === obstacle) spokenObstacles.set(alert.track_id ?? alert.label,{risk:alert.risk,at:Date.now()});
+    const chinese = transcriptionLanguage() === 'zh';
+    const fallback = alert.kind === 'obstacle' ? [alert.text,alert.text] : spokenMessages[alert.kind === 'road_edge' ? 'road' : mode];
+    const text = (chinese ? alert.text_zh : alert.text) || fallback[chinese ? 1 : 0];
+    playSpokenAlert(text,urgent,() => canSpeak(alert));
+  }
+  const spokenObstacles = new Map();
+  function newObstacleLevel(alert) {
+    const previous = spokenObstacles.get(alert.track_id ?? alert.label);
+    if (!previous || Date.now()-previous.at > 10_000) return true;
+    return alert.risk === 'urgent' && previous.risk !== 'urgent';
   }
   const lostCameras = new Set();
   const receivingCamera = value => value === 'live' || value === 'detecting';

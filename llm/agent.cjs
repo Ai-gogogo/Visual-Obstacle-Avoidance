@@ -1130,4 +1130,4 @@ function createAgent({ filename, worker = localWorker, generate = ollama, embed 
   };
 }
 
-module.exports = {createAgent,currentDetection,MAX_FRAME_AGE,PREVIEW_MAX_ANALYSIS_LAG_MS};
+module.exports = {createAgent,currentDetection,detectionLabelsZh,MAX_FRAME_AGE,PREVIEW_MAX_ANALYSIS_LAG_MS};
