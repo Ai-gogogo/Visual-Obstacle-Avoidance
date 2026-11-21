@@ -217,6 +217,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   });
   VisionPerceptionView.makeAnnotations(feeds);
   VisionPerceptionView.renderDetections(sampleMode, feeds);
+  VisionPerceptionView.showDepth(null, null, sampleMode);
   return {refreshPolling, stopPolling() {
     ++pollVersion;
     feeds.forEach(feed => feed.rtc.update(false));

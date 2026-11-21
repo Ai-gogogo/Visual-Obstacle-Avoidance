@@ -122,7 +122,10 @@ export function createPerceptionView($, signal) {
       no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
     };
     $('#stereo-view').hidden = false;
-    $('#stereo-caption').textContent = messages[status] ?? '';
+    // Sample feeds never produce depth, so say so instead of reporting a live waiting state.
+    $('#stereo-caption').textContent = sampleMode && !preview
+      ? 'Sample feeds have no depth. Select Show live cameras to see depth aligned to Camera A.'
+      : messages[status] ?? '';
     const canvas = $('#stereo-map');
     canvas.hidden = !preview;
     $('#stereo-caption').hidden = Boolean(preview);

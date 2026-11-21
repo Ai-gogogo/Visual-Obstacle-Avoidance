@@ -105,11 +105,14 @@ td{font-size:.94rem}
 .depth-controls [hidden] { display:none; }
 #depth-reticle { position:absolute; left:50%; top:50%; width:12px; height:12px; transform:translate(-50%,-50%); border:1px solid white; outline:1px solid black; border-radius:50%; pointer-events:none; }
 
-.stereo-recordings{margin:0 0 1rem;padding:.8rem 1rem;border:1px solid var(--line);border-radius:.92rem;background:var(--surface)}
-.stereo-recordings header,#record-actions{display:flex;align-items:center;gap:.6rem 1rem;flex-wrap:wrap}
-.stereo-recordings h2{margin:0;font-size:1.12rem}
-.stereo-recordings details{margin-top:.55rem}
-.stereo-recordings summary{cursor:pointer;width:fit-content}
+.stereo-recordings,.alert-settings{margin:0 0 1rem;padding:.8rem 1rem;border:1px solid var(--line);border-radius:.92rem;background:var(--surface)}
+.stereo-recordings header,.alert-settings header,#record-actions{display:flex;align-items:center;gap:.6rem 1rem;flex-wrap:wrap}
+.stereo-recordings h2,.alert-settings h2{margin:0;font-size:1.12rem}
+.stereo-recordings details,.alert-settings details{margin-top:.55rem}
+.stereo-recordings summary,.alert-settings summary{cursor:pointer;width:fit-content}
+.alert-settings details>*+*{margin-top:.65rem}
+.alert-settings .model-compute{border:0;padding:0;margin-bottom:0;background:none}
+#spoken-alert-status{color:var(--muted)}
 #record-actions{margin:.8rem 0}
 #record-actions select{max-width:100%;font:inherit}
 #record-progress,#record-detail{color:var(--muted);font-variant-numeric:tabular-nums}
