@@ -6,6 +6,7 @@ import math
 import numpy as np
 
 from geometry import deproject
+from mask_utils import sample_instance
 
 
 @dataclass(frozen=True)
@@ -210,8 +211,8 @@ def height_above_plane(depth_m, camera_a, plane) -> np.ndarray:
     return heights
 
 
-def object_height_m(depth_m, camera_a, plane, bbox, *, error_band_m=None) -> dict | None:
-    """Summarize valid heights in the central half of a normalized xyxy box."""
+def object_height_m(depth_m, camera_a, plane, bbox, *, mask=None, error_band_m=None) -> dict | None:
+    """Summarize perpendicular heights on the instance, falling back to the central box."""
     if not plane.validated:
         return None
     depth = np.asarray(depth_m)
@@ -222,15 +223,21 @@ def object_height_m(depth_m, camera_a, plane, bbox, *, error_band_m=None) -> dic
     left, top, right, bottom = np.clip(box, 0, 1) * [w, h, w, h]
     if left >= right or top >= bottom:
         return None
-    dx, dy = (right - left) / 4, (bottom - top) / 4
-    rows = slice(math.floor(top + dy), math.ceil(bottom - dy))
-    cols = slice(math.floor(left + dx), math.ceil(right - dx))
-    region = depth[rows, cols]
-    valid = np.isfinite(region) & (region > 0)
-    if not valid.any():
-        return None
-    rays = _rays(depth.shape, camera_a).reshape(3, h, w)[:, rows, cols]
-    heights = _residuals((rays[:, valid] * region[valid]).T, plane.normal, plane.d)
+    samples = sample_instance(depth, mask)
+    if samples is not None:
+        rays = _rays(depth.shape, camera_a)[:, samples.pixels]
+        values = samples.values
+    else:
+        dx, dy = (right - left) / 4, (bottom - top) / 4
+        rows = slice(math.floor(top + dy), math.ceil(bottom - dy))
+        cols = slice(math.floor(left + dx), math.ceil(right - dx))
+        region = depth[rows, cols]
+        valid = np.isfinite(region) & (region > 0)
+        if not valid.any():
+            return None
+        values = region[valid]
+        rays = _rays(depth.shape, camera_a).reshape(3, h, w)[:, rows, cols][:, valid]
+    heights = _residuals((rays * values).T, plane.normal, plane.d)
     if error_band_m is None:
         error_band_m = max(PlaneConfig.inlier_tol_m, plane.holdout_p90_m or 0.)
     median, p90 = np.percentile(heights, [50, 90])

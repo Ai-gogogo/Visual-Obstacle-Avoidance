@@ -24,6 +24,7 @@ from depth_filters import spatial_depth, StaticMedian
 from detect_image import DEFAULT_WEIGHTS, detect
 from geometry import deproject, ground_axes
 from item_features import item_features
+from mask_utils import InstanceMask
 from obstacles import PlaneObstacles, is_obstacle_candidate, unclassified_obstacles
 from path_intrusion import Corridor, Frame, IntrusionPredictor, background_mask, pose_between
 from plane_ransac import PlaneEstimate, fit_support_plane, height_above_plane, object_height_m, predict_plane
@@ -31,7 +32,7 @@ from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from scene_segmentation import DEFAULT_SCENE_MODEL, SceneSampler, SceneSegmenter
 from tracking import FrameTracker
-from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
+from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth, object_depth_stats
 
 
 @dataclass
@@ -150,11 +151,17 @@ class CameraWorker:
 
             if self.scene_sampler is not None:
                 self.scene_sampler.offer(source, etag.strip('"'), image)
-            candidates = (
+            prediction = (
                 self.infer(image)
-                if self.infer else detect(self.model, image, confidence=.25)
+                if self.infer else detect(self.model, image, confidence=.25, return_masks=True)
             )
-            objects = [obj for obj in candidates if obj["confidence"] >= .4]
+            # Legacy injected predictors return only the object list.
+            candidates, masks = prediction if isinstance(prediction, tuple) else (prediction, None)
+            accepted = [i for i, obj in enumerate(candidates) if obj["confidence"] >= .4]
+            objects = [candidates[i] for i in accepted]
+            object_masks = None
+            if masks is not None:
+                object_masks = [InstanceMask(masks[i]) if masks[i] is not None else None for i in accepted]
             payload = {
                 "frame_id": etag.strip('"'),
                 "objects": objects
@@ -168,7 +175,7 @@ class CameraWorker:
                         payload["stereo"] = {"status": "transport_unvalidated"}
                     else:
                         retry_partner = rtc_low and "X-CV-Sample-Ms" in frame.headers
-                        payload["stereo"], depth = self.measure_depth(params, payload, image, retry_partner)
+                        payload["stereo"], depth = self.measure_depth(params, payload, image, retry_partner, object_masks)
                 if self.road is not None:
                     if self.plane is not None and depth is not None:
                         road_masks = self.road.segment(image, self.road.confidence)
@@ -212,7 +219,8 @@ class CameraWorker:
                 else:
                     self.plane_frames.pop(source, None)
                 support = road_masks[0] | road_masks[1] if road_masks is not None else None
-                metric_evidence, measured = self.apply_support_plane(payload, depth, support, prior=prior, overlay=overlay)
+                metric_evidence, measured = self.apply_support_plane(payload, depth, support, masks=object_masks,
+                                                                    prior=prior, overlay=overlay)
                 fresh = measured if measured is not None and measured.validated else None
                 orientation = fresh or prior
                 axes = ground_axes(orientation.normal) if orientation is not None else None
@@ -306,7 +314,7 @@ class CameraWorker:
                 current.accepted_stamp = previous.accepted_stamp
         return current, pose, current.plane
 
-    def apply_support_plane(self, payload, depth, support, *, prior=None, overlay=False):
+    def apply_support_plane(self, payload, depth, support, *, masks=None, prior=None, overlay=False):
         stereo = payload.setdefault("stereo", {})
         if depth is None:
             stereo["plane"] = {"validated": False, "reason": "depth_unavailable"}
@@ -337,7 +345,8 @@ class CameraWorker:
         axes = ground_axes(plane.normal)
         metric_evidence = {}
         for index, obj in enumerate(objects):
-            height = object_height_m(depth, camera, plane, obj["bbox"])
+            mask = masks[index] if masks is not None else None
+            height = object_height_m(depth, camera, plane, obj["bbox"], mask=mask)
             if height is None:
                 continue
             median = height["median_m"]
@@ -380,7 +389,7 @@ class CameraWorker:
         ok, png = cv2.imencode(".png", rgba)
         return base64.b64encode(png).decode("ascii") if ok else None
 
-    def measure_depth(self, params, payload, image, retry_partner=False):
+    def measure_depth(self, params, payload, image, retry_partner=False, masks=None):
         if image.size != self.stereo.size:
             return {"status": "size_mismatch"}, None
 
@@ -458,11 +467,21 @@ class CameraWorker:
             scale_m = five_mm / 5000 if np.isfinite(five_mm) and five_mm > 0 else None
         else:
             scale_m = 1.
+        metric_depth = None
         if scale_m is not None:
-            for obj in payload["objects"]:
-                z = object_depth(depth, obj["bbox"])
-                if z is not None:
-                    obj["depth_m"] = z * scale_m
+            metric_depth = depth if scale_m == 1 else depth * scale_m
+            for index, obj in enumerate(payload["objects"]):
+                mask = masks[index] if masks is not None else None
+                if mask is None:
+                    # Preserve legacy grid-unit rounding and the detection-only JSON schema.
+                    z = object_depth(depth, obj["bbox"])
+                    if z is not None:
+                        obj["depth_m"] = z * scale_m
+                else:
+                    stats = object_depth_stats(metric_depth, obj["bbox"], mask=mask)
+                    if stats is not None:
+                        obj["depth_m"] = stats["median_m"]
+                        obj["nearest_depth_m"] = stats["nearest_m"]
         display = depth
         spatial = options.get("X-Depth-Spatial") == "1"
         if spatial:
@@ -499,9 +518,6 @@ class CameraWorker:
             if np.isfinite(point):
                 result["center_m"] = float(point)*scale_m
         # Road and crossing warnings use unfiltered metric depth regardless of display settings.
-        metric_depth = None
-        if scale_m is not None:
-            metric_depth = depth if scale_m == 1 else depth * scale_m
         return result, metric_depth
 
 
@@ -660,7 +676,7 @@ def main():
         from siglip_features import SigLIPExtractor
         item_encoder = SigLIPExtractor()
 
-    options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half, confidence=.25)
+    options = dict(device=torch.device(device), imgsz=args.imgsz, half=args.half, confidence=.25, return_masks=True)
     sides = "AB" if args.dual_yolo else "A"
     if device == "cpu" or not args.dual_yolo:
         # Independent predictors let both camera threads use the CPU concurrently.
