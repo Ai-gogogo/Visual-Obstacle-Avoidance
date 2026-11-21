@@ -53,7 +53,7 @@ export function connectAlerts({$, scope, agentRequest, isAssist, isConversationB
   function handleSpokenAlerts(alerts) {
     const selectedMode = mode;
     const canSpeak = alert => selectedMode !== 'desk' && mode === selectedMode &&
-      (alert.kind === 'obstacle' || (['road_edge','door'].includes(alert.kind) && !alert.metric) ? cameraADetecting : stereoFeedsOnline) &&
+      (!alert.metric && ['obstacle','road_edge','door'].includes(alert.kind) ? cameraADetecting : stereoFeedsOnline) &&
       alert.stamp >= modeSince &&
       Date.now() < Math.min(alert.expires ?? Infinity, alert.stamp + 1500);
     const crossing = alerts.filter(alert => alert.kind === 'path_intrusion' && canSpeak(alert) &&

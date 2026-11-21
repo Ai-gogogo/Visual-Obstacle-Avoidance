@@ -61,21 +61,21 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   assert.match(played[1].text,/横穿/);
   assert.equal(played[2].text,'小心，前方约3.5米是车行道边缘。');
   assert.equal(played[2].urgent,false);
-  const obstacle = fields => ({kind:'obstacle',track_id:'A-7',label:'chair',risk:'caution',
-    text:'Caution. chair straight ahead.',text_zh:'小心，正前方约2米有椅子。',...fields});
+  const obstacle = fields => ({kind:'obstacle',track_id:'A-7',label:'bench',risk:'caution',
+    text:'Caution. bench straight ahead.',text_zh:'小心，正前方约2米有长椅。',...fields});
   await event(obstacle());
-  assert.equal(played[3].text,'小心，正前方约2米有椅子。');
+  assert.equal(played[3].text,'小心，正前方约2米有长椅。');
   assert.equal(played[3].urgent,false);
   await event(obstacle());
   assert.equal(played.length,4);
-  await event(obstacle({risk:'urgent',text_zh:'注意，正前方约1米有椅子。'}));
-  assert.equal(played[4].text,'注意，正前方约1米有椅子。');
+  await event(obstacle({risk:'urgent',text_zh:'注意，正前方约1米有长椅。'}));
+  assert.equal(played[4].text,'注意，正前方约1米有长椅。');
   assert.equal(played[4].urgent,true);
   await event(obstacle({risk:'urgent'}));
   assert.equal(played.length,5);
   const aOnly = {A:'detecting',B:'offline'};
   await event(obstacle({track_id:'A-9'}),aOnly);
-  assert.equal(played[5].text,'小心，正前方约2米有椅子。');
+  assert.equal(played[5].text,'小心，正前方约2米有长椅。');
   assert.match($('#spoken-alert-status').textContent,/only obstacles/);
   await event(crossing(),aOnly);
   await event({kind:'road_edge',metric:true,risk:'caution'},aOnly);
@@ -118,6 +118,12 @@ test('spoken alerts are opt-in, use mode-specific evidence and pause on camera l
   await event(wall);
   assert.equal(played[9].text,'小心，前方约1.5米有墙。');
   assert.equal(played[9].urgent,false);
+  const chair = obstacle({label:'chair',track_id:'A-11',metric:true,text_zh:'小心，正前方约1.5米有椅子。'});
+  await event(chair,aOnly);
+  assert.equal(played.length,10);
+  await event(chair);
+  assert.equal(played[10].text,'小心，正前方约1.5米有椅子。');
+  assert.equal(played[10].urgent,false);
   controller.abort();
   respond({sequence,alerts:[],cameras});
 });

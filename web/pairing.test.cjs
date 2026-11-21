@@ -150,7 +150,7 @@ test('weak same-frame boxes are visual only and fresh hazards wake the waiting d
   const {token:phone} = await (await call('/api/join','POST',undefined,JSON.stringify({code}),json)).json();
   await call('/api/agent/alerts','GET',desk);
   const jpeg = Buffer.from([255,216,42,255,217]);
-  const box = {label:'chair',bbox:[.2,.2,.6,.8],position:'center',track_id:'A-1',risk:'urgent'};
+  const box = {label:'bench',bbox:[.2,.2,.6,.8],position:'center',track_id:'A-1',risk:'urgent'};
   async function upload(sample = Date.now()-40, token = phone) {
     assert.equal((await call('/api/frame','PUT',token,jpeg,{
       'Content-Type':'image/jpeg','X-Sample-Ms':sample,'X-Clock-Error-Ms':4
@@ -241,9 +241,9 @@ test('door and wall events use distinct accepted A frames and current stereo mea
     if (right) assert.equal(partner.status,200);
     return {frame_id,partner_id:partner?.headers.get('x-partner-id')};
   }
-  async function publish(key) {
+  async function publish(key, objects = []) {
     const result = await call('/api/cv/detections'+query,'POST',undefined,JSON.stringify({
-      frame_id:key.frame_id,objects:[],...(key.partner_id ? {stereo:{partner_id:key.partner_id}} : {})
+      frame_id:key.frame_id,objects,...(key.partner_id ? {stereo:{partner_id:key.partner_id}} : {})
     }),json);
     assert.equal(result.status,204);
   }
@@ -313,8 +313,24 @@ test('door and wall events use distinct accepted A frames and current stereo mea
   await observeWall(1.4,newB);
   const [rearmed] = await walls();
   assert.ok(rearmed.id > wall.id);
-  await pair('B');
+  const {token:chairB} = await pair('B');
   assert.deepEqual(await walls(),[]);
+
+  const chairs = async () => (await events('obstacle')).filter(event => event.label === 'chair');
+  const chair = {label:'chair',confidence:.9,position:'center',bbox:box,track_id:'A-4',risk:'urgent'};
+  await publish(await frame(),[{...chair,depth_m:1.2}]);
+  await publish(await frame(chairB),[chair]);
+  await publish(await frame(chairB),[{...chair,depth_m:1.51}]);
+  assert.deepEqual(await chairs(),[]);
+  await publish(await frame(chairB),[{...chair,depth_m:1.5}]);
+  const [chairAlert] = await chairs();
+  assert.equal(chairAlert.text_zh,'小心，正前方约1.5米有椅子。');
+  assert.equal(chairAlert.risk,'caution');
+  assert.equal(chairAlert.metric,true);
+  await publish(await frame(chairB),[{...chair,depth_m:1.1}]);
+  assert.deepEqual((await chairs()).map(event => event.id),[chairAlert.id]);
+  await pair('B');
+  assert.deepEqual(await chairs(),[]);
 });
 
 test('a paused phone keeps its pairing and rejoins without a new code', async t => {

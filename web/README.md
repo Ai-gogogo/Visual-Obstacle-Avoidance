@@ -47,6 +47,8 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 加 `--wall-alerts` 后，Walking 模式也会播报双目确认在正前方 1.5 米内的墙。 [墙分割配置](../cv/README.md#前方墙提示)
 
+通道内的椅子需要双目连续两帧测到 **1.5 米以内**才会发出普通提示。开启 **Show meters** 可在提示中听到距离。
+
 运行 `npm test` 检查配对和隔离、过期画面、Agent 接口、同帧检测和 SQLite 持久化。运行 `npm run typecheck` 检查 TypeScript。完成 `npm run build` 后，运行 `npm run test:frontend` 验证告警模式、生产服务的两个页面、静态资源和同源配对接口。
 
 ## 前端分层

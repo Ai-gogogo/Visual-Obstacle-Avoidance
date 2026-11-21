@@ -150,6 +150,7 @@ class LiveStereoTests(unittest.TestCase):
         self.assertEqual(measured["stereo_status"], "ready")
         self.assertGreater(measured["depth_valid_fraction"], .5)
         self.assertAlmostEqual(measured["objects"][0]["depth_m"], 2, delta=.05)
+        self.assertEqual(measured["objects"][0]["risk"], "normal")
         png = np.frombuffer(base64.b64decode(measured["depth_preview"]), np.uint8)
         self.assertGreater(cv2.imdecode(png, cv2.IMREAD_GRAYSCALE).max(), 0)
         self.assertEqual(measured["road_edge"]["level"], "caution")
@@ -159,13 +160,29 @@ class LiveStereoTests(unittest.TestCase):
         read()
         worker.poll()  # An unchanged JPEG must not generate a second road alert.
         alerts = request("GET", "/api/agent/alerts", desk).json()["alerts"]
+        self.assertFalse(any(alert.get("label") == "chair" for alert in alerts))
         road_alerts = [alert for alert in alerts if alert.get("kind") == "road_edge"]
         self.assertEqual(len(road_alerts), 1)
         self.assertEqual(road_alerts[0]["risk"], "caution")
+
+        near_left, near_right = plane(config, 24 / 17)
+        stamp = max(now + 260, int(time.time() * 1000))
+        for offset, risk in [(0, "normal"), (80, "caution")]:
+            upload(b, near_right, stamp + offset, lossless=True)
+            upload(a, near_left, stamp + offset, lossless=True)
+            chair = read()["objects"][0]
+            self.assertAlmostEqual(chair["depth_m"], 24 / 17, delta=.04)
+            self.assertEqual(chair["risk"], risk)
+        alerts = request("GET", "/api/agent/alerts", desk).json()["alerts"]
+        chair_alerts = [alert for alert in alerts if alert.get("label") == "chair"]
+        self.assertEqual([alert["risk"] for alert in chair_alerts], ["caution"])
+        self.assertEqual(chair_alerts[0]["text_zh"], "小心，正前方约1.5米有椅子。")
+
         ready_preview = request("GET", "/api/preview/A", desk)
         request("DELETE", "/api/frame", b)
         recent_alerts = request("GET", "/api/agent/alerts", desk).json()["alerts"]
         self.assertFalse(any(alert["kind"] == "road_edge" for alert in recent_alerts))
+        self.assertFalse(any(alert.get("label") == "chair" for alert in recent_alerts))
         cleared = request("GET", "/api/preview/A", desk, headers={"If-None-Match": ready_preview.headers["ETag"]})
         self.assertEqual(cleared.status_code, 200)
         self.assertEqual(cleared.json()["frame_id"], ready_preview.json()["frame_id"])

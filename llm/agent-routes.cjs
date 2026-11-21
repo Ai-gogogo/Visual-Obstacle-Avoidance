@@ -7,6 +7,7 @@ const recent = value => value && Date.now() - value.stamp <= MAX_FRAME_AGE;
 const kinds = {items:'item', people:'person', habits:'habit'};
 const positions = new Set(['left','center','right']);
 const DETECTION_SCHEMA_VERSION = 1;
+const CHAIR_CAUTION_DEPTH_M = 1.5;
 const movingLabels = new Map(Object.entries({
   person:'行人', bicycle:'自行车', motorcycle:'摩托车', car:'汽车', bus:'公交车', truck:'卡车', dog:'狗'
 }));
@@ -272,6 +273,13 @@ function createAgentRoutes(options, sessions, read, respond) {
       const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
           (partner.depthOptions?.algorithm ?? 'sgbm') === (payload.stereo?.algorithm ?? 'sgbm') &&
           partner.stream === session.slots.B.streamID;
+      // Verify a chair's stereo evidence before exposing the CV risk or queuing speech.
+      for (const [i, object] of objects.entries()) {
+        if (object.label !== 'chair' || object.risk === 'normal') continue;
+        const z = payload.objects[i].depth_m;
+        object.risk = paired && object.track_id && Number.isFinite(z) && z > 0 && z <= CHAIR_CAUTION_DEPTH_M
+          ? 'caution' : 'normal';
+      }
       if (paired) {
         for (const [i, object] of objects.entries()) {
           const z = payload.objects[i].depth_m;
@@ -315,7 +323,8 @@ function createAgentRoutes(options, sessions, read, respond) {
         if (session.alertCooldown.has(id)) continue;
         session.alertCooldown.set(id,now);
         session.alerts.push({kind:'obstacle',id:++session.alertSeq,camera_id:camera,risk:obstacle.risk,streamID:slot.streamID,
-          track_id:obstacle.track_id,stamp:captured.stamp,...obstacleSpeech(obstacle)});
+          track_id:obstacle.track_id,stamp:captured.stamp,...obstacleSpeech(obstacle),
+          ...(obstacle.label === 'chair' ? {metric:true,partnerStream:partner.stream} : {})});
       }
       if (camera === 'A') {
         const warning = acceptRoadEdge(slot, payload.road_edge, captured.stamp, session.slots.B.streamID, paired);
@@ -404,6 +413,10 @@ function createAgentRoutes(options, sessions, read, respond) {
         if (alert.kind === 'road_edge' && alert.metric) {
           return scene?.road_edge?.level === 'caution' && scene.partnerStream === session.slots.B.streamID &&
             recent(session.slots.B);
+        }
+        if (alert.kind === 'obstacle' && alert.metric) {
+          return recent(session.slots.B) && scene?.partnerStream === session.slots.B.streamID &&
+            scene.objects.some(obj => obj.track_id === alert.track_id && obj.label === alert.label && obj.risk === 'caution');
         }
         if (alert.kind !== 'path_intrusion') return true;
         const detection = session.slots.A.detection;

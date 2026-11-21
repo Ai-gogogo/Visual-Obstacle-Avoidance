@@ -9,6 +9,7 @@ UNKNOWN_URGENT_BOTTOM = 0.90
 # Measured stereo distance replaces the box-size proxy when the object has one.
 URGENT_DEPTH_M = 1.2
 CAUTION_DEPTH_M = 3.0
+CHAIR_CAUTION_DEPTH_M = 1.5
 
 
 def urgent_now(obj):
@@ -37,11 +38,18 @@ class RiskAssessment:
         for obj in objects:
             obj["risk"] = "normal"
             track_id = obj.get("track_id")
-            if (not track_id or not obj["obstacle_candidate"] or obj["confidence"] < MIN_CONFIDENCE
-                    or beyond_caution(obj)):
+            if not track_id or not obj["obstacle_candidate"] or obj["confidence"] < MIN_CONFIDENCE:
                 continue
 
-            urgent = urgent_now(obj)
+            if obj.get("label") == "chair":
+                depth_m = obj.get("depth_m")
+                if not isinstance(depth_m, (int, float)) or not 0 < depth_m <= CHAIR_CAUTION_DEPTH_M:
+                    continue
+                urgent = False
+            else:
+                if beyond_caution(obj):
+                    continue
+                urgent = urgent_now(obj)
             current[track_id] = urgent
             if consecutive and track_id in self.previous:
                 obj["risk"] = "urgent" if urgent and self.previous[track_id] else "caution"
