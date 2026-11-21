@@ -15,10 +15,11 @@ function inspect(images,mode,batch = false) {
   });
 }
 
-function stereoPartner(A,B,now) {
+function stereoPartner(A,B,now,eligible) {
   if (!A.sample || now-A.stamp >= 5000) return null;
   let best, limit = 65;
   for (const frame of B.history || []) {
+    if (eligible && !eligible(frame)) continue;
     if ((frame.transport ?? 'image') !== (A.rtcID ? 'webrtc' : 'image') || frame.quality !== A.rtcQuality) continue;
     const skew = Math.abs(A.sample.ms-frame.sample.ms)+A.sample.error+frame.sample.error;
     if (now-frame.stamp < 5000 && skew <= limit) {

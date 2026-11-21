@@ -6,6 +6,7 @@ import { createAccessibility } from "../../shared/accessibility";
 import { createDesktopSession } from "../../services/desktop-session";
 import { createPerceptionController } from "../perception/perception-controller";
 import { connectPairing } from "../pairing/pairing-controller";
+import { connectRecordings } from "../perception/recordings-controller";
 import { connectCalibration } from "../calibration/calibration-controller";
 import { createVisionMemoryView } from "./memory-view";
 import { createVoiceMeter } from "./voice-meter";
@@ -26,6 +27,7 @@ export function mountDesktop(root, voicePresentation) {
   const perception = createPerceptionController({$, root, scope, session, isMonitor,
     onModeChange() { stopAudio(); $('#voice-message').textContent = ''; }});
   connectPairing({$, root, scope, session, accessibility, isMonitor, onPaired:perception.paired});
+  connectRecordings({$,scope,session});
   connectCalibration({$, scope, session, accessibility});
   let voiceSession;
   let recoveryTimer;

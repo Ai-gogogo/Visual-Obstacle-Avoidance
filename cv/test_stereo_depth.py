@@ -207,6 +207,62 @@ class LiveStereoTests(unittest.TestCase):
                 self.assertAlmostEqual(snap["objects"][0]["depth_m"],expected,delta=.002)
                 self.assertAlmostEqual(snap["center_m"],expected,delta=.002)
 
+        # Changing algorithms must reach the worker and the returned frame must identify the same choice.
+        for algorithm in ('raft', 'sgbm'):
+            prefs = dict(spatial=False, temporal=False, meters=True, fiveMm=125, algorithm=algorithm)
+            request("GET", "/api/preview/A", desk, headers={"X-Depth-Options":json.dumps(prefs)})
+            stamp = int(time.time()*1000)
+            upload(b, right, stamp)
+            upload(a, left, stamp)
+            with patch("raft_depth.compute", return_value=np.ones(left.shape, np.float32)) as raft:
+                snap = read()
+            self.assertEqual(raft.call_count, int(algorithm == 'raft'))
+            self.assertEqual(snap["stereo_status"], "ready")
+            self.assertEqual(snap["depth_options"]["algorithm"], algorithm)
+            if algorithm == 'raft':
+                time.sleep(.8)  # RAFT often finishes after the normal 750 ms overlay limit.
+                upload(a, left, int(time.time()*1000))
+                delayed = request("GET", "/api/preview/A", desk).json()
+                self.assertEqual(delayed["frame_id"], snap["depth_frame_id"])
+                self.assertEqual(delayed["objects"][0]["depth_m"], snap["objects"][0]["depth_m"])
+                self.assertGreater(delayed["analysis_expires_ms"], time.time()*1000)
+                self.assertNotIn("road_edge", delayed)
+                geom, l_bgr, r_bgr = raft.call_args.args
+                self.assertEqual(geom.size, (l_bgr.shape[1], l_bgr.shape[0]))
+                self.assertEqual(l_bgr.shape, (*left.shape, 3))
+                self.assertEqual(r_bgr.shape, l_bgr.shape)
+
+        # Slow RAFT must keep YOLO boxes on their original image even with meters off.
+        prefs = dict(spatial=False, temporal=False, meters=False, fiveMm=125, algorithm="raft")
+        request("GET", "/api/preview/A", desk, headers={"X-Depth-Options":json.dumps(prefs)})
+        stamp = int(time.time()*1000)-850
+        upload(b, right, stamp)
+        original = upload(a, left, stamp, lossless=True)
+        with patch("raft_depth.compute", return_value=np.ones(left.shape, np.float32)):
+            delayed = read()
+        self.assertTrue(delayed["analysis_delayed"])
+        self.assertEqual(delayed["frame_id"], delayed["depth_frame_id"])
+        self.assertEqual(base64.b64decode(delayed["png"]), original)
+        self.assertEqual(delayed["objects"][0]["label"], "chair")
+        self.assertNotIn("depth_m", delayed["objects"][0])
+        self.assertNotIn("road_edge", delayed)
+        self.assertGreater(delayed["analysis_expires_ms"], time.time()*1000)
+
+        # A slow result without a usable depth map still has boxes for the same A image.
+        stamp = int(time.time()*1000)-850
+        upload(b, right, stamp)
+        upload(a, left, stamp)
+        with patch("raft_depth.compute", return_value=np.full(left.shape, np.nan, np.float32)):
+            delayed = read()
+        self.assertEqual(delayed["stereo_status"], "no_matches")
+        self.assertEqual(delayed["objects"][0]["label"], "chair")
+        self.assertNotIn("depth_preview", delayed)
+
+        # Switching back to SGBM restores its shorter display window.
+        request("GET", "/api/preview/A", desk,
+                headers={"X-Depth-Options":json.dumps(dict(prefs, algorithm="sgbm"))})
+        self.assertIsNone(request("GET", "/api/preview/A", desk).json()["objects"])
+
         get = http.get
 
         def time_out_partner(url, **kwargs):
@@ -214,7 +270,7 @@ class LiveStereoTests(unittest.TestCase):
                 raise requests.Timeout("Simulated unavailable stereo partner")
             return get(url, **kwargs)
 
-        upload(a, left, now)
+        upload(a, left, int(time.time()*1000))
         with patch.object(http, "get", side_effect=time_out_partner):
             unavailable = read()
         self.assertEqual(unavailable["stereo_status"], "unavailable")

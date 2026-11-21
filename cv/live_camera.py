@@ -16,6 +16,7 @@ from threading import Event, Lock
 import cv2
 import numpy as np
 import requests
+import raft_depth
 from PIL import Image, ImageOps
 
 from depth_filters import spatial_depth, StaticMedian
@@ -273,12 +274,14 @@ class CameraWorker:
 
         if self.usb_resolution and partner.headers.get("X-USB-Resolution") != self.usb_resolution:
             return {"status": "size_mismatch"}, None
-        right = cv2.imdecode(
+        algorithm = partner.headers.get("X-Depth-Algorithm", "sgbm")
+        right_input = cv2.imdecode(
             np.frombuffer(partner.content, np.uint8),
-            cv2.IMREAD_GRAYSCALE
+            cv2.IMREAD_COLOR if algorithm == "raft" else cv2.IMREAD_GRAYSCALE
         )
-        if right is None or right.shape != self.stereo.size[::-1]:
+        if right_input is None or right_input.shape[:2] != self.stereo.size[::-1]:
             return {"status": "size_mismatch"}, None
+        right = cv2.cvtColor(right_input, cv2.COLOR_BGR2GRAY) if algorithm == "raft" else right_input
         gray = np.asarray(image.convert("L"))
         if self.rtc_low_stereo is not None and self.stereo is self.rtc_low_stereo:
             if partner.headers.get("X-RTC-Profile") != "portrait-low":
@@ -293,16 +296,27 @@ class CameraWorker:
                     return {"status": "transport_unvalidated"}, None
                 self.verified_rtc_pair = pair
         low_crop = partner.headers.get("X-Depth-Low") == "1" and self.stereo.size == (1080, 1920)
+        stereo = self.stereo
+        views = (cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR), right_input) if algorithm == "raft" else (gray, right)
         if low_crop:
             if self.low_stereo is None:
                 self.low_stereo = self.stereo.for_usb_low_output()
-            small = [cv2.resize(view[240:-240], (480, 640), interpolation=cv2.INTER_AREA)
-                     for view in (gray, right)]
-            result = self.low_stereo.compute(*small)
-            depth = np.full(gray.shape, np.nan, dtype=np.float32)
-            depth[240:-240] = cv2.resize(result, (1080, 1440), interpolation=cv2.INTER_NEAREST)
+            stereo = self.low_stereo
+            views = [cv2.resize(view[240:-240], (480, 640), interpolation=cv2.INTER_AREA) for view in views]
+        if algorithm == "raft":
+            try:
+                depth = raft_depth.compute(stereo, *views)
+            except (ImportError, OSError, RuntimeError) as error:
+                if getattr(self, "raft_error", None) != str(error):
+                    print(f"RAFT-Stereo unavailable: {error}", file=sys.stderr)
+                self.raft_error = str(error)
+                return {"status": "raft_unavailable"}, None
         else:
-            depth = self.stereo.compute(gray, right)
+            depth = stereo.compute(*views)
+        if low_crop:
+            cropped = depth
+            depth = np.full(gray.shape, np.nan, dtype=np.float32)
+            depth[240:-240] = cv2.resize(cropped, (1080, 1440), interpolation=cv2.INTER_NEAREST)
         options = partner.headers
         source = params["source_id"]
         meters = options.get("X-Depth-Meters", "1") == "1"
@@ -321,7 +335,7 @@ class CameraWorker:
         if spatial:
             display = spatial_depth(depth, gray)
         if options.get("X-Depth-Temporal") == "1":
-            key = (options.get("X-Depth-Rig"), spatial, low_crop)
+            key = (options.get("X-Depth-Rig"), spatial, low_crop, algorithm)
             display = self.temporal.setdefault(source, StaticMedian()).apply(
                 key, int(options["X-Depth-Stamp"]), gray, display)
         else:
@@ -339,7 +353,7 @@ class CameraWorker:
         ok, png = cv2.imencode(".png", thumb)
         if not ok:
             raise RuntimeError("Cannot encode depth preview")
-        result = {"status": "ready", "partner_id": options["X-Partner-Id"],
+        result = {"status": "ready", "algorithm": algorithm, "partner_id": options["X-Partner-Id"],
                   "preview": base64.b64encode(png).decode("ascii")}
         result.update(valid_fraction=valid_fraction, partner_stream=options.get("X-Partner-Stream"),
                       meter_scale=scale_m)
@@ -383,7 +397,7 @@ def resolve_device(requested):
 
     if requested == "auto":
         return "cuda:0" if torch.cuda.is_available() else "cpu"
-    if requested == "cpu":
+    if requested == "cpu" or (requested == "mps" and torch.backends.mps.is_available()):
         return requested
     if requested == "cuda":
         requested = "cuda:0"
@@ -398,12 +412,12 @@ def resolve_device(requested):
         return f"cuda:{int(index)}"
     raise ValueError(
         f"Unavailable inference device {requested!r}. "
-        "Use cpu or an available CUDA device."
+        "Use cpu, mps on a supported Mac, or an available CUDA device."
     )
 
 
 def inference_options(parser, *, default_cpu_threads=1):
-    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
+    parser.add_argument("--device", default="auto", help="auto, cpu, mps, cuda, or cuda:N")
     parser.add_argument("--imgsz", type=int, default=640, help="YOLO input size, a multiple of 32")
     parser.add_argument("--half", action="store_true", help="Opt in to FP16 on CUDA")
     parser.add_argument("--cpu-threads", type=int, default=default_cpu_threads,
@@ -486,13 +500,13 @@ def main():
     except ValueError as error:
         parser.error(str(error))
 
-    if args.half and device == "cpu":
+    if args.half and not device.startswith("cuda:"):
         parser.error("--half requires CUDA.")
 
     import torch
     from ultralytics import YOLO
 
-    if device == "cpu":
+    if device in ("cpu", "mps"):
         torch.set_num_threads(args.cpu_threads)
     cv2.setNumThreads(1)
 

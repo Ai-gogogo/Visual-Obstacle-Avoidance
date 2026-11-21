@@ -102,8 +102,8 @@ function createAgentRoutes(options, sessions, read, respond) {
       const device = req.headers['x-cv-device'];
       const precision = req.headers['x-cv-precision'];
       if (['A','B'].includes(camera) && typeof device === 'string' &&
-          /^(cpu|cuda:\d+)$/.test(device) && ['fp16','fp32'].includes(precision) &&
-          (device !== 'cpu' || precision === 'fp32')) {
+          /^(cpu|mps|cuda:\d+)$/.test(device) && ['fp16','fp32'].includes(precision) &&
+          (device.startsWith('cuda:') || precision === 'fp32')) {
         workerRuntime.set(camera,{camera,device,precision,seen:Date.now()});
       }
       const sources = [...sessions.values()].filter(session => session.assistant).flatMap(session =>
@@ -160,6 +160,7 @@ function createAgentRoutes(options, sessions, read, respond) {
       if (!best) return res.writeHead(204).end();
       const opt = session.depthOptions;
       if (opt) {
+        res.setHeader('X-Depth-Algorithm',opt.algorithm ?? 'sgbm');
         res.setHeader('X-Depth-Low',Number(opt.low === true));
         res.setHeader('X-Depth-Spatial',Number(opt.spatial));
         res.setHeader('X-Depth-Temporal',Number(opt.temporal));
@@ -205,10 +206,11 @@ function createAgentRoutes(options, sessions, read, respond) {
       };
       const partner = captured.partner;
       if (camera === 'A' && payload.stereo) {
-        slot.detection.stereoStatus = ['size_mismatch','no_matches','unavailable','transport_unvalidated'].includes(payload.stereo.status)
+        slot.detection.stereoStatus = ['size_mismatch','no_matches','unavailable','raft_unavailable','transport_unvalidated'].includes(payload.stereo.status)
           ? payload.stereo.status : 'waiting_for_pair';
       }
       const paired = camera === 'A' && recent(partner) && partner.id === payload.stereo?.partner_id &&
+          (partner.depthOptions?.algorithm ?? 'sgbm') === (payload.stereo?.algorithm ?? 'sgbm') &&
           partner.stream === session.slots.B.streamID;
       if (paired) {
         for (const [i, object] of objects.entries()) {

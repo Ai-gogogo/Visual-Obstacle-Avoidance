@@ -1,4 +1,5 @@
 import { CameraFeeds } from "./CameraFeeds";
+import { StereoRecordings } from "./StereoRecordings";
 import { DetectionTable } from "./DetectionTable";
 
 export function MonitorPanel() {
@@ -34,6 +35,7 @@ export function MonitorPanel() {
           </button>
         </div>
       </div>
+      <StereoRecordings />
       <CameraFeeds />
       <DetectionTable />
     </section>

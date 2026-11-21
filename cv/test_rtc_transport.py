@@ -194,6 +194,18 @@ class TransportTest(unittest.IsolatedAsyncioTestCase):
 
             jpeg = base64.b64decode(first["jpeg"])
             await call("PUT", "/api/frame", 409, a, data=jpeg, headers={"Content-Type": "image/jpeg"})
+            # The timestamp travels with these JPEG bytes, independently of the RTCP epoch.
+            capture_stamp = time.time_ns() // 1_000_000 - 35
+            capture_headers = {"Content-Type": "image/jpeg", "X-Capture-Stream": status[0]["capture_stream"],
+                               "X-Sample-Ms": str(capture_stamp), "X-Clock-Error-Ms": "5"}
+            await call("PUT", "/api/frame", 409, b, headers=capture_headers, data=jpeg)
+            await call("PUT", "/api/frame", 204, a, headers=capture_headers, data=jpeg)
+            await asyncio.sleep(.14)  # The RTC bridge also emits frames during this interval.
+            async with http.get("/api/cv/frame" + query) as response:
+                self.assertEqual(response.headers["X-RTC-Timing-Source"], "frame-capture-time")
+                self.assertEqual(int(response.headers["X-CV-Sample-Ms"]), capture_stamp)
+                self.assertEqual(await response.read(), jpeg)
+            await call("PUT", "/api/frame", 422, a, headers=capture_headers, data=jpeg)
             await call("DELETE", "/api/webrtc/offer", 204, a)
             await call("GET", "/api/preview/A", 204, dashboard)
             await call("POST", "/api/cv/detections" + query, 409,

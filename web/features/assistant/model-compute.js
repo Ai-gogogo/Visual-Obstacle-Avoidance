@@ -15,7 +15,7 @@ export function connectModelCompute({$, scope, agentRequest}) {
         'application/json',AbortSignal.timeout(2800));
       if (scope.signal.aborted) return;
       render(yoloLabel,yolo.length ? yolo.map(worker => {
-        const device = worker.device === 'cpu' ? 'CPU' : 'GPU '+worker.device.split(':')[1];
+        const device = worker.device === 'cpu' ? 'CPU' : worker.device === 'mps' ? 'Apple GPU (MPS)' : 'GPU '+worker.device.split(':')[1];
         return 'Camera '+worker.camera+' · '+device+' · '+worker.precision.toUpperCase();
       }).join(' / ') : 'No worker reporting');
       const live = agent.loaded.map(model => model.name+' · '+placement(model)).join(' / ');

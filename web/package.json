@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "VisionAssist desktop and phone interfaces",
   "scripts": {
-    "test": "node --test pairing.test.cjs calibration-quality.test.cjs calibration-video.test.cjs camera-reconnect.test.cjs ../llm/agent.test.cjs ../llm/road-alerts.test.cjs",
+    "test": "node --test recordings.test.cjs pairing.test.cjs calibration-quality.test.cjs calibration-video.test.cjs camera-reconnect.test.cjs ../llm/agent.test.cjs ../llm/road-alerts.test.cjs",
     "dev": "node server.cjs --dev",
     "build": "next build",
     "start": "node server.cjs",

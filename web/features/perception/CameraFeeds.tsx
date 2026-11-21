@@ -84,31 +84,11 @@ export function CameraFeeds() {
         <header>
           <h2>Stereo depth map</h2>
         </header>
-        <label>Depth source
-          <select id="depth-source" defaultValue="live">
-            <option value="live">Live · current calibration</option>
-            <option value="low">Live · 480 × 640 crop</option>
-            <option value="d8be72ae">Saved · cup and table · 480 × 640</option>
-            <option value="4317d705">Saved · checkerboard 4317d705 · 480 × 640</option>
-            <option value="36ad570e">Saved · checkerboard 36ad570e · 480 × 640</option>
-          </select>
-        </label>
         <div id="saved-depth" hidden>
           <video id="saved-depth-video" controls playsInline style={{width:"100%",maxHeight:"55vh"}} />
           <p id="saved-depth-status" role="status"></p>
         </div>
-        <div id="live-depth-controls">
-        <header>
-          <label>
-            Palette{" "}
-            <select id="depth-palette" defaultValue="turbo">
-              <option value="turbo">Turbo</option>
-              <option value="gray">Grayscale</option>
-              <option value="viridis">Viridis</option>
-            </select>
-          </label>
-        </header>
-        <div className="frame">
+        <div className="frame" id="live-depth-frame">
           <canvas
             id="stereo-map"
             className="live-frame"
@@ -119,6 +99,32 @@ export function CameraFeeds() {
           <span id="depth-reticle" aria-hidden="true" hidden></span>
           <p id="stereo-caption" className="no-feed"></p>
         </div>
+        <label className="depth-source-control">Depth source
+          <select id="depth-source" defaultValue="live">
+            <option value="live">Live · current calibration</option>
+            <option value="low">Live · 480 × 640 crop</option>
+            <option value="d8be72ae">Saved · cup and table · 480 × 640</option>
+            <option value="4317d705">Saved · checkerboard 4317d705 · 480 × 640</option>
+            <option value="36ad570e">Saved · checkerboard 36ad570e · 480 × 640</option>
+          </select>
+        </label>
+        <div id="live-depth-controls">
+        <header>
+          <label>Depth algorithm{" "}
+            <select id="depth-algorithm" defaultValue="sgbm">
+              <option value="sgbm">StereoSGBM</option>
+              <option value="raft">RAFT-Stereo</option>
+            </select>
+          </label>
+          <label>
+            Palette{" "}
+            <select id="depth-palette" defaultValue="turbo">
+              <option value="turbo">Turbo</option>
+              <option value="gray">Grayscale</option>
+              <option value="viridis">Viridis</option>
+            </select>
+          </label>
+        </header>
         <p id="depth-hold-status" role="status" hidden></p>
         <div className="depth-controls">
           <label><input type="checkbox" id="depth-spatial" /> Edge-aware filter (WLS)</label>

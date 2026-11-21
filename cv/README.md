@@ -54,7 +54,7 @@ python cv/live_camera.py
 
 Open the dashboard at `http://localhost:8765/`, generate independent pairing codes for **Camera A** and **Camera B**, then open `/camera` on each device and enter its code. Camera A can run alone for YOLO. HTTP localhost works for a two-tab test on one computer. For a physical phone, follow the [Web HTTPS setup](../web/README.md). Run the worker on the server computer and pass `--server https://localhost:8765` if the certificate includes localhost. Use a hostname that resolves to loopback on that computer and is accepted by the server and certificate. For a private CA, set `REQUESTS_CA_BUNDLE` to the PEM file for its trust chain.
 
-In live mode, the left panel displays Camera A with YOLO boxes, and the right panel displays a depth map aligned to that exact A frame. The default worker loads one YOLO predictor for A on either CPU or CUDA. B supplies matching frames in the selected JPEG or lossless PNG mode. Pair A first to test detection; pair B and load a calibration for these phones to measure meters. If stereo is unavailable, A keeps detecting and the right panel explains why. The built-in sample scene remains available separately.
+In live mode, the left panel displays Camera A with YOLO boxes, and the right panel displays a depth map aligned to that exact A frame. The default worker loads one YOLO predictor for A, with explicit CPU, CUDA and Apple GPU support. B supplies matching frames in the selected JPEG or lossless PNG mode. Pair A first to test detection; pair B and load a calibration for these phones to measure meters. If stereo is unavailable, A keeps detecting and the right panel explains why. The built-in sample scene remains available separately.
 
 For a keyboard scene question, select Camera A in Voice assistant. The worker pins its YOLO result to the ETag of the actual frame. The historical two-predictor comparison is available with `--dual-yolo`; the dual-camera benchmark opts into that mode.
 
@@ -98,6 +98,8 @@ Steps, raised surfaces, camera roll and occlusion can invalidate the contact cue
 ## Dual-camera performance
 
 To log accepted detections (A by default, both with `--dual-yolo`), use `python cv/live_camera.py --metrics /path/to/new.csv`. Each row identifies the source, camera and frame. Both timestamps used for latency come from the server: from receipt of the complete JPEG to acceptance of the matching detection. This includes waiting for the worker to poll, decoding, inference and result submission. Phone capture, upload to the server and browser rendering occur outside this interval. Duplicate submissions do not add samples.
+
+On an Apple Silicon Mac with a compatible PyTorch installation, pass `--device mps` to run YOLO on the Apple GPU. Use FP32 in this mode. The `--cpu-threads` setting still applies to CPU work, including RAFT-Stereo.
 
 The live worker defaults to `--device auto`, which selects CUDA when the
 installed PyTorch can use it and otherwise selects CPU. The default input size

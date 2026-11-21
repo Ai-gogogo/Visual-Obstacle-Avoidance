@@ -27,6 +27,7 @@ export function createPerceptionView($, signal) {
 
   function depthOptions() {
     return {
+      algorithm: $('#depth-algorithm').value,
       low: $('#depth-source').value === 'low',
       spatial: $('#depth-spatial').checked,
       temporal: $('#depth-temporal').checked,
@@ -92,7 +93,7 @@ export function createPerceptionView($, signal) {
     clearTimeout(holdTimer);
     const notice = $('#depth-hold-status');
     notice.hidden = true;
-    const age = lastDepthFrame ? Date.now() - lastDepthFrame.snapshot.timestamp_ms : Infinity;
+    const age = lastDepthFrame ? Date.now() - (lastDepthFrame.snapshot.depth_timestamp_ms ?? lastDepthFrame.snapshot.timestamp_ms) : Infinity;
     const waiting = snapshot && (snapshot.stereo_status === 'waiting_for_pair' ||
       (!snapshot.objects && !snapshot.stereo_status));
     if (!preview && !sampleMode && waiting && age >= 0 && age < 3500 &&
@@ -113,8 +114,11 @@ export function createPerceptionView($, signal) {
       uncalibrated:'Load the calibration for this phone pair to measure depth.',
       size_mismatch:'Depth unavailable · check both phones’ image dimensions against calibration.',
       transport_unvalidated:'Validate this rig in WebRTC mode before enabling depth.',
-      waiting_for_pair:'Depth waiting for two time-matched camera frames.',
+      waiting_for_pair:snapshot?.waiting_for_camera_clock?.length
+        ? 'Waiting for a usable capture timestamp from Camera '+snapshot.waiting_for_camera_clock.join(' and Camera ')+'.'
+        : 'Depth waiting for two time-matched camera frames.',
       unavailable:'Depth processing is unavailable. Camera A is still detecting objects.',
+      raft_unavailable:'RAFT-Stereo is unavailable. Check the local model and Python dependencies.',
       no_matches:'Depth unavailable · insufficient matching detail in the shared view.'
     };
     $('#stereo-view').hidden = false;
@@ -156,7 +160,13 @@ export function createPerceptionView($, signal) {
         }
         ctx.putImageData(frame,0,0);
       }
-      canvas.dataset.frameId = snapshot.frame_id;
+      canvas.dataset.frameId = snapshot.depth_frame_id ?? snapshot.frame_id;
+      if (snapshot.depth_expires_ms) {
+        const lag = Math.max(0, Date.now()-snapshot.depth_timestamp_ms);
+        notice.textContent = 'RAFT-Stereo · captured '+(lag/1000).toFixed(1)+' s ago';
+        notice.hidden = false;
+        holdTimer = setTimeout(() => showDepth(null,null,false),Math.max(0,snapshot.depth_expires_ms-Date.now()));
+      }
     } else {
       delete canvas.dataset.frameId;
     }

@@ -25,6 +25,7 @@ function phonePairingInfo(origin, side, code) {
 const TTL = 4 * 60 * 60 * 1000;
 const CODE_TTL = 5 * 60 * 1000;
 const FRESH = 5000;
+const RAFT_PREVIEW_MAX_LAG_MS = 3500;
 const PNG_SIGNATURE = Buffer.from([137,80,78,71,13,10,26,10]);
 const PNG_END = Buffer.from([0,0,0,0,73,69,78,68,174,66,96,130]);
 const key = () => randomBytes(24).toString('hex');
@@ -51,6 +52,8 @@ function createServer(options = {}) {
   const attempts = new Map();
   const assistant = createAgentRoutes(options.agent, sessions, read, respond);
   const usb = require("./usb-cameras.cjs").usbCameras({sessions, phones, key, read, respond});
+  const recordings = require('./recordings.cjs').stereoRecordings(
+    options.recordingRoot ?? join(__dirname,'../.visionassist/recordings'),respond);
   const rtc = options.rtc ?? (options.rtcPython && createRtcBridge(options.rtcPython));
 
   function resetSource(session, side) {
@@ -123,6 +126,8 @@ function createServer(options = {}) {
           return res.writeHead(200,{'Content-Type':'video/mp4'}).end(bytes);
         } catch { return respond(res,404,{error:'This saved depth replay is unavailable on this Mac.'}); }
       }
+      if (route === '/api/recordings' || route.startsWith('/api/recordings/'))
+        return await recordings.handle(req,res,route,sessions.get(token));
       if (route === '/api/usb') return await usb.handle(req,res,token);
       if (route === '/api/calibration/video-check') {
         if (!sessions.has(token)) return respond(res,401,{error:'Camera session ended.'});
@@ -263,7 +268,7 @@ function createServer(options = {}) {
         }
         if (route.endsWith('/status') && method === 'GET') {
           return respond(res,200,{available:Boolean(rtc?.ready),receiving:Boolean(original.rtcID && original.frame),
-            ...original.rtcStats});
+            ...original.rtcStats, ...(original.rtcQuality==='portrait-low' ? {capture_stream:original.streamID} : {})});
         }
         if (route.endsWith('/offer') && method === 'DELETE') {
           if (original.rtcID) resetSource(session,side);
@@ -286,6 +291,11 @@ function createServer(options = {}) {
             if (session.slots[side] !== slot) return;
             const frame = Buffer.from(event.jpeg,'base64');
             if (!frame.length || frame.length > (quality === "portrait-full" ? 4*1024*1024 : 600000)) return;
+            // The browser snapshot already carries the capture time of those exact pixels.
+            if (slot.browserFrameAt && Date.now()-slot.browserFrameAt < 450) {
+              slot.rtcStats = {...slot.rtcStats,decoded_fps:event.fps,decoded_frames:event.decoded_frames};
+              return;
+            }
             slot.frame = frame;
             slot.frameType = 'image/jpeg';
             slot.stamp = Date.now();
@@ -367,7 +377,10 @@ function createServer(options = {}) {
         if (type !== 'image/jpeg' && type !== 'image/png') return respond(res, 400, {error:'Expected a JPEG or PNG frame.'});
         const frame = await read(req, type === 'image/png' ? 12 * 1024 * 1024 : 350_000);
         if (session.slots[entry.slot] !== slot) return respond(res, 401, {error:'Camera was replaced. Pair again.'});
-        if (slot.rtcID) return respond(res,409,{error:'Close WebRTC before uploading images.'});
+        const captureStream = req.headers['x-capture-stream'];
+        const browserCapture = captureStream && captureStream === slot.streamID && slot.rtcID &&
+          slot.rtcQuality === 'portrait-low' && type === 'image/jpeg';
+        if ((slot.rtcID || captureStream) && !browserCapture) return respond(res,409,{error:'Camera stream changed.'});
         if (type === 'image/png') {
           if (frame.length < 45 || !frame.subarray(0,8).equals(PNG_SIGNATURE) ||
               frame.readUInt32BE(8) !== 13 || frame.toString('ascii',12,16) !== 'IHDR' ||
@@ -381,15 +394,25 @@ function createServer(options = {}) {
         } else if (frame.length < 4 || frame.readUInt16BE() !== 0xffd8 || frame.readUInt16BE(frame.length-2) !== 0xffd9) {
           return respond(res, 400, {error:'Expected a JPEG frame.'});
         }
-        slot.frame = frame;
-        slot.frameType = type;
-        slot.stamp = Date.now();
-        slot.etag = '"' + key() + '"';
+        const stamp = Date.now();
         const sample = Number(req.headers['x-sample-ms']);
         const uncertainty = Number(req.headers['x-clock-error-ms']);
-        slot.sample = Number.isSafeInteger(sample) && Math.abs(slot.stamp-sample) < FRESH &&
-          Number.isSafeInteger(uncertainty) && uncertainty >= 0 && uncertainty <= 250
-          ? {ms:sample, error:uncertainty} : null;
+        const valid = Number.isSafeInteger(sample) && Number.isSafeInteger(uncertainty) && uncertainty >= 0 &&
+          (browserCapture ? uncertainty <= 32 && sample >= stamp-750 && sample <= stamp+uncertainty
+                          : Math.abs(stamp-sample) < FRESH && uncertainty <= 250);
+        if (browserCapture) {
+          if (!valid || sample <= (slot.lastBrowserSample ?? 0))
+            return respond(res,422,{error:'Capture time unavailable or stale.'});
+          slot.browserFrameAt = stamp;
+          slot.lastBrowserSample = sample;
+          slot.rtcStats = {...slot.rtcStats,timing_source:'frame-capture-time',capture_timing_available:true,
+            timing_lag_ms:stamp-sample,width:480,height:640};
+        }
+        slot.frame = frame;
+        slot.frameType = type;
+        slot.stamp = stamp;
+        slot.etag = '"' + key() + '"';
+        slot.sample = valid ? {ms:sample,error:uncertainty} : null;
         if (entry.slot === 'B') rememberRight(slot);
         res.setHeader('X-Server-Ms', slot.stamp);
         return res.writeHead(204).end();
@@ -404,17 +427,27 @@ function createServer(options = {}) {
         if (side === 'A' && req.headers['x-depth-options'] !== undefined) {
           const opt = JSON.parse(req.headers['x-depth-options']);
           const mm = Number(opt.fiveMm);
-          session.depthOptions = {...(typeof opt.low === 'boolean' ? {low:opt.low} : {}), spatial:opt.spatial === true, temporal:opt.temporal === true,
+          session.depthOptions = {...(opt.algorithm === 'raft' || opt.algorithm === 'sgbm' ? {algorithm:opt.algorithm} : {}),
+            ...(typeof opt.low === 'boolean' ? {low:opt.low} : {}), spatial:opt.spatial === true, temporal:opt.temporal === true,
             meters:opt.meters === true, fiveMm:Number.isFinite(mm) && mm>0 ? mm : 0};
         }
         if (!slot.frame || now - slot.stamp > FRESH) return res.writeHead(204).end();
         // CV pins the actual JPEG at inference time. The phone may already be ahead.
         const recentDetection = slot.detection && now - slot.detection.timestamp_ms <= FRESH ? slot.detection : null;
-        const expires = (recentDetection?.capture_ms ?? recentDetection?.timestamp_ms) + PREVIEW_MAX_ANALYSIS_LAG_MS;
+        const captureStamp = recentDetection?.capture_ms ?? recentDetection?.timestamp_ms;
+        const expires = captureStamp + PREVIEW_MAX_ANALYSIS_LAG_MS;
         const analysisDelayed = recentDetection && now >= expires;
-        const detection = analysisDelayed ? null : recentDetection;
-        const partner = detection?.stereoPartner;
+        const freshAnalysis = analysisDelayed ? null : recentDetection;
+        const raftExpires = captureStamp + RAFT_PREVIEW_MAX_LAG_MS;
+        const withinRaftWindow = recentDetection && now < raftExpires;
+        const raftDepth = withinRaftWindow && recentDetection.stereoPartner?.depthOptions?.algorithm === 'raft'
+          ? recentDetection : null;
+        const depthDetection = freshAnalysis ?? raftDepth;
+        const partner = depthDetection?.stereoPartner;
         const lostPartner = partner && (session.slots.B.streamID !== partner.stream || now - partner.stamp > FRESH);
+        // Delayed RAFT results keep the matched YOLO image even if depth or meter labels are unavailable.
+        const raftAnalysis = withinRaftWindow && side === 'A' && session.depthOptions?.algorithm === 'raft';
+        const detection = freshAnalysis ?? (raftAnalysis ? recentDetection : null);
         const frame = detection?.frame ?? slot.frame;
         const format = detection?.frameType ?? slot.frameType;
         const frame_id = detection?.frame_id ?? slot.etag.slice(1,-1);
@@ -422,30 +455,38 @@ function createServer(options = {}) {
         const activeForecasts = [];
         const objects = detection?.objects.map(({item_feature, intrusion, ...object}, i) => {
           if (lostPartner) delete object.depth_m;
-          if (!lostPartner && intrusion && intrusion.expires > now && detection.partnerStream === session.slots.B.streamID) {
+          if (freshAnalysis && !lostPartner && intrusion && intrusion.expires > now && detection.partnerStream === session.slots.B.streamID) {
             object.intrusion = intrusion;
             activeForecasts.push(i);
           }
           return object;
         }) ?? null;
+        const stereoStatus = lostPartner ? 'waiting_for_pair' : (depthDetection ?? detection)?.stereoStatus;
+        const waitingClocks = side === 'A' && stereoStatus === 'waiting_for_pair'
+          ? Object.entries(session.slots).filter(([,camera]) => camera.rtcID && now-camera.stamp < FRESH &&
+            camera.rtcStats?.capture_timing_available === false).map(([name]) => name) : [];
         const forecastTag = activeForecasts.length ? '-cross-' + activeForecasts.join('-') : '';
-        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + forecastTag +
-          (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + '"';
+        const etag = '"' + (detection ? 'yolo-' : 'raw-') + frame_id + forecastTag + waitingClocks.join('') +
+          (raftAnalysis ? '-raft-overlay' : '') + (raftDepth ? '-depth-' + raftDepth.frame_id : '') + (lostPartner ? '-unpaired' : '') + (analysisDelayed ? '-analysis-delayed' : '') + '"';
         res.setHeader('ETag', etag);
         if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
         return respond(res,200,{
           schema_version:DETECTION_SCHEMA_VERSION, camera_id:side, frame_id,
           depth_rig:[session.slots.A.streamID,session.slots.B.streamID].join("/"),
           timestamp_ms:detection?.timestamp_ms ?? slot.stamp,
-          ...(detection ? {analysis_expires_ms:expires, preview_objects:detection.previewObjects} : {}),
+          ...(detection ? {analysis_expires_ms:raftAnalysis ? raftExpires : expires,
+            analysis_capture_ms:captureStamp, preview_objects:detection.previewObjects} : {}),
           ...(slot.rtcStats ? {webrtc:slot.rtcStats} : {}),
           ...(format === 'image/png' ? {png:frame.toString('base64')} : {jpeg:frame.toString('base64')}), objects,
-          ...(detection?.road_edge && (!lostPartner || detection.road_edge.distance_m === undefined) ? {road_edge:detection.road_edge} : {}),
+          ...(freshAnalysis?.road_edge && (!lostPartner || detection.road_edge.distance_m === undefined) ? {road_edge:detection.road_edge} : {}),
           ...(analysisDelayed ? {analysis_delayed:true} : {}),
-          ...(detection?.stereoStatus ? {stereo_status:lostPartner ? 'waiting_for_pair' : detection.stereoStatus} : {}),
-          ...(!lostPartner && detection?.depthPreview ? {
-            depth_preview:detection.depthPreview, depth_range_m:detection.depthRange,
-            depth_valid_fraction:detection.depthValidFraction, center_m:detection.centerM, depth_options:partner?.depthOptions
+          ...(waitingClocks.length ? {waiting_for_camera_clock:waitingClocks} : {}),
+          ...(stereoStatus ? {stereo_status:stereoStatus} : {}),
+          ...(!lostPartner && depthDetection?.depthPreview ? {
+            depth_frame_id:depthDetection.frame_id, depth_timestamp_ms:captureStamp,
+            ...(raftDepth ? {depth_expires_ms:raftExpires} : {}),
+            depth_preview:depthDetection.depthPreview, depth_range_m:depthDetection.depthRange,
+            depth_valid_fraction:depthDetection.depthValidFraction, center_m:depthDetection.centerM, depth_options:partner?.depthOptions
           } : {})
         });
       }
@@ -474,6 +515,7 @@ function createServer(options = {}) {
   const server = options.tls ? https.createServer(options.tls, handler) : http.createServer(handler);
   server.once('close', assistant.close);
   server.once('close', usb.close);
+  server.once('close', recordings.close);
   if (rtc) server.once('close', () => rtc.close());
   return server;
 }

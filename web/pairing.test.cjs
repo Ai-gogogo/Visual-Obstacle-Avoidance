@@ -34,6 +34,9 @@ test('runtime shows reported YOLO devices and distinguishes model residency from
   assert.deepEqual(first.agent.loaded.map(({device,gpu_percent}) => [device,gpu_percent]),[['gpu',100],['mixed',25]]);
   models = [{name:chat,size:100,size_vram:0}];
   assert.equal((await readRuntime()).agent.loaded[0].device,'cpu');
+  await pulse('A','mps','fp32');
+  await pulse('A','mps','fp16');
+  assert.deepEqual((await readRuntime()).yolo[0],{camera:'A',device:'mps',precision:'fp32'});
   t.mock.timers.tick(5100);
   models = [];
   const idle = await readRuntime();

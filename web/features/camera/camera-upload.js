@@ -183,23 +183,58 @@ export function createCameraUpload(video, report) {
     let received = false;
     let clockRefreshAt = 0;
 
+    let captureClock;
+    let captureStream;
+    let nextCapture = 0;
+    let uploading = false;
+
+    function samplePreview(now, meta) {
+      if (controller.signal.aborted || rtcPeer !== peer) return;
+      video.requestVideoFrameCallback(samplePreview);
+      if (uploading || now < nextCapture || !captureStream || !captureClock ||
+          now-captureClock.at > 15000 || !Number.isFinite(meta.captureTime) ||
+          meta.captureTime > performance.now()+2 || now-meta.captureTime > 750 ||
+          video.videoWidth !== 480 || video.videoHeight !== 640 || meta.width !== 480 || meta.height !== 640) return;
+      // Freeze the pixels inside the callback whose captureTime describes them.
+      if (canvas.width !== 480) canvas.width = 480;
+      if (canvas.height !== 640) canvas.height = 640;
+      context.drawImage(video,0,0,480,640);
+      const headers = {...auth,'Content-Type':'image/jpeg','X-Capture-Stream':captureStream,
+        'X-Sample-Ms':String(Math.round(meta.captureTime+captureClock.offset)),
+        'X-Clock-Error-Ms':String(captureClock.error+Math.ceil(Math.abs(meta.captureTime-captureClock.at)*.0001))};
+      nextCapture = now+90;
+      uploading = true;
+      canvas.toBlob(async blob => {
+        try {
+          if (blob && !controller.signal.aborted) await fetch('/api/frame',{method:'PUT',headers,body:blob,
+            signal:AbortSignal.any([controller.signal,AbortSignal.timeout(1500)])});
+        } catch { /* The next callback captures a fresh frame. */ }
+        finally { uploading = false; }
+      },'image/jpeg',.86);
+    }
+
     async function syncRtcClock() {
-      const options = {headers:auth,signal:AbortSignal.any([controller.signal,AbortSignal.timeout(1200)])};
+      const options = () => ({headers:auth,signal:AbortSignal.any([controller.signal,AbortSignal.timeout(1200)])});
       let best;
       for (let i=0; i<4; i++) {
         const start = performance.now();
         const sent = Date.now();
-        const response = await fetch('/api/webrtc/clock',options);
+        const response = await fetch('/api/webrtc/clock',options()).catch(()=>null);
         const received = Date.now();
         const elapsed = performance.now()-start;
-        if (!response.ok) return;
+        if (!response?.ok) break;
         const {server_ms} = await response.json();
         if (Math.abs(received-sent-elapsed) <= 5 && received >= sent && (!best || elapsed < best.elapsed)) {
-          best = {server_ms,sent_ms:sent,received_ms:received,elapsed};
+          best = {server_ms,sent_ms:sent,received_ms:received,elapsed,start};
         }
       }
-      if (best) await fetch('/api/webrtc/clock',{
-        ...options,method:'POST',headers:{...auth,'Content-Type':'application/json'},body:JSON.stringify(best)
+      if (controller.signal.aborted || !best) return;
+      const error = Math.ceil(best.elapsed/2)+2;
+      if (error <= 30 && (!captureClock || best.start-captureClock.at > 8000 || error <= captureClock.error)) {
+        captureClock = {offset:best.server_ms-best.start-best.elapsed/2,error,at:best.start};
+      }
+      await fetch('/api/webrtc/clock',{
+        ...options(),method:'POST',headers:{...auth,'Content-Type':'application/json'},body:JSON.stringify(best)
       });
     }
 
@@ -260,6 +295,7 @@ export function createCameraUpload(video, report) {
             ? 'Mac received '+state.width+' × '+state.height+' px. Calibration requires '+target+' px.'
             : 'Mac has no usable video frames. WebRTC ICE state: '+peer.iceConnectionState+'.');
         }
+        captureStream = state.capture_stream;
         if (state.receiving) {
           received = true;
           if (performance.now() >= clockRefreshAt) {
@@ -289,6 +325,7 @@ export function createCameraUpload(video, report) {
       });
       await exchangeVideoOffer(peer,offerPath,token,controller.signal);
       negotiatedAt = performance.now();
+      if (rtcMode === 'portrait-low' && video.requestVideoFrameCallback) video.requestVideoFrameCallback(samplePreview);
       await checkReceiver();
     } catch {
       await endRtc();

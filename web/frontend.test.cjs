@@ -39,6 +39,10 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Voice assistant/);
   assert.match(html,/Reduce motion/);
   assert.match(html,/Stereo calibration/);
+  assert.match(html,/Depth algorithm/);
+  assert.match(html,/RAFT-Stereo/);
+  assert.match(html,/Record A \+ B/);
+  assert.match(html,/Generate depth comparison/);
   assert.match(html,/Code for Camera A/);
   assert.match(html,/Code for Camera B/);
   const stylesheet = /<link[^>]+href="([^"]+\.css)"[^>]*>/.exec(html);

@@ -98,7 +98,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       feed.etag = response.headers.get('etag');
       const hasDetections = feed.objects != null || snapshot.objects != null;
       feed.objects = hasAnalysis ? snapshot.objects : null;
-      if (feed.side === 'A') VisionPerceptionView.showDepth(snapshot,hasAnalysis ? depth : null,sampleMode);
+      if (feed.side === 'A') VisionPerceptionView.showDepth(snapshot,hasAnalysis || snapshot.depth_expires_ms > Date.now() ? depth : null,sampleMode);
       feed.rtc.update(Boolean(snapshot.webrtc));
       feed.rtc.updateAnalysis(hasAnalysis && hasBoxes);
       setFeed(feed,true);
@@ -115,7 +115,9 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
         feed.node.querySelector('.frame-size').textContent += ' · '+snapshot.webrtc.decoded_fps+' FPS at receiver';
       }
       if (snapshot.analysis_delayed) {
-        feed.node.querySelector('.feed-summary').textContent = 'Live preview · analysis catching up';
+        feed.node.querySelector('.feed-summary').textContent = hasAnalysis
+          ? 'Matched analysis frame · '+(Math.max(0,Date.now()-snapshot.analysis_capture_ms)/1000).toFixed(1)+' s ago'
+          : 'Live preview · analysis catching up';
       } else if (snapshot.road_edge?.point) {
         const meters = snapshot.road_edge.distance_m;
         feed.node.querySelector('.feed-summary').textContent = Number.isFinite(meters)
@@ -168,6 +170,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
     const saved = !['live','low'].includes(source.value);
     clearReplay();
     $('#saved-depth').hidden = !saved;
+    $('#live-depth-frame').hidden = saved;
     $('#live-depth-controls').hidden = saved;
     if (!saved) { VisionPerceptionView.showDepth(null,null,sampleMode); refreshPolling(); return; }
     $('#saved-depth-status').textContent = 'Loading saved depth…';
@@ -185,7 +188,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   });
   scope.signal.addEventListener('abort',clearReplay,{once:true});
   listen($('#depth-palette'), 'change', VisionPerceptionView.repaintDepth);
-  for (const id of ['depth-spatial','depth-temporal','depth-meters']) {
+  for (const id of ['depth-algorithm','depth-spatial','depth-temporal','depth-meters']) {
     listen($('#'+id), 'change', () => {
       refreshPolling();
       VisionPerceptionView.renderDetections(sampleMode, feeds);

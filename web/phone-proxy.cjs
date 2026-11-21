@@ -21,7 +21,7 @@ https.createServer({cert:fs.readFileSync('server.pem'),key:fs.readFileSync('serv
   const nextAsset = req.method === 'GET' && /^\/_next\/static\/(?:[A-Za-z0-9_~-][\w.~-]*\/)*[A-Za-z0-9_~-][\w.~-]*\.(?:js|css|woff2)(?:\?[^#]*)?$/.test(req.url);
   if(req.headers.host !== ip+':'+port || (req.headers.origin && req.headers.origin!==origin) || req.headers['sec-fetch-site']==='cross-site' || !(nextAsset || phoneRoute(req.method,req.url))) return res.writeHead(404).end();
   const headers={host:req.headers.host};
-  for(const name of ['content-type','authorization','origin','sec-fetch-site','content-length','x-sample-ms','x-clock-error-ms']) if(req.headers[name]) headers[name]=req.headers[name];
+  for(const name of ['content-type','authorization','origin','sec-fetch-site','content-length','x-sample-ms','x-clock-error-ms','x-capture-stream']) if(req.headers[name]) headers[name]=req.headers[name];
   const upstream=http.request({host:'127.0.0.1',port:Number(process.env.DESKTOP_PORT || 8775),path:req.url,method:req.method,headers},response=>{
     res.writeHead(response.statusCode, response.headers);
     response.pipe(res);
