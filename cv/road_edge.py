@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from geometry import deproject, ground_axes, pitch_normal
 from obstacles import PATH_LEFT, PATH_RIGHT, is_obstacle_candidate
 
 DEFAULT_ROAD_CONFIG = Path(__file__).with_name("road_config.json")
@@ -49,15 +50,19 @@ class RoadEdge:
                 and -60 <= pitch <= 60 and self.width > 0 and 0 < self.urgent < self.caution
                 and self.margin > 0 and .5 < self.confidence < 1):
             raise ValueError("Check road pitch, corridor width, confidence and warning distances")
-        self.sin = math.sin(math.radians(pitch))
-        self.cos = math.cos(math.radians(pitch))
+        self.up = pitch_normal(math.radians(pitch))
+        self.axes = ground_axes(self.up)
 
     def __call__(self, image, depth):
         road, sidewalk = self.segment(image, self.confidence)
         return self.locate(road, sidewalk, depth)
 
-    def locate(self, road, sidewalk, depth):
+    def locate(self, road, sidewalk, depth, *, axes=None, plane=None, camera=None):
         h, w = road.shape
+        if camera is None and self.stereo is not None and self.stereo.size == (w, h):
+            camera = self.stereo.camera_a
+        up = self.up if axes is None else -np.cross(*axes)
+        forward, lateral = self.axes if axes is None else axes
         r = max(2, round(h * .014))
         # Only pavement connected to the foreground can be the approach side.
         _, regions = cv2.connectedComponents(sidewalk.astype(np.uint8))
@@ -78,15 +83,13 @@ class RoadEdge:
             columns = np.unique(xs)
             rows = np.bincount(xs, weights=ys, minlength=width) / np.maximum(1, np.bincount(xs, minlength=width))
             u, v = columns+x, np.rint(rows[columns]).astype(int)+y
-            calibrated = self.stereo is not None and self.stereo.size == (w, h)
             needed = max(6, round(w * .018))
-            if calibrated:
-                pixels = np.stack([u, v], axis=-1).astype(np.float32)
-                rays = cv2.undistortPoints(pixels[:, None], *self.stereo.camera_a).reshape(-1, 2)
-                groundward = self.sin + rays[:, 1]*self.cos > 0
-                central = groundward & (np.abs(rays[:, 0]) < self.width/(2*self.caution))
+            if camera is not None:
+                rays = deproject(np.column_stack((u, v)), 1., camera)
+                groundward = rays @ up < 0
+                central = groundward & (np.abs(rays @ lateral) < self.width/(2*self.caution))
                 if depth is not None:
-                    estimates, outside = self.measure(u, v, rays, groundward, road, sidewalk, depth, r, needed)
+                    estimates, outside = self.measure(u, v, rays, groundward, road, sidewalk, depth, r, needed, forward, lateral)
                     metric.extend(estimates)
                     central[outside] = False
             else:
@@ -108,13 +111,20 @@ class RoadEdge:
                 level = "clear"
             else:
                 level = "hold"
-            return {"level": level, "distance_m": round(distance, 3), "point": [x/w, y/h]}
+            result = {"level": level, "distance_m": round(distance, 3), "point": [x/w, y/h]}
+            if plane is not None and plane.validated and camera is not None:
+                result.update(self.curb_drop(x, y, r, needed, road, pavement, depth, camera, plane))
+            return result
         if visual:
             y, x = max(visual)
-            return {"level": "visual", "point": [float(x/w), float(y/h)]}
+            result = {"level": "visual", "point": [float(x/w), float(y/h)]}
+            if depth is not None and plane is not None and plane.validated and camera is not None:
+                result.update(self.curb_drop(x, y, r, needed, road, pavement, depth, camera, plane))
+            return result
         return {"level": "unseen"}
 
-    def measure(self, u, v, rays, groundward, road, sidewalk, depth, radius, needed):
+    def measure(self, u, v, rays, groundward, road, sidewalk, depth, radius, needed,
+                forward_axis, lateral_axis):
         """Find supported stretches of the edge inside the metric walking corridor."""
         yy = (v + np.arange(-radius, radius+1)[:, None]).clip(0, depth.shape[0]-1)
         samples = np.where(road[yy, u] | sidewalk[yy, u], depth[yy, u], np.nan)
@@ -122,8 +132,8 @@ class RoadEdge:
         if not good.any():
             return [], np.array([], dtype=int)
         q1, z, q3 = np.nanpercentile(samples[:, good], [25, 50, 75], axis=0)
-        forward = z * (self.cos - rays[good, 1]*self.sin)
-        lateral = z * rays[good, 0]
+        forward = z * (rays[good] @ forward_axis)
+        lateral = z * (rays[good] @ lateral_axis)
         reliable = groundward[good] & (forward > 0) & ((q3-q1) < np.maximum(.2, .15*z))
         inside = reliable & (np.abs(lateral) <= self.width/2)
         indexes = np.flatnonzero(inside)
@@ -139,3 +149,26 @@ class RoadEdge:
                     estimates.append((distance, int(cols[j]), int(rows[j])))
         # Good depths outside the corridor must not turn into a distance-free alert.
         return estimates, np.flatnonzero(good)[reliable & ~inside]
+
+
+    @staticmethod
+    def curb_drop(x, y, radius, needed, road, pavement, depth, camera, plane):
+        """Measure sidewalk minus road height near the selected in-corridor edge."""
+        h, w = depth.shape
+        x1, x2 = max(0, x-needed), min(w, x+needed+1)
+        sides = [(max(0, y-3*radius), max(0, y-radius), road),
+                 (min(h, y+radius), min(h, y+3*radius+1), pavement)]
+        medians, spreads = [], []
+        for y1, y2, semantic_mask in sides:
+            region = depth[y1:y2, x1:x2]
+            yy, xx = np.nonzero(semantic_mask[y1:y2, x1:x2] & np.isfinite(region) & (region > 0))
+            if len(xx) < needed:
+                return {}
+            points = deproject(np.column_stack((xx+x1, yy+y1)), region[yy, xx], camera)
+            low, middle, high = np.percentile(points @ plane.normal + plane.d, [25, 50, 75])
+            medians.append(middle)
+            spreads.append(high-low)
+        drop = medians[1]-medians[0]
+        noise = max(.025, 2*(plane.holdout_p90_m or 0.))
+        return {"curb_drop_m": round(float(drop), 3),
+                "curb_confidence": "supported" if drop > noise and max(spreads) <= noise else "uncertain"}

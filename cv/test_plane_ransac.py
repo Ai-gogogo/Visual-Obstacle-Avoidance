@@ -1,10 +1,11 @@
 """Synthetic Camera A geometry with known perpendicular heights."""
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
-from plane_ransac import PlaneConfig, fit_support_plane, height_above_plane, object_height_m
+from plane_ransac import PlaneConfig, fit_support_plane, height_above_plane, object_height_m, predict_plane
 
 
 def scene(pitch=15, shape=(640, 480), noisy=True):
@@ -99,6 +100,29 @@ class PlaneRansacTest(unittest.TestCase):
         plane = fit_support_plane(depth, camera, local, holdout_mask=holdout)
         self.assertFalse(plane.validated)
         self.assertEqual(plane.reason, "poor_spatial_spread")
+
+
+    def test_transformed_prior_skips_sampling_only_when_independently_valid(self):
+        depth, camera, candidate, held, _, _ = scene(noisy=False)
+        previous = fit_support_plane(depth, camera, candidate, holdout_mask=held)
+        rotation = cv2.Rodrigues(np.radians([12., 0., -8.]))[0]
+        translation = np.array([.03, .19, -.03])
+        prior = predict_plane(previous, rotation, translation)
+        point = -previous.d * previous.normal
+        self.assertAlmostEqual((rotation @ point + translation) @ prior.normal + prior.d, 0., places=7)
+        with patch("plane_ransac._initial_plane", side_effect=AssertionError("sampled a good prior")):
+            estimate = fit_support_plane(depth, camera, candidate, holdout_mask=held, prior_plane=previous)
+        self.assertTrue(estimate.validated)
+        self.assertTrue(estimate.used_prior)
+        # A coherent current plane must win when the transformed prior does not agree.
+        estimate = fit_support_plane(depth, camera, candidate, holdout_mask=held, prior_plane=prior)
+        self.assertTrue(estimate.validated)
+        self.assertFalse(estimate.used_prior)
+        depth[candidate & held] *= .7
+        estimate = fit_support_plane(depth, camera, candidate, holdout_mask=held, prior_plane=previous)
+        self.assertFalse(estimate.validated)
+        self.assertFalse(estimate.used_prior)
+        self.assertEqual(estimate.reason, "holdout_p90_exceeded")
 
 
 if __name__ == "__main__":

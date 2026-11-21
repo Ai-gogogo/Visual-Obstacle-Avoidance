@@ -2,10 +2,12 @@ import json
 import math
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
 
+from geometry import deproject, ground_axes
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from stereo_depth import StereoDepth
 from test_stereo_depth import configuration
@@ -77,3 +79,27 @@ class RoadTests(unittest.TestCase):
         self.assertGreater(road.sum(), 1000)
         self.assertGreater(pavement.sum(), 1000)
         self.assertFalse((road & pavement).any())
+
+
+    def test_dynamic_road_geometry_and_curb_drop_keep_visual_risk(self):
+        road, pavement = crossing()
+        stereo = self.stereo
+        yy, xx = np.indices(road.shape)
+        rays = deproject(np.stack((xx, yy), axis=-1), 1., stereo.camera_a).reshape(H, W, 3)
+        normal = np.array([.12, -.93, -.34])
+        normal /= np.linalg.norm(normal)
+        axes = ground_axes(normal)
+        plane = SimpleNamespace(validated=True, normal=normal, d=1.15, holdout_p90_m=.01)
+        along_normal = rays @ normal
+        for drop in (0., .12):
+            height = np.where(road, -drop, 0.)
+            depth = np.divide(height - plane.d, along_normal,
+                              out=np.full(road.shape, np.nan), where=along_normal < -.05)
+            measured = self.estimator.locate(road, pavement, depth, axes=axes, plane=plane)
+            ordinary = self.estimator.locate(road, pavement, depth, axes=axes)
+            static = self.estimator.locate(road, pavement, depth)
+            self.assertEqual(measured["level"], ordinary["level"])
+            self.assertEqual(measured["distance_m"], ordinary["distance_m"])
+            self.assertGreater(abs(measured["distance_m"] - static["distance_m"]), .1)
+            self.assertAlmostEqual(measured["curb_drop_m"], drop, places=3)
+            self.assertEqual(measured["curb_confidence"], "supported" if drop else "uncertain")

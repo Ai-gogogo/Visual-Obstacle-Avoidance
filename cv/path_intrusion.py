@@ -12,6 +12,8 @@ from tracking import MAX_GAP_MS
 
 MOVING_CLASSES = {"person", "bicycle", "motorcycle", "car", "bus", "truck", "dog"}
 MIN_FEATURES = 18
+CAMERA_RIGHT = np.array([1., 0., 0.])
+ESTIMATE_MOTION = object()
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,17 @@ def background_pose(previous, current, camera, max_turn_rate):
     return rotation, trans.ravel()
 
 
+def pose_between(previous, current, camera, max_turn_rate):
+    if (previous is None or current.gray.shape != previous.gray.shape
+            or not 60 <= current.stamp - previous.stamp <= MAX_GAP_MS):
+        return None
+    try:
+        return background_pose(previous, current, camera, max_turn_rate)
+    except cv2.error:
+        # Feature geometry can be degenerate.
+        return None
+
+
 class IntrusionPredictor:
     def __init__(self, camera, corridor):
         self.camera = camera
@@ -126,9 +139,9 @@ class IntrusionPredictor:
             return None
         y = (y1+y2)/2
         left, center, right = deproject([(x1, y), ((x1+x2)/2, y), (x2, y)], obj["depth_m"], self.camera)
-        return center, (right[0]-left[0])/2
+        return center, (right-left)/2
 
-    def update(self, gray, depth, objects, stamp):
+    def update(self, gray, depth, objects, stamp, *, axes=None, pose=ESTIMATE_MOTION):
         positions = {}
         for obj in objects:
             if (obj["label"] in MOVING_CLASSES and obj.get("track_id") and obj["confidence"] >= MIN_CONFIDENCE
@@ -148,50 +161,51 @@ class IntrusionPredictor:
             return
         if not (positions.keys() & previous.positions.keys()):
             return
-        try:
-            pose = background_pose(previous, current, self.camera, self.corridor.max_turn_rate)
-        except cv2.error:
-            # Degenerate feature geometry may make the OpenCV pose solver fail.
-            return
+        if pose is ESTIMATE_MOTION:
+            pose = pose_between(previous, current, self.camera, self.corridor.max_turn_rate)
         if pose is None:
             return
         rotation, translation = pose
+        lateral = CAMERA_RIGHT if axes is None else axes[1]
         dt = (stamp-previous.stamp)/1000
         for obj in objects:
             key = obj.get("track_id")
             if key not in positions or key not in previous.positions:
                 continue
-            center, half_width = positions[key]
-            old_center, old_width = previous.positions[key]
+            center, span = positions[key]
+            old_center, old_span = previous.positions[key]
+            half_width = abs(span @ lateral)
+            old_width = abs((old_span if axes is None else rotation @ old_span) @ lateral)
             if abs(half_width-old_width) > max(.12, .25*old_width):
                 continue
             # Rotate old measurements onto today's axes. Retain relative translation
             # for corridor entry, but require the object itself to be moving inward too.
             delta = center - rotation @ old_center
-            sign = np.sign(center[0])
-            if -sign*(delta-translation)[0] < max(.05, .25*dt) or np.linalg.norm(delta)/dt > 22:
+            sign = np.sign(center @ lateral)
+            if -sign*((delta-translation) @ lateral) < max(.05, .25*dt) or np.linalg.norm(delta)/dt > 22:
                 continue
             velocity = delta/dt
-            eta = self.entry_time(center, half_width, velocity)
+            eta = self.entry_time(center, half_width, velocity, axes)
             if eta is None:
                 continue
             self.candidates[key] = (sign, velocity)
             if key not in earlier or earlier[key][0] != sign:
                 continue
             old_velocity = rotation @ earlier[key][1]
-            if abs(velocity[0]-old_velocity[0]) > max(.45, .5*abs(velocity[0])):
+            if abs((velocity-old_velocity) @ lateral) > max(.45, .5*abs(velocity @ lateral)):
                 continue
-            eta = self.entry_time(center, half_width, (velocity+old_velocity)/2)
+            eta = self.entry_time(center, half_width, (velocity+old_velocity)/2, axes)
             if eta is not None:
                 obj["intrusion"] = {"from_side": "right" if sign > 0 else "left", "eta_s": round(eta, 2)}
 
-    def entry_time(self, center, half_width, velocity):
-        clearance = abs(center[0]) - self.corridor.half_width - half_width
-        inward = -np.sign(center[0])*velocity[0]
+    def entry_time(self, center, half_width, velocity, axes=None):
+        forward, lateral = (self.corridor.forward_axis, CAMERA_RIGHT) if axes is None else axes
+        side = center @ lateral
+        clearance = abs(side) - self.corridor.half_width - half_width
+        inward = -np.sign(side) * (velocity @ lateral)
         if clearance <= 0 or inward < .25:
             return None
         eta = clearance/inward
-        forward = self.corridor.forward_axis
         if (eta <= self.corridor.horizon and center @ forward > 0 and
                 0 < (center + eta*velocity) @ forward <= self.corridor.reach):
             return eta

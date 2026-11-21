@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 import csv
+from dataclasses import dataclass
 import io
 import os
 import sys
@@ -21,15 +22,23 @@ from PIL import Image, ImageOps
 
 from depth_filters import spatial_depth, StaticMedian
 from detect_image import DEFAULT_WEIGHTS, detect
-from geometry import deproject
+from geometry import deproject, ground_axes
 from item_features import item_features
 from obstacles import PlaneObstacles, is_obstacle_candidate, unclassified_obstacles
-from path_intrusion import Corridor, IntrusionPredictor, background_mask
-from plane_ransac import fit_support_plane, object_height_m
+from path_intrusion import Corridor, Frame, IntrusionPredictor, background_mask, pose_between
+from plane_ransac import PlaneEstimate, fit_support_plane, object_height_m, predict_plane
 from risk import RiskAssessment
 from road_edge import DEFAULT_ROAD_CONFIG, RoadEdge
 from tracking import FrameTracker
 from stereo_depth import DEFAULT_CONFIG, StereoDepth, object_depth
+
+
+@dataclass
+class PlaneFrame:
+    pair: tuple
+    frame: Frame
+    plane: PlaneEstimate | None
+    accepted_stamp: int | None
 
 
 class CameraWorker:
@@ -52,6 +61,7 @@ class CameraWorker:
         self.plane = plane if side == "A" else None
         self.corridor = corridor
         self.intrusions = {}
+        self.plane_frames = {}
         self.record = record
         self.api = server.rstrip("/") + "/api/cv"
         self.model = model
@@ -84,7 +94,7 @@ class CameraWorker:
         }
         for cache in (
             self.etags, self.trackers,
-            self.risk_assessments, self.intrusions, self.pending, self.temporal
+            self.risk_assessments, self.intrusions, self.plane_frames, self.pending, self.temporal
         ):
             for source in cache.keys() - active.keys():
                 del cache[source]
@@ -147,7 +157,7 @@ class CameraWorker:
             }
 
             depth = None
-            support = None
+            road_masks = None
             if self.side == "A":
                 if self.stereo is not None:
                     if frame.headers.get("X-CV-Transport") == "webrtc" and not self.allow_webrtc_stereo and not (rtc_low and (self.rtc_reference is not None or self.rtc_low_stereo is not None)):
@@ -157,9 +167,7 @@ class CameraWorker:
                         payload["stereo"], depth = self.measure_depth(params, payload, image, retry_partner)
                 if self.road is not None:
                     if self.plane is not None and depth is not None:
-                        road, sidewalk = self.road.segment(image, self.road.confidence)
-                        support = road | sidewalk
-                        payload["road_edge"] = self.road.locate(road, sidewalk, depth)
+                        road_masks = self.road.segment(image, self.road.confidence)
                     else:
                         payload["road_edge"] = self.road(image, depth)
 
@@ -183,20 +191,41 @@ class CameraWorker:
             right_stream = stereo_result.pop("partner_stream", None)
             meter_scale = stereo_result.pop("meter_scale", None)
             capture_ms = frame.headers.get("X-CV-Sample-Ms")
-            if self.corridor and depth is not None and stream and right_stream and capture_ms:
-                pair = stream, right_stream, meter_scale
+            paired = depth is not None and stream and right_stream and capture_ms
+            pair = (stream, right_stream, meter_scale, id(self.stereo))
+            gray = np.asarray(image.convert("L")) if paired and (self.corridor or self.plane) else None
+
+            for obj in objects:
+                obj["obstacle_candidate"] = is_obstacle_candidate(obj["bbox"])
+
+            metric_evidence = {}
+            dynamic = {}
+            if self.plane:
+                current = pose = prior = None
+                if paired:
+                    current, pose, prior = self.prepare_plane_frame(source, pair, gray, depth, objects, int(capture_ms))
+                else:
+                    self.plane_frames.pop(source, None)
+                support = road_masks[0] | road_masks[1] if road_masks is not None else None
+                metric_evidence, measured = self.apply_support_plane(payload, depth, support, prior=prior)
+                fresh = measured if measured is not None and measured.validated else None
+                orientation = fresh or prior
+                axes = ground_axes(orientation.normal) if orientation is not None else None
+                dynamic = {"axes": axes, "pose": pose}
+                if current is not None and fresh is not None:
+                    current.plane = fresh
+                    current.accepted_stamp = current.frame.stamp
+                if road_masks is not None:
+                    payload["road_edge"] = self.road.locate(
+                        *road_masks, depth, axes=axes, plane=fresh, camera=self.stereo.camera_a)
+
+            if self.corridor and paired:
                 if source not in self.intrusions or self.intrusions[source][0] != pair:
                     self.intrusions[source] = pair, IntrusionPredictor(self.stereo.camera_a, self.corridor)
-                self.intrusions[source][1].update(np.asarray(image.convert("L")), depth, objects, int(capture_ms))
+                self.intrusions[source][1].update(gray, depth, objects, int(capture_ms), **dynamic)
             else:
                 self.intrusions.pop(source, None)
 
-            for obj in objects:
-                obj["obstacle_candidate"] = is_obstacle_candidate(
-                    obj["bbox"]
-                )
-
-            metric_evidence = self.apply_support_plane(payload, depth, support) if self.plane else {}
             if stream and stamp is not None:
                 self.risk_assessments[source].update(objects, stamp, metric_evidence=metric_evidence)
             else:
@@ -257,11 +286,26 @@ class CameraWorker:
         self.etags[source] = etag
         del self.pending[source]
 
-    def apply_support_plane(self, payload, depth, support):
+    def prepare_plane_frame(self, source, pair, gray, depth, objects, stamp):
+        frame = Frame(gray, depth, background_mask(gray.shape, objects), stamp, {})
+        current = PlaneFrame(pair, frame, None, None)
+        previous = self.plane_frames.get(source)
+        self.plane_frames[source] = current
+        if previous is None or previous.pair != pair:
+            return current, None, None
+        pose = pose_between(previous.frame, frame, self.stereo.camera_a, self.plane.max_turn_rate)
+        if (pose is not None and previous.plane is not None
+                and 0 < stamp - previous.accepted_stamp <= self.plane.prior_max_age_ms):
+            current.plane = predict_plane(previous.plane, *pose)
+            if current.plane is not None:
+                current.accepted_stamp = previous.accepted_stamp
+        return current, pose, current.plane
+
+    def apply_support_plane(self, payload, depth, support, *, prior=None):
         stereo = payload.setdefault("stereo", {})
         if depth is None:
             stereo["plane"] = {"validated": False, "reason": "depth_unavailable"}
-            return {}
+            return {}, None
 
         objects = payload["objects"]
         h, w = depth.shape
@@ -270,12 +314,17 @@ class CameraWorker:
         if support is None or not support.any():
             support = np.arange(h)[:, None] >= .45 * h
         camera = self.stereo.camera_a
-        plane = fit_support_plane(depth, camera, background & support, config=self.plane.fit)
-        stereo["plane"] = {key: getattr(plane, key) for key in
-                           ("validated", "reason", "pitch_deg", "roll_deg", "inlier_ratio", "holdout_p90_m")}
+        plane = fit_support_plane(depth, camera, background & support, prior_plane=prior, config=self.plane.fit)
+        summary = {"validated": plane.validated, "reason": plane.reason}
+        for key in ("pitch_deg", "roll_deg", "inlier_ratio", "holdout_p90_m"):
+            value = getattr(plane, key)
+            if value is not None and np.isfinite(value):
+                summary[key] = round(float(value), 4)
+        stereo["plane"] = summary
         if not plane.validated:
-            return {}
+            return {}, plane
 
+        axes = ground_axes(plane.normal)
         metric_evidence = {}
         for index, obj in enumerate(objects):
             height = object_height_m(depth, camera, plane, obj["bbox"])
@@ -286,15 +335,20 @@ class CameraWorker:
             z = obj.get("depth_m")
             if z is None:
                 continue
-            left, top, right, bottom = obj["bbox"]
-            xyz = deproject([[(left+right)*w/2, (top+bottom)*h/2]], [z], camera)
-            inside, forward = self.plane.corridor_coordinates(xyz)
-            metric_evidence[index] = obj["obstacle_candidate"], bool(forward[0] <= self.plane.urgent_m)
-            obj["obstacle_candidate"] = bool(inside[0] and median >= self.plane.min_height_m)
+            left, top, right, bottom = np.asarray(obj["bbox"]) * [w, h, w, h]
+            cy = (top + bottom) / 2
+            xyz = deproject([(left, cy), ((left + right) / 2, cy), (right, cy)], z, camera)
+            forward, lateral = self.plane.corridor_coordinates(xyz, axes)
+            distance = forward[1]
+            lo, hi = sorted(lateral[[0, 2]])
+            inside = (lo <= self.plane.half_width_m and hi >= -self.plane.half_width_m
+                      and 0 < distance <= self.plane.caution_m)
+            metric_evidence[index] = obj["obstacle_candidate"], bool(distance <= self.plane.urgent_m)
+            obj["obstacle_candidate"] = bool(inside and median >= self.plane.min_height_m)
 
         payload["unclassified_obstacles"] = unclassified_obstacles(
-            depth, camera, plane, background, self.plane)
-        return metric_evidence
+            depth, camera, plane, background, self.plane, axes)
+        return metric_evidence, plane
 
     def measure_depth(self, params, payload, image, retry_partner=False):
         if image.size != self.stereo.size:

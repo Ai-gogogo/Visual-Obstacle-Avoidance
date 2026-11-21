@@ -4,6 +4,7 @@ import unittest
 import cv2
 import numpy as np
 
+from geometry import ground_axes, pitch_normal
 from path_intrusion import Corridor, IntrusionPredictor
 from road_edge import DEFAULT_ROAD_CONFIG
 from tracking import FrameTracker
@@ -96,3 +97,13 @@ class IntrusionTests(unittest.TestCase):
                     del obj[missing]
                 replay.predictor.update(gray,depth,[obj],1000+i*220)
                 self.assertNotIn('intrusion',obj)
+
+
+    def test_entry_distance_uses_dynamic_ground_forward(self):
+        predictor = Replay().predictor
+        center = np.array([1., 0., 7.])
+        velocity = np.array([-1., 0., 0.])
+        self.assertIsNone(predictor.entry_time(center, .2, velocity))
+        axes = ground_axes(pitch_normal(np.radians(40)))
+        self.assertAlmostEqual(predictor.entry_time(center, .2, velocity, axes), .35)
+        self.assertIsNone(predictor.entry_time(center, .2, velocity, axes=None))

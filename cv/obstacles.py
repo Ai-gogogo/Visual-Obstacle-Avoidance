@@ -7,7 +7,7 @@ import math
 import cv2
 import numpy as np
 
-from geometry import deproject
+from geometry import deproject, ground_axes, pitch_normal
 from plane_ransac import PlaneConfig, height_above_plane
 
 
@@ -38,6 +38,8 @@ class PlaneObstacles:
     caution_m: float = 5.
     urgent_m: float = 3.
     pitch_down_deg: float = 0.
+    prior_max_age_ms: int = 500
+    max_turn_rate: float = 35.
 
     @classmethod
     def load(cls, path, force=False):
@@ -52,7 +54,9 @@ class PlaneObstacles:
                              if field.name in options})
         settings = cls(fit, float(options.get("min_obstacle_height_m", .05)),
                        float(config["corridor_width_m"]) / 2, float(config["caution_m"]),
-                       float(config["urgent_m"]), float(config["pitch_down_deg"]))
+                       float(config["urgent_m"]), float(config["pitch_down_deg"]),
+                       options.get("prior_max_age_ms", 500),
+                       float(config.get("intrusion", {}).get("max_turn_deg_s", 35.)))
         if not (0 < settings.min_height_m < math.inf and 0 < settings.half_width_m < math.inf
                 and 0 < settings.urgent_m < settings.caution_m < math.inf
                 and -60 <= settings.pitch_down_deg <= 60):
@@ -66,23 +70,26 @@ class PlaneObstacles:
                 or fit.max_sample_points < 3 or fit.min_train_inliers < 3
                 or type(fit.seed) is not int or fit.seed < 0):
             raise ValueError("Check plane fitting counts and seed")
+        if (type(settings.prior_max_age_ms) is not int or settings.prior_max_age_ms < 0
+                or not 0 < settings.max_turn_rate <= 90):
+            raise ValueError("Check plane prior age and camera turn limit")
         return settings
 
-    def corridor_coordinates(self, points):
-        pitch = math.radians(self.pitch_down_deg)
-        forward = points[:, 2] * math.cos(pitch) - points[:, 1] * math.sin(pitch)
-        inside = (np.abs(points[:, 0]) <= self.half_width_m) & (forward > 0) & (forward <= self.caution_m)
-        return inside, forward
+    def corridor_coordinates(self, points, axes):
+        forward, lateral = axes or ground_axes(pitch_normal(math.radians(self.pitch_down_deg)))
+        return points @ forward, points @ lateral
 
 
-def unclassified_obstacles(depth, camera, plane, background, settings):
+def unclassified_obstacles(depth, camera, plane, background, settings, axes):
     """Group unlabelled above-plane pixels within the configured metric corridor."""
     heights = height_above_plane(depth, camera, plane)
     threshold = max(settings.min_height_m, 1.5 * plane.holdout_p90_m)
     y, x = np.nonzero(background & (heights > threshold))
     if not len(y):
         return []
-    inside, _ = settings.corridor_coordinates(deproject(np.column_stack((x, y)), depth[y, x], camera))
+    points = deproject(np.column_stack((x, y)), depth[y, x], camera)
+    forward, lateral = settings.corridor_coordinates(points, axes)
+    inside = (np.abs(lateral) <= settings.half_width_m) & (forward > 0) & (forward <= settings.caution_m)
     y, x = y[inside], x[inside]
     mask = np.zeros(depth.shape, np.uint8)
     mask[y, x] = 1
