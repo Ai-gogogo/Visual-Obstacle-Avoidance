@@ -9,12 +9,12 @@ function depthColors(stops) {
   }
   return lut;
 }
-const depthPalettes = {
+export const depthPalettes = {
   turbo:depthColors('30123b 4040a2 466be3 4294ff 28bceb 18ddc2 32f298 6dfe62 a4fc3c cbed34 ecd13a fdae35 fb8122 ec530f d23105 ac1701 7a0403'),
   viridis:depthColors('440154 48186a 472d7b 424086 3b528b 33638d 2c728e 26828e 21918c 1f9f88 27ad81 3dbc74 5cc863 81d34d aadc32 d5e21a fde725')
 };
 
-export function createPerceptionView($, signal) {
+export function createPerceptionView($, signal, onDepth) {
   const sample = [
     {label:'Chair', camera:'A', distance:1.4, position:'Center', box:[36,22,33,77]},
     {label:'Desk', camera:'A', distance:2.3, position:'Right', box:[78,32,22,65], align:'right'},
@@ -38,7 +38,7 @@ export function createPerceptionView($, signal) {
   }
 
   function repaintDepth() {
-    if (lastDepthFrame && $('#depth-hold-status').hidden) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false, lastDepthFrame.overlay);
+    if (lastDepthFrame && $('#depth-hold-status').hidden) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false, lastDepthFrame.overlay, false);
   }
 
   function makeAnnotations(feeds) {
@@ -89,8 +89,9 @@ export function createPerceptionView($, signal) {
       'No objects detected in the processed views.';
   }
 
-  function showDepth(snapshot, preview, sampleMode, overlay=null) {
+  function showDepth(snapshot, preview, sampleMode, overlay=null, publish=true) {
     clearTimeout(holdTimer);
+    if (!preview && publish) onDepth?.(null);
     const plane = sampleMode ? null : snapshot?.plane;
     const opt = depthOptions();
     const protrusions = preview && plane?.validated && opt.planeOverlay &&
@@ -168,8 +169,24 @@ export function createPerceptionView($, signal) {
       const ctx = canvas.getContext('2d',{willReadFrequently:true});
       ctx.drawImage(preview,0,0);
       const lut = depthPalettes[palette];
+      const capture = onDepth && publish && !sampleMode;
+      const frame = lut || capture ? ctx.getImageData(0,0,canvas.width,canvas.height) : null;
+      if (capture) {
+        // Capture the measured grayscale values before the palette and plane overlay.
+        const gray = new Uint8Array(canvas.width*canvas.height);
+        for (let i = 0; i < gray.length; i++) gray[i] = frame.data[i*4];
+        onDepth({
+          gray,
+          width:canvas.width, height:canvas.height,
+          id:snapshot.depth_frame_id,
+          // The scene preview timestamps receipt; use the receipt time of this same depth frame.
+          timestamp:snapshot.depth_frame_id && snapshot.depth_frame_id === snapshot.frame_id
+            ? snapshot.timestamp_ms ?? snapshot.depth_timestamp_ms : snapshot.depth_timestamp_ms,
+          expiresAt:snapshot.depth_expires_ms ?? snapshot.analysis_expires_ms,
+          partner:snapshot.depth_rig?.split('/')[1]
+        });
+      }
       if (lut) {
-        const frame = ctx.getImageData(0,0,canvas.width,canvas.height);
         for (let i=0;i<frame.data.length;i+=4) {
           const index = frame.data[i]*3;
           frame.data[i] = lut[index];

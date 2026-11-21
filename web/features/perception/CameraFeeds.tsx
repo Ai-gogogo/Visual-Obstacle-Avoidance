@@ -115,7 +115,16 @@ export function CameraFeeds() {
         </div>
         <ul id="scene-legend" aria-label="Most visible classes"></ul>
       </article>
-      <article className="feed" id="camera-b-feed" data-camera="B">
+      <article className="feed" id="fused-view">
+        <header><h2>Fused depth + segmentation</h2></header>
+        <div className="frame">
+          <canvas id="fused-map" className="live-frame" role="img"
+                  aria-label="Stereo depth with darker segmentation-based fills" hidden />
+          <p id="fused-placeholder" className="no-feed">Waiting for depth and segmentation.</p>
+        </div>
+        <footer><span id="fused-status" role="status">Waiting for depth and segmentation.</span></footer>
+      </article>
+      <article className="feed" id="camera-b-feed" data-camera="B" hidden>
         <header>
           <div>
             <span className="camera-icon" aria-hidden="true">

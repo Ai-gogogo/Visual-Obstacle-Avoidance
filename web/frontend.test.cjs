@@ -46,7 +46,14 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   const position = marker => html.indexOf(marker);
   assert.ok(position('data-camera="A"') < position('id="stereo-view"'));
   assert.ok(position('id="stereo-view"') < position('id="scene-view"'));
-  assert.ok(position('id="scene-view"') < position('id="camera-b-feed"'));
+  assert.ok(position('id="scene-view"') < position('id="fused-view"'));
+  assert.ok(position('id="fused-view"') < position('id="camera-b-feed"'));
+  assert.match(html,/<article[^>]*id="fused-view"/);
+  assert.match(html,/Fused depth \+ segmentation/);
+  assert.match(html,/<canvas[^>]*id="fused-map"[^>]*hidden/);
+  assert.match(html,/id="fused-placeholder"[^>]*>Waiting for depth and segmentation\./);
+  assert.match(html,/id="fused-status"[^>]*role="status"/);
+  assert.match(html,/<article[^>]*id="camera-b-feed"[^>]*hidden/);
   assert.match(html,/<canvas[^>]*id="scene-mask"[^>]*hidden/);
   assert.match(html,/Waiting for Camera A segmentation/);
   const labels = await call('/ade20k-labels.json');
@@ -60,7 +67,7 @@ test('the production frontend and device API share one origin', {timeout:25_000}
   assert.match(html,/Generate depth comparison/);
   assert.match(html,/Code for Camera A/);
   assert.match(html,/Code for Camera B/);
-  assert.match(html,/<button[^>]*aria-pressed="true"[^>]*aria-controls="camera-b-feed"[^>]*>Show Camera B<\/button>/);
+  assert.match(html,/<button[^>]*aria-pressed="false"[^>]*aria-controls="camera-b-feed"[^>]*>Show Camera B<\/button>/);
   const stylesheet = /<link[^>]+href="([^"]+\.css)"[^>]*>/.exec(html);
   assert.ok(stylesheet,'The server rendered a stylesheet link');
   assert.equal((await call(stylesheet[1])).status,200);
@@ -210,4 +217,116 @@ test('segmentation stays visible across gaps and clears on Camera A replacement'
   assert.equal(placeholder.hidden,false);
   assert.equal(legend.items.length,0);
   controller.abort();
+});
+
+test('the fused canvas follows raw depth, segmentation, palette and stream validity', async t => {
+  const {createFusedPreview} = await import('./features/perception/fused-preview.js');
+  const {createPerceptionView} = await import('./features/perception/perception-view.js');
+  const {createScenePreview} = await import('./features/perception/scene-preview.js');
+  t.mock.timers.enable({apis:['setTimeout','Date'], now:10_000});
+  const nodes = new Map();
+  function $(selector) {
+    if (!nodes.has(selector)) nodes.set(selector,{dataset:{},style:{},replaceChildren() {}});
+    return nodes.get(selector);
+  }
+  const grayDepth = new Uint8ClampedArray(8 * 8 * 4);
+  for (let i = 0; i < grayDepth.length; i += 4) {
+    grayDepth.fill(i < 64 ? 100 : 0,i,i+3);
+    grayDepth[i+3] = 255;
+  }
+  $('#stereo-map').getContext = () => ({
+    drawImage() {},
+    getImageData: () => ({data:grayDepth.slice()}),
+    putImageData({data}) { assert.notEqual(data[0],100); }
+  });
+  let fusedPixels;
+  $('#fused-map').getContext = () => ({
+    createImageData: (width,height) => ({data:new Uint8ClampedArray(width*height*4)}),
+    putImageData({data}) { fusedPixels = data.slice(); }
+  });
+  const maskPixels = new Uint8ClampedArray(128*128*4);
+  $('#scene-mask').getContext = () => ({
+    drawImage() {}, getImageData: () => ({data:maskPixels}), putImageData() {}
+  });
+  const saved = {document:globalThis.document,Image:globalThis.Image};
+  globalThis.document = {createElement:() => ({
+    style:{}, append() {},
+    getContext:() => ({fillRect() {}, getImageData:() => ({data:new Uint8ClampedArray(256*4).fill(200)})})
+  })};
+  globalThis.Image = class { async decode() {} };
+  t.after(() => {
+    for (const [key,value] of Object.entries(saved)) {
+      if (value === undefined) delete globalThis[key];
+      else globalThis[key] = value;
+    }
+  });
+  let sceneFrame = 'seg';
+  t.mock.method(globalThis,'fetch', async url => url === '/ade20k-labels.json'
+    ? Response.json(['wall'])
+    : Response.json({frame_id:sceneFrame, mask:'AA==', timestamp_ms:9_700, remaining_ms:750, width:480, height:640}));
+
+  const scope = new AbortController();
+  const fused = createFusedPreview($,scope.signal);
+  const view = createPerceptionView($,scope.signal,fused.setDepth);
+  const scene = createScenePreview($,() => 'desk',scope.signal,fused.setScene);
+  $('#depth-palette').value = 'gray';
+  fused.setPartner('right');
+  const snapshot = {frame_id:'depth', depth_rig:'left/right', depth_timestamp_ms:10_000, analysis_expires_ms:13_000};
+  const image = {naturalWidth:8,naturalHeight:8};
+  view.showDepth(snapshot,image,false);
+  assert.equal($('#fused-status').textContent,'Waiting for segmentation.');
+  assert.equal(fusedPixels[64],0);
+  await scene.update('seg','left');
+  assert.equal($('#fused-map').width,8);
+  assert.equal($('#fused-map').height,8);
+  assert.equal($('#fused-status').textContent,'Filled +75.0% · Seg lag 0.3s');
+  assert.equal(maskPixels[0],200);
+  assert.deepEqual([...fusedPixels.slice(64,68)],[70,70,70,255]);
+
+  for (const palette of ['turbo','viridis','gray']) {
+    const previous = [...fusedPixels.slice(0,3)];
+    $('#depth-palette').value = palette;
+    view.repaintDepth();
+    fused.repaint();
+    assert.notDeepEqual([...fusedPixels.slice(0,3)],previous);
+    assert.deepEqual([...fusedPixels.slice(64,67)],Array.from(fusedPixels.slice(0,3), color => Math.round(color*0.7)));
+  }
+
+  t.mock.timers.tick(751);
+  assert.equal($('#scene-stale').hidden,false);
+  assert.equal($('#fused-status').textContent,'Segmentation stale.');
+  assert.equal(fusedPixels[64],0);
+  sceneFrame = 'seg2';
+  maskPixels.fill(0);
+  await scene.update('seg2','left');
+  assert.match($('#fused-status').textContent,/Filled \+75\.0%/);
+
+  fused.setPartner(null);
+  assert.equal($('#fused-status').textContent,'Camera B offline.');
+  assert.equal($('#fused-map').hidden,true);
+  fused.setPartner('right');
+  assert.equal($('#fused-map').hidden,true);
+  view.showDepth(snapshot,image,false);
+  assert.equal(fusedPixels[64],70);
+  await scene.update(null,'replacement-camera');
+  assert.equal($('#fused-status').textContent,'Waiting for segmentation.');
+  assert.equal(fusedPixels[64],0);
+
+  sceneFrame = 'unconfirmed';
+  maskPixels.fill(0);
+  await scene.update('advertised','replacement-camera');
+  assert.equal($('#scene-mask').dataset.frameId,'unconfirmed');
+  assert.equal(fusedPixels[64],0);
+  await scene.update('unconfirmed','replacement-camera');
+  assert.equal(fusedPixels[64],70);
+
+  fused.setReplay(true);
+  assert.equal($('#fused-map').hidden,true);
+  assert.match($('#fused-status').textContent,/saved depth/i);
+  fused.setReplay(false);
+  view.showDepth(snapshot,image,false);
+  view.showDepth({stereo_status:'waiting_for_pair',depth_rig:'left/right'},null,false);
+  assert.equal($('#fused-map').hidden,true);
+  assert.equal($('#fused-status').textContent,'Waiting for stereo depth.');
+  scope.abort();
 });

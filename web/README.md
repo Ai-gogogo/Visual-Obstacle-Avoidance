@@ -63,7 +63,7 @@ PHONE_HOST='你的局域网地址' PHONE_PORT=8776 DESKTOP_PORT=8775 node /path/
 
 实时查看时，在 **Stereo depth map → Depth algorithm** 选择 StereoSGBM（默认）或 RAFT-Stereo。下一对同步帧会使用所选算法。两者共用当前机位的标定，RAFT 首次使用时会加载本机权重。
 
-Camera A、Stereo depth map 和 Camera A segmentation 从左到右同排。窄窗口内可横向滚动。Camera B 位于下一排，**Show Camera B** 仅控制预览可见性。语义分割短暂缺帧时保留上一张结果和图例，并显示 **Last result · waiting for update**。使用中的场景分割、平面拟合及轮换服务的参数见[最新交接](../cv/STEREO-HANDOFF-2026-11-19.md)。
+Camera A、Stereo depth map、Camera A segmentation 和 Fused depth + segmentation 在宽屏上同排，中屏分为两列，窄屏为一列。Camera B 默认隐藏，可用 **Show Camera B** 展开。语义分割短暂缺帧时保留上一张结果和图例，并显示 **Last result · waiting for update**。融合栏用较暗的相同配色标出补全像素，状态栏显示补全覆盖率增量和分割相对深度帧的时间差。使用中的场景分割、平面拟合及轮换服务的参数见[最新交接](../cv/STEREO-HANDOFF-2026-11-19.md)。
 
 ## 录制用于测试的 A/B 素材
 

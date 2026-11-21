@@ -28,7 +28,7 @@ export function MonitorPanel() {
             className="quiet"
             id="show-camera-b"
             type="button"
-            aria-pressed="true"
+            aria-pressed="false"
             aria-controls="camera-b-feed"
           >
             Show Camera B

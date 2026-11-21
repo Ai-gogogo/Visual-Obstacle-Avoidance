@@ -1,4 +1,4 @@
-export function createScenePreview($, getToken, signal) {
+export function createScenePreview($, getToken, signal, onScene) {
   const placeholder = $('#scene-placeholder');
   const canvas = $('#scene-mask');
   const stale = $('#scene-stale');
@@ -15,27 +15,38 @@ export function createScenePreview($, getToken, signal) {
     swatches.fillRect(id,0,1,1);
   }
   const colors = swatches.getImageData(0,0,256,1).data;
-  let stream, expiry, labelRequest, loading = false, version = 0;
+  let stream, expiry, labelRequest, advertisedId, rawFrame, publishedFrame;
+  let loading = false, version = 0;
+
+  function publish() {
+    // The mask endpoint can advance between requests, including across a Camera A replacement.
+    if (!rawFrame || rawFrame.id !== advertisedId || rawFrame === publishedFrame) return;
+    publishedFrame = rawFrame;
+    onScene?.(rawFrame);
+  }
 
   function clear() {
     version++;
     clearTimeout(expiry);
     loading = false;
-    stream = undefined;
+    stream = advertisedId = rawFrame = publishedFrame = undefined;
     canvas.hidden = true;
     placeholder.hidden = false;
     stale.hidden = true;
     legend.replaceChildren();
     delete canvas.dataset.frameId;
+    onScene?.(null);
   }
 
   function paint(image, scene, labels) {
     ctx.drawImage(image,0,0);
     const pixels = ctx.getImageData(0,0,128,128);
     const counts = new Uint32Array(256);
+    const rawLabels = onScene && new Uint8Array(128*128);
     for (let i = 0; i < pixels.data.length; i += 4) {
       const id = pixels.data[i];
       counts[id]++;
+      if (rawLabels) rawLabels[i/4] = id;
       pixels.data[i] = colors[id*4];
       pixels.data[i+1] = colors[id*4+1];
       pixels.data[i+2] = colors[id*4+2];
@@ -54,6 +65,7 @@ export function createScenePreview($, getToken, signal) {
     }));
     canvas.hidden = false;
     placeholder.hidden = true;
+    return rawLabels;
   }
 
   signal.addEventListener('abort',clear,{once:true});
@@ -63,6 +75,8 @@ export function createScenePreview($, getToken, signal) {
     if (cameraStream) stream = cameraStream;
     const token = getToken();
     if (!token) { clear(); return; }
+    advertisedId = id;
+    publish();
     if (!id || canvas.dataset.frameId === id || loading) return;
 
     loading = true;
@@ -89,9 +103,16 @@ export function createScenePreview($, getToken, signal) {
       if (current !== version) return;
       const remaining = scene.remaining_ms - (performance.now() - started);
       clearTimeout(expiry);
-      paint(image,scene,labels);
+      const expiresAt = Date.now() + Math.floor(remaining);
+      const rawLabels = paint(image,scene,labels);
       stale.hidden = remaining > 0;
-      if (remaining > 0) expiry = setTimeout(() => { stale.hidden = false; }, remaining);
+      const frame = rawFrame = {id:scene.frame_id, labels:rawLabels, width:128, height:128,
+        timestamp:scene.timestamp_ms, expiresAt};
+      if (remaining > 0) expiry = setTimeout(() => {
+        stale.hidden = false;
+        if (publishedFrame === frame) onScene?.({...frame, expiresAt:Date.now()});
+      }, remaining);
+      publish();
     } catch {
       // Keep the previous mask visible while a newer result is unavailable.
     } finally {
