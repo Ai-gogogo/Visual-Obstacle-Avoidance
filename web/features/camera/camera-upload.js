@@ -218,14 +218,31 @@ export function createCameraUpload(video, report) {
       }
     }
 
+    async function readReceiverStatus() {
+      let response;
+      try {
+        response = await fetch('/api/webrtc/status',{headers:auth,
+          signal:AbortSignal.any([controller.signal,AbortSignal.timeout(2500)])});
+        if (response.ok) return await response.json();
+      } catch (error) {
+        if (error.name === 'TimeoutError' || error.name === 'AbortError' || error instanceof TypeError) return null;
+        throw error;
+      }
+      if (response.status === 408 || response.status === 429 || response.status >= 500) return null;
+      throw new Error('Receiver unavailable.');
+    }
+
     async function checkReceiver() {
       if (rtcPeer !== peer || run !== currentRun) return;
       try {
-        const response = await fetch('/api/webrtc/status',{headers:auth,
-          signal:AbortSignal.any([controller.signal,AbortSignal.timeout(2500)])});
-        if (!response.ok) throw new Error('Receiver unavailable.');
-        const state = await response.json();
+        const state = await readReceiverStatus();
         if (rtcPeer !== peer || run !== currentRun) return;
+        if (state === null) {
+          // The video track sends independently of this HTTP status request.
+          report({phase:'connected',lens:lensDescription+' · Retrying receiver status…'});
+          timer = setTimeout(checkReceiver,1000);
+          return;
+        }
         const width = rtcMode === 'portrait-full' ? 1080 : 480;
         const height = rtcMode === 'portrait-full' ? 1920 : 640;
         if (!received && state.size_mismatch && state.width === height && state.height === width &&
@@ -262,7 +279,7 @@ export function createCameraUpload(video, report) {
 
     try {
       const {sender} = peer.addTransceiver(stream.getVideoTracks()[0],{
-        direction:'sendonly',sendEncodings:[{maxBitrate:rtcMode === 'portrait-full' ? 8_000_000 : 2_000_000,scaleResolutionDownBy:1}]
+        direction:'sendrecv',sendEncodings:[{maxBitrate:rtcMode === 'portrait-full' ? 8_000_000 : 2_000_000,scaleResolutionDownBy:1}]
       });
       const parameters = sender.getParameters();
       parameters.degradationPreference = 'maintain-resolution';

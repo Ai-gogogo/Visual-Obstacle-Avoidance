@@ -36,7 +36,7 @@ export function createPerceptionView($, signal) {
   }
 
   function repaintDepth() {
-    if (lastDepthFrame) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false);
+    if (lastDepthFrame && $('#depth-hold-status').hidden) showDepth(lastDepthFrame.snapshot, lastDepthFrame.preview, false);
   }
 
   function makeAnnotations(feeds) {
@@ -93,12 +93,15 @@ export function createPerceptionView($, signal) {
     const notice = $('#depth-hold-status');
     notice.hidden = true;
     const age = lastDepthFrame ? Date.now() - lastDepthFrame.snapshot.timestamp_ms : Infinity;
-    const waiting = snapshot && !snapshot.objects && !snapshot.stereo_status;
+    const waiting = snapshot && (snapshot.stereo_status === 'waiting_for_pair' ||
+      (!snapshot.objects && !snapshot.stereo_status));
     if (!preview && !sampleMode && waiting && age >= 0 && age < 3500 &&
         snapshot.depth_rig === lastDepthFrame.snapshot.depth_rig) {
       notice.textContent = 'Last depth frame · '+(age/1000).toFixed(1)+' s ago · waiting for update';
       notice.hidden = false;
       $('#depth-reading').textContent = '';
+      $('#depth-coverage').hidden = true;
+      $('#depth-scale').textContent = '';
       $('#depth-reticle').hidden = true;
       holdTimer = setTimeout(() => showDepth(snapshot,null,false),Math.min(500,3500-age));
       return;
