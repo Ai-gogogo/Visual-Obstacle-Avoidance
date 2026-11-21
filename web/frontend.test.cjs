@@ -281,7 +281,7 @@ test('the fused canvas follows raw depth, segmentation, palette and stream valid
   assert.equal($('#fused-map').height,8);
   assert.equal($('#fused-status').textContent,'Filled +75.0% · Seg lag 0.3s');
   assert.equal(maskPixels[0],200);
-  assert.deepEqual([...fusedPixels.slice(64,68)],[70,70,70,255]);
+  assert.deepEqual([...fusedPixels.slice(64,68)],[86,86,86,255]);
 
   for (const palette of ['turbo','viridis','gray']) {
     const previous = [...fusedPixels.slice(0,3)];
@@ -289,26 +289,30 @@ test('the fused canvas follows raw depth, segmentation, palette and stream valid
     view.repaintDepth();
     fused.repaint();
     assert.notDeepEqual([...fusedPixels.slice(0,3)],previous);
-    assert.deepEqual([...fusedPixels.slice(64,67)],Array.from(fusedPixels.slice(0,3), color => Math.round(color*0.7)));
+    assert.deepEqual([...fusedPixels.slice(64,67)],Array.from(fusedPixels.slice(0,3), color => Math.round(color*0.86)));
   }
 
   t.mock.timers.tick(751);
   assert.equal($('#scene-stale').hidden,false);
-  assert.equal($('#fused-status').textContent,'Segmentation stale.');
-  assert.equal(fusedPixels[64],0);
+  assert.equal($('#fused-map').hidden,false);
+  assert.match($('#fused-status').textContent,/Holding last fused frame · segmentation stale/);
+  assert.equal(fusedPixels[64],86);
   sceneFrame = 'seg2';
   maskPixels.fill(0);
   await scene.update('seg2','left');
   assert.match($('#fused-status').textContent,/Filled \+75\.0%/);
 
   fused.setPartner(null);
-  assert.equal($('#fused-status').textContent,'Camera B offline.');
-  assert.equal($('#fused-map').hidden,true);
+  assert.match($('#fused-status').textContent,/Holding last fused frame · waiting for depth/);
+  assert.equal($('#fused-map').hidden,false);
   fused.setPartner('right');
-  assert.equal($('#fused-map').hidden,true);
+  assert.equal($('#fused-map').hidden,false);
   view.showDepth(snapshot,image,false);
-  assert.equal(fusedPixels[64],70);
+  assert.equal(fusedPixels[64],86);
+  fused.resetDepth();
   await scene.update(null,'replacement-camera');
+  assert.equal($('#fused-map').hidden,true);
+  view.showDepth({...snapshot,depth_rig:'replacement-camera/right'},image,false);
   assert.equal($('#fused-status').textContent,'Waiting for segmentation.');
   assert.equal(fusedPixels[64],0);
 
@@ -318,14 +322,27 @@ test('the fused canvas follows raw depth, segmentation, palette and stream valid
   assert.equal($('#scene-mask').dataset.frameId,'unconfirmed');
   assert.equal(fusedPixels[64],0);
   await scene.update('unconfirmed','replacement-camera');
-  assert.equal(fusedPixels[64],70);
+  assert.equal(fusedPixels[64],86);
+
+  const frozen = fusedPixels.slice();
+  view.showDepth({stereo_status:'waiting_for_pair',depth_rig:'left/right'},null,false);
+  assert.equal($('#fused-map').hidden,false);
+  assert.match($('#fused-status').textContent,/Holding last fused frame · waiting for depth/);
+  scene.clear();
+  assert.deepEqual(fusedPixels,frozen);
+  view.showDepth(snapshot,image,false);
+  assert.equal($('#fused-map').hidden,false);
+  assert.deepEqual(fusedPixels,frozen);
 
   fused.setReplay(true);
   assert.equal($('#fused-map').hidden,true);
   assert.match($('#fused-status').textContent,/saved depth/i);
   fused.setReplay(false);
-  view.showDepth(snapshot,image,false);
-  view.showDepth({stereo_status:'waiting_for_pair',depth_rig:'left/right'},null,false);
+  view.showDepth({...snapshot,analysis_expires_ms:Date.now()+25},image,false);
+  t.mock.timers.tick(25);
+  assert.equal($('#fused-map').hidden,false);
+  assert.match($('#fused-status').textContent,/Holding last depth frame · waiting for depth/);
+  fused.resetDepth();
   assert.equal($('#fused-map').hidden,true);
   assert.equal($('#fused-status').textContent,'Waiting for stereo depth.');
   scope.abort();

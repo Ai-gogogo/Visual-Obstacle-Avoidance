@@ -1,22 +1,41 @@
 const minMeasuredGray = 32;
 const maxInterquartileRange = 24;
-const maxSceneLagMs = 1500;
+const maxSceneAgeMs = 1500;
+const maxFrameSkewMs = 350;
+const labelPropagationRounds = 5;
+const maxPlaneRmse = 6;
+const maxLabelDepthDifference = 12;
 
-export function sceneDeadline(scene) {
-  return Math.min(scene.expiresAt, scene.timestamp + maxSceneLagMs);
+function sceneDeadline(scene) {
+  return Math.min(scene.expiresAt, scene.timestamp + maxSceneAgeMs);
 }
 
-export function segmentationSync(depth, scene, now) {
+export function segmentationSync(depth, scene, now, history = []) {
   if (!depth) return {reason: 'Waiting for stereo depth.'};
   if (!Number.isFinite(depth.expiresAt) || now >= depth.expiresAt) return {reason: 'Stereo depth expired.'};
   if (!scene) return {reason: 'Waiting for segmentation.'};
   const deadline = sceneDeadline(scene);
   if (!Number.isFinite(deadline) || now >= deadline) return {reason: 'Segmentation stale.'};
-  const lag = depth.id && depth.id === scene.id ? 0 : depth.timestamp - scene.timestamp;
-  if (!Number.isFinite(lag) || Math.abs(lag) > maxSceneLagMs) {
-    return {reason: 'Depth and segmentation out of sync.'};
+
+  // A delayed depth result can match an earlier mask while Camera A still publishes fresh masks.
+  let closest;
+  let closestLag = Infinity;
+  for (const candidate of [scene, ...history]) {
+    if (!Number.isFinite(candidate.timestamp) || now >= candidate.timestamp + maxSceneAgeMs) continue;
+    if (depth.id && depth.id === candidate.id) {
+      closest = candidate;
+      closestLag = 0;
+      break;
+    }
+    const lag = depth.timestamp - candidate.timestamp;
+    if (Math.abs(lag) < Math.abs(closestLag)) {
+      closest = candidate;
+      closestLag = lag;
+    }
   }
-  return {lag};
+  return Math.abs(closestLag) <= maxFrameSkewMs
+    ? {scene:closest, lag:closestLag, deadline:Math.min(deadline, closest.timestamp + maxSceneAgeMs)}
+    : {reason:'Depth and segmentation out of sync.'};
 }
 
 function alignLabels(scene, width, height) {
@@ -42,70 +61,141 @@ function quantile(histogram, count, fraction) {
   }
 }
 
-export function fuseDepth(gray, width, height, scene) {
-  const result = {depth: gray, filled: null, boundary: null, filledCount: 0};
-  if (!scene) return result;
+function visitNeighbors(index, width, length, visit) {
+  const x = index % width;
+  if (x > 0) visit(index - 1);
+  if (x + 1 < width) visit(index + 1);
+  if (index >= width) visit(index - width);
+  if (index + width < length) visit(index + width);
+}
 
-  const depth = result.depth = gray.slice();
-  const filled = result.filled = new Uint8Array(gray.length);
-  const boundary = result.boundary = new Uint8Array(gray.length);
-  const labels = alignLabels(scene, width, height);
-  const visited = new Uint8Array(gray.length);
-  const queue = new Int32Array(gray.length);
-  const histogram = new Uint32Array(256);
-
-  // Mark only the right/bottom side of each boundary, keeping the contour one pixel thick.
-  for (let i = 0; i < labels.length; i++) {
-    const label = labels[i];
-    if (label >= 150) continue;
-    const left = i % width ? labels[i - 1] : label;
-    const above = i >= width ? labels[i - width] : label;
-    boundary[i] = (left < 150 && left !== label) || (above < 150 && above !== label);
+function restoreLabels(labels, gray, width) {
+  let current = labels;
+  let next = labels.slice();
+  let labelFillCount = 0;
+  let value, agreedLabel, agreeing;
+  function vote(neighbor) {
+    const label = current[neighbor];
+    const depth = gray[neighbor];
+    if (label >= 150 || depth < minMeasuredGray || Math.abs(depth - value) > maxLabelDepthDifference) return;
+    if (agreeing === 0) agreedLabel = label;
+    agreeing++;
+    if (agreedLabel !== label) agreedLabel = 255;
   }
 
-  let tail = 0;
-  function enqueue(index, label) {
-    if (labels[index] === label && !visited[index]) {
-      visited[index] = 1;
-      queue[tail++] = index;
+  for (let round = 0; round < labelPropagationRounds; round++) {
+    let changed = 0;
+    for (let i = 0; i < labels.length; i++) {
+      value = gray[i];
+      if (current[i] !== 255 || value < minMeasuredGray) continue;
+      agreeing = 0;
+      visitNeighbors(i, width, labels.length, vote);
+      if (agreeing < 2 || agreedLabel === 255) continue;
+      next[i] = agreedLabel;
+      changed++;
     }
+    if (!changed) break;
+    labelFillCount += changed;
+    if (current === labels) current = next.slice();
+    else current.set(next);
+  }
+
+  // A zero-depth pixel can borrow a label only when fully enclosed by agreeing measured neighbors.
+  for (let i = width; i < labels.length - width; i++) {
+    if (current[i] !== 255 || gray[i] !== 0 || i % width === 0 || i % width === width - 1) continue;
+    const label = current[i - 1];
+    if (label >= 150 || current[i + 1] !== label || current[i - width] !== label || current[i + width] !== label) continue;
+    const left = gray[i - 1], right = gray[i + 1], above = gray[i - width], below = gray[i + width];
+    const min = Math.min(left, right, above, below);
+    const max = Math.max(left, right, above, below);
+    if (min < minMeasuredGray || max - min > maxLabelDepthDifference) continue;
+    next[i] = label;
+    labelFillCount++;
+  }
+  return {labels:next, labelFillCount};
+}
+
+export function fuseDepth(gray, width, height, scene) {
+  if (!scene) return {depth:gray, filled:null, boundary:null, filledCount:0, labelFillCount:0};
+
+  const depth = gray.slice();
+  const filled = new Uint8Array(gray.length);
+  const boundary = new Uint8Array(gray.length);
+  const {labels, labelFillCount} = restoreLabels(alignLabels(scene, width, height), gray, width);
+  const visited = new Uint8Array(gray.length);
+  const region = new Int32Array(gray.length);
+  const histogram = new Uint32Array(256);
+  let filledCount = 0;
+  let label, regionSize;
+  function enqueue(index) {
+    if (labels[index] !== label || visited[index]) return;
+    visited[index] = 1;
+    region[regionSize++] = index;
   }
 
   for (let i = 0; i < labels.length; i++) {
-    const label = labels[i];
+    label = labels[i];
     if (label >= 150 || visited[i]) continue;
     histogram.fill(0);
-    let measured = 0;
-    let holes = 0;
-    tail = 0;
-    enqueue(i, label);
-    for (let head = 0; head < tail; head++) {
-      const index = queue[head];
-      const value = gray[index];
-      if (value >= minMeasuredGray) {
-        histogram[value]++;
-        measured++;
-      } else if (value === 0) {
+    let holes = 0, count = 0, min = 255, max = 0;
+    let sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, szz = 0;
+    regionSize = 0;
+    enqueue(i);
+    for (let head = 0; head < regionSize; head++) {
+      const index = region[head];
+      const z = gray[index];
+      if (z >= minMeasuredGray) {
+        histogram[z]++;
+        count++;
+        min = Math.min(min, z);
+        max = Math.max(max, z);
+        const x = index % width, y = Math.floor(index / width);
+        sx += x; sy += y; sz += z;
+        sxx += x * x; syy += y * y; sxy += x * y;
+        sxz += x * z; syz += y * z; szz += z * z;
+      } else if (z === 0) {
         holes++;
       }
-      const x = index % width;
-      if (x > 0) enqueue(index - 1, label);
-      if (x + 1 < width) enqueue(index + 1, label);
-      if (index >= width) enqueue(index - width, label);
-      if (index + width < gray.length) enqueue(index + width, label);
+      visitNeighbors(index, width, gray.length, enqueue);
     }
-    if (!holes || measured < 16 || measured * 100 < tail * 15) continue;
-    if (quantile(histogram, measured, 0.75) - quantile(histogram, measured, 0.25) > maxInterquartileRange) continue;
-    const median = Math.round(quantile(histogram, measured, 0.5));
-    for (let pixel = 0; pixel < tail; pixel++) {
-      const index = queue[pixel];
+    if (!holes || count < 16 || count * 100 < regionSize * 15) continue;
+    if (quantile(histogram, count, 0.75) - quantile(histogram, count, 0.25) > maxInterquartileRange) continue;
+
+    // Centering eliminates the intercept from the 3×3 normal equations.
+    const meanX = sx / count, meanY = sy / count, meanZ = sz / count;
+    const xx = sxx - sx * meanX, yy = syy - sy * meanY, xy = sxy - sx * meanY;
+    const xz = sxz - sx * meanZ, yz = syz - sy * meanZ, zz = szz - sz * meanZ;
+    const determinant = xx * yy - xy * xy;
+    let a = 0, b = 0, c = meanZ;
+    if (determinant > 1e-6) {
+      a = (xz * yy - yz * xy) / determinant;
+      b = (yz * xx - xz * xy) / determinant;
+      c = meanZ - a * meanX - b * meanY;
+    }
+    if (determinant <= 1e-6 || (zz - a * xz - b * yz) / count > maxPlaneRmse ** 2) {
+      a = b = 0;
+      c = quantile(histogram, count, 0.5);
+    }
+    for (let pixel = 0; pixel < regionSize; pixel++) {
+      const index = region[pixel];
       if (gray[index] !== 0) continue;
-      depth[index] = median;
+      const value = a * (index % width) + b * Math.floor(index / width) + c;
+      depth[index] = Math.round(Math.min(max, Math.max(min, value)));
       filled[index] = 1;
     }
-    result.filledCount += holes;
+    filledCount += holes;
   }
-  return result;
+
+  function hasEdge(index, neighbor) {
+    return labels[neighbor] < 150 && labels[neighbor] !== labels[index] &&
+      depth[neighbor] >= minMeasuredGray && Math.abs(depth[index] - depth[neighbor]) > maxLabelDepthDifference;
+  }
+  // Mark only the right/bottom side of a confirmed depth edge.
+  for (let i = 0; i < labels.length; i++) {
+    if (labels[i] >= 150 || depth[i] < minMeasuredGray) continue;
+    boundary[i] = (i % width !== 0 && hasEdge(i, i - 1)) || (i >= width && hasEdge(i, i - width));
+  }
+  return {depth, filled, boundary, filledCount, labels, labelFillCount};
 }
 
 export function paintFusedDepth({depth, filled, boundary}, rgba, palette) {
@@ -113,7 +203,7 @@ export function paintFusedDepth({depth, filled, boundary}, rgba, palette) {
     const gray = depth[i];
     const color = gray * 3;
     const target = i * 4;
-    const brightness = (filled?.[i] ? 0.7 : 1) * (boundary?.[i] ? 0.82 : 1);
+    const brightness = (filled?.[i] ? 0.86 : 1) * (boundary?.[i] ? 0.90 : 1);
     rgba[target] = (palette ? palette[color] : gray) * brightness;
     rgba[target + 1] = (palette ? palette[color + 1] : gray) * brightness;
     rgba[target + 2] = (palette ? palette[color + 2] : gray) * brightness;

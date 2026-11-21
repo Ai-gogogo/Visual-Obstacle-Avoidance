@@ -72,7 +72,10 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
         return;
       }
       if (response.status !== 200) {
-        if (feed.side === 'A' && (response.status === 204 || response.status === 401)) scene.clear();
+        if ((feed.side === 'A' && response.status === 204) || response.status === 401) {
+          fused.resetDepth();
+          scene.clear();
+        }
         if (response.status === 401) session.invalidate(requestToken);
         setFeed(feed,false,response.status === 401 ? 'Session expired. Pair the phone again.' : undefined);
         return;
@@ -85,7 +88,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
       const [left, right] = snapshot.depth_rig?.split('/') ?? [];
       if (feed.side === 'A') {
         if (left !== cameraAStream) {
-          fused.setDepth(null);
+          fused.resetDepth();
           cameraAStream = left;
         }
         scene.update(sceneId, left);
@@ -159,13 +162,13 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
 
   function refreshPolling() {
     const version = ++pollVersion;
-    if (sampleMode || !isMonitor()) return;
+    if (sampleMode || !isMonitor()) { fused.resetDepth(); return; }
     feeds.forEach(feed => setFeed(feed,false));
-    if (!session.token) { scene.clear(); return; }
+    if (!session.token) { fused.resetDepth(); scene.clear(); return; }
     async function poll(feed) {
       if (version !== pollVersion) return;
       if (!session.token) {
-        if (feed.side === 'A') scene.clear();
+        if (feed.side === 'A') { fused.resetDepth(); scene.clear(); }
         setFeed(feed,false,'Pair the phone again.');
         return;
       }
@@ -178,7 +181,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   function renderMode(demo) {
     onModeChange();
     sampleMode = demo;
-    if (demo) scene.clear();
+    if (demo) { fused.resetDepth(); scene.clear(); }
     $('#camera-feeds').toggleAttribute('data-live', !demo);
     $('#pixel-preview').hidden = demo;
     $('#mode').textContent = demo ? 'Show live cameras' : 'Show sample feeds';
@@ -255,7 +258,7 @@ export function createPerceptionController({$, scope, root, session, isMonitor, 
   VisionPerceptionView.renderDetections(sampleMode, feeds);
   return {refreshPolling, stopPolling() {
     ++pollVersion;
-    fused.setDepth(null);
+    fused.resetDepth();
     scene.clear();
     feeds.forEach(feed => feed.rtc.update(false));
   }, paired() { if (sampleMode) renderMode(false); else refreshPolling(); }};
