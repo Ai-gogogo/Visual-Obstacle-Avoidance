@@ -146,7 +146,7 @@ The `+cu128` tag is required; otherwise pip keeps an installed CPU wheel.
 python -m pip install --force-reinstall --no-deps "torch==2.9.0+cu128" "torchvision==0.24.0+cu128" --index-url https://download.pytorch.org/whl/cu128
 ```
 
-StereoSGBM, optical flow and the OpenCV face models remain on CPU with the pip OpenCV build.
+StereoSGBM, optical flow and the OpenCV face models remain on CPU with the pip OpenCV build. For the road-edge SegFormer, replace `onnxruntime` with `onnxruntime-gpu==1.23.2` (CUDA 12); it reuses the CUDA and cuDNN libraries of the CUDA torch build and falls back to CPU otherwise. Measured on an RTX 4060: about 20 ms instead of 159 ms per frame, including resizing.
 
 ## Obstacle risk
 
