@@ -359,11 +359,14 @@ class CameraWorker:
     def encode_plane_overlay(self, depth, camera, plane, candidate):
         """Encode only when requested, using the same Camera A alignment as the depth map."""
         heights = height_above_plane(depth, camera, plane)
-        x = np.arange(depth.shape[1])
-        training = candidate & ((x < .44 * depth.shape[1]) | (x >= .56 * depth.shape[1]))
+        width = depth.shape[1]
+        x = np.arange(width)
+        held = (x >= .44 * width) & (x < .56 * width)
         tolerance = self.plane.fit.inlier_tol_m
-        inliers = training & (np.abs(heights) <= tolerance)
-        raised = heights > max(tolerance, plane.holdout_p90_m)
+        ground_tolerance = np.where(held, self.plane.fit.holdout_p90_max_m, tolerance)
+        inliers = candidate & (np.abs(heights) <= ground_tolerance)
+        min_raised = max(self.plane.min_height_m, tolerance, plane.holdout_p90_m)
+        raised = (heights >= min_raised) & (heights <= 2.0) & ~inliers
         scale = min(1, 240 / max(depth.shape))
         masks = [cv2.resize(mask.astype(np.uint8), None, fx=scale, fy=scale,
                             interpolation=cv2.INTER_NEAREST).astype(bool) for mask in (inliers, raised)]

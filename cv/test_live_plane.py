@@ -208,3 +208,21 @@ class LivePlaneTests(unittest.TestCase):
         worker.apply_support_plane(rejected, np.full_like(depth, np.nan), candidate, overlay=True)
         self.assertFalse(rejected["stereo"]["plane"]["validated"])
         self.assertNotIn("plane_overlay", rejected["stereo"])
+
+    def test_debug_overlay_limits_raised_height_and_colors_held_ground(self):
+        worker = CameraWorker("http://local", None, Mock(), plane=PlaneObstacles())
+        plane = SimpleNamespace(holdout_p90_m=.02)
+        heights = np.full((8, 100), np.nan)
+        candidate = np.ones(heights.shape, dtype=bool)
+        heights[2, 10:14] = [.04, .05, 2.0, 2.01]
+        heights[4, 49:52] = [.02, .03, .02]
+        candidate[4, 51] = False
+
+        with patch("live_camera.height_above_plane", return_value=heights):
+            encoded = worker.encode_plane_overlay(np.empty_like(heights), None, plane, candidate)
+        pixels = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), np.uint8), cv2.IMREAD_UNCHANGED)
+        clear = (0, 0, 0, 0)
+        orange = (0, 135, 255, 165)
+        green = (0, 220, 70, 120)
+        np.testing.assert_array_equal(pixels[2, 10:14], [clear, orange, orange, clear])
+        np.testing.assert_array_equal(pixels[4, 49:52], [green, clear, clear])
